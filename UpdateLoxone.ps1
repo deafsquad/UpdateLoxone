@@ -1522,8 +1522,8 @@ function Watch-And-Move-MonitorLogs {
         [switch]$CreateTestFile # New parameter
     )
 
-    Write-LogMessage "Starting to watch for new logs in '$SourceLogDir' for $TimeoutMinutes minutes." -Level "INFO"
-    Write-LogMessage "New logs will be moved to '$DestinationLogDir'.\" -Level "INFO"
+    Write-LogMessage "Starting to watch for new logs in '$SourceLogDir' for $TimeoutMinutes minutes (Polling Method)." -Level "INFO"
+    Write-LogMessage "New logs will be moved to '$DestinationLogDir'." -Level "INFO" # Corrected trailing backslash
 
     if (-not (Test-Path $SourceLogDir)) {
         Write-LogMessage "Source log directory '$SourceLogDir' does not exist. Cannot watch for logs." -Level "WARN"
@@ -1541,6 +1541,7 @@ function Watch-And-Move-MonitorLogs {
         Write-LogMessage "Error creating destination directory '$DestinationLogDir': $($_.Exception.Message)" -Level "ERROR"
         return $false # Cannot proceed without destination
     }
+    
     # Ensure any previous test file in destination is removed
     $testFileName = "_TestMonitorFile.log"
     $destTestFilePath = Join-Path -Path $DestinationLogDir -ChildPath $testFileName
@@ -1549,96 +1550,101 @@ function Watch-And-Move-MonitorLogs {
         Write-DebugLog "Removed existing test file from destination: $destTestFilePath"
     }
 
-
     $timeout = New-TimeSpan -Minutes $TimeoutMinutes
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $watchStartTime = Get-Date # Capture start time for comparison
-    # $existingFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" | Select-Object -ExpandProperty FullName # No longer needed
-
-    Write-DebugLog "Initial log files found: $($existingFiles.Count)" # This will show 0 now
     $testFileCreated = $false # Flag to create test file only once
-    # $testFileName = "_TestMonitorFile.log" # Defined earlier
 
-while ($stopwatch.Elapsed -lt $timeout) {
-    # Create test file after a short delay if requested
-    if ($CreateTestFile -and (-not $testFileCreated) -and $stopwatch.Elapsed.TotalSeconds -ge 5) {
-        $testFilePath = Join-Path -Path $SourceLogDir -ChildPath $testFileName
-        try {
-            Set-Content -Path $testFilePath -Value "This is a test file created by UpdateLoxone.ps1 at $(Get-Date)" -Encoding UTF8 -Force -ErrorAction Stop
-            Write-LogMessage "Created test file: $testFilePath" -Level "INFO"
-            $testFileCreated = $true
-        } catch {
-            Write-LogMessage "Failed to create test file '$testFilePath': $($_.Exception.Message)" -Level "ERROR"
-            # Don't stop the watch, maybe permissions change or real file appears
-        }
-    }
+    Write-DebugLog "Polling for new log files..."
 
-    # Check for Ctrl+C attempt
-    if ($Host.UI.RawUI.KeyAvailable) {
-        $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-        # Check for Ctrl+C (Character 'c' with Control key modifier)
-        if ($key.Character -eq 'c' -and $key.Control) {
-            Write-LogMessage "Ctrl+C detected during log watch loop. Setting interruption flag." -Level "WARN"
-            $global:ScriptInterrupted = $true
-            $stopwatch.Stop() # Stop the timer
-            return $false # Exit the watch function, indicating interruption/failure
-        }
-    }
-
-    try { # Inner try block for file operations
-        # Get current files, handle potential access errors gracefully
-        try {
-             $currentFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" -ErrorAction Stop
-        } catch {
-             Write-LogMessage "Error accessing source log directory '$SourceLogDir' during check: $($_.Exception.Message)" -Level "WARN"
-             $currentFiles = @() # Treat as no files found on error
-        }
-        # Detect files modified *after* the watch started
-        $newOrUpdatedFiles = $currentFiles | Where-Object { $_.LastWriteTime -gt $watchStartTime }
-
-        if ($newOrUpdatedFiles) {
-            Write-LogMessage "New or updated log file(s) detected since watch started." -Level "INFO"
-            # Removed unused $testFileMoved flag
-            foreach ($file in $newOrUpdatedFiles) { # Corrected variable name
-                # If in test mode and this is the test file, just log detection and exit successfully
-                if ($CreateTestFile -and $file.Name -eq $testFileName) {
-                    Write-LogMessage "Test file '$($file.Name)' detected successfully." -Level "INFO"
-                    $stopwatch.Stop()
-                    Write-LogMessage "Finished watching for logs after detecting test file." -Level "INFO"
-                    return $true # Indicate test success
-                }
-
-                # Otherwise (not test file or not in test mode), proceed with copy/remove
-                $destinationFile = Join-Path -Path $DestinationLogDir -ChildPath $file.Name
-                try {
-                    # Use Copy-Item then Remove-Item instead of Move-Item
-                    Copy-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
-                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop # Delete source after successful copy
-                    Write-LogMessage "Copied and removed log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
-                }
-                catch {
-                    Write-LogMessage "Error copying/removing log file '$($file.FullName)': $($_.Exception.Message)" -Level "ERROR"
-                    # Continue trying to move other files if one fails
-                }
-            }
-            # If the loop finished without returning (meaning test file wasn't the one moved, or not in test mode)
-            # Stop after processing the first batch of new/updated files found (unless it was the test file, which returned earlier)
-            if ($newOrUpdatedFiles.Count -gt 0) { # Corrected variable name check
-                 $stopwatch.Stop()
-                 Write-LogMessage "Finished watching for logs after processing first batch of new/updated file(s)." -Level "INFO"
-                 return $true # Indicate success (found files)
+    while ($stopwatch.Elapsed -lt $timeout) {
+        # Create test file after a short delay if requested
+        if ($CreateTestFile -and (-not $testFileCreated) -and $stopwatch.Elapsed.TotalSeconds -ge 5) {
+            $testFilePath = Join-Path -Path $SourceLogDir -ChildPath $testFileName
+            try {
+                Set-Content -Path $testFilePath -Value "This is a test file created by UpdateLoxone.ps1 at $(Get-Date)" -Encoding UTF8 -Force -ErrorAction Stop
+                Write-LogMessage "Created test file: $testFilePath" -Level "INFO"
+                $testFileCreated = $true
+            } catch {
+                Write-LogMessage "Failed to create test file '$testFilePath': $($_.Exception.Message)" -Level "ERROR"
+                # Don't stop the watch, maybe permissions change or real file appears
             }
         }
-    } catch { # Inner catch block for file operation errors
-         Write-LogMessage "CRITICAL ERROR during log watch file operations: $($_.Exception.Message). Stopping watch." -Level "ERROR"
-         $stopwatch.Stop()
-         return $false # Indicate failure
-    }
 
-    # Wait before checking again (reduced sleep to check for keys more often)
-    Start-Sleep -Seconds 5
-    Write-DebugLog "Still watching... Elapsed: $($stopwatch.Elapsed.ToString('hh\:mm\:ss'))"
-}
+        # Check for Ctrl+C attempt (less reliable in loops with sleep)
+        if ($Host.UI.RawUI.KeyAvailable) {
+            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            if ($key.Character -eq 'c' -and $key.Control) {
+                Write-LogMessage "Ctrl+C detected during log watch loop. Setting interruption flag." -Level "WARN"
+                $global:ScriptInterrupted = $true
+                $stopwatch.Stop() # Stop the timer
+                return $false # Exit the watch function, indicating interruption/failure
+            }
+        }
+
+        try { # Inner try block for file operations
+            # Get current files, handle potential access errors gracefully
+            try {
+                 $currentFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" -ErrorAction Stop
+            } catch {
+                 Write-LogMessage "Error accessing source log directory '$SourceLogDir' during check: $($_.Exception.Message)" -Level "WARN"
+                 $currentFiles = @() # Treat as no files found on error
+            }
+            
+            # Detect files modified *after* the watch started
+            Write-DebugLog "Comparing file LastWriteTime against WatchStartTime: $watchStartTime"
+            $newOrUpdatedFiles = $currentFiles | Where-Object { $_.LastWriteTime -ge $watchStartTime }
+            if ($newOrUpdatedFiles) { Write-DebugLog "Found $($newOrUpdatedFiles.Count) new/updated files."} else { Write-DebugLog "No new/updated files found based on timestamp."}
+
+
+            if ($newOrUpdatedFiles) {
+                Write-LogMessage "New or updated log file(s) detected since watch started." -Level "INFO"
+                
+                foreach ($file in $newOrUpdatedFiles) {
+                    # If in test mode and this is the test file, just log detection and exit successfully
+                    if ($CreateTestFile -and $file.Name -eq $testFileName) {
+                        Write-LogMessage "Test file '$($file.Name)' detected successfully." -Level "INFO"
+                        $stopwatch.Stop()
+                        Write-LogMessage "Finished watching for logs after detecting test file." -Level "INFO"
+                        return $true # Indicate test success
+                    }
+
+                    # Otherwise (not test file or not in test mode), proceed with copy/remove
+                    $destinationFile = Join-Path -Path $DestinationLogDir -ChildPath $file.Name
+                    try {
+                        # Explicitly remove destination file before moving, just in case -Force isn't enough
+                        if (Test-Path $destinationFile) {
+                             Remove-Item -Path $destinationFile -Force -ErrorAction SilentlyContinue
+                             Write-DebugLog "Preemptively removed existing destination file: $destinationFile"
+                        }
+                        # Use Copy-Item then Remove-Item instead of Move-Item
+                        Copy-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
+                        Remove-Item -Path $file.FullName -Force -ErrorAction Stop # Delete source after successful copy
+                        Write-LogMessage "Copied and removed log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
+                    }
+                    catch {
+                        Write-LogMessage "Error copying/removing log file '$($file.FullName)': $($_.Exception.Message)" -Level "ERROR"
+                        # Continue trying to move other files if one fails
+                    }
+                }
+                # If the loop finished without returning (meaning test file wasn't the one moved, or not in test mode)
+                # Stop after processing the first batch of new/updated files found (unless it was the test file, which returned earlier)
+                if ($newOrUpdatedFiles.Count -gt 0) { # Corrected variable name check
+                     $stopwatch.Stop()
+                     Write-LogMessage "Finished watching for logs after processing first batch of new/updated file(s)." -Level "INFO"
+                     return $true # Indicate success (found files)
+                }
+            }
+        } catch { # Inner catch block for file operation errors
+             Write-LogMessage "CRITICAL ERROR during log watch file operations: $($_.Exception.Message). Stopping watch." -Level "ERROR"
+             $stopwatch.Stop()
+             return $false # Indicate failure
+        }
+
+        # Wait before checking again
+        Start-Sleep -Seconds 5
+        Write-DebugLog "Still watching... Elapsed: $($stopwatch.Elapsed.ToString('hh\:mm\:ss'))"
+    }
 
     # If loop finishes, timeout occurred
     $stopwatch.Stop()
