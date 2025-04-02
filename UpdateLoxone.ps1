@@ -656,8 +656,10 @@ function Set-ConstantVariable { # Changed from Define-ConstantVariable
         Set-Variable -Name $Name -Value $Value -Option Constant -Scope Script
         Write-LogMessage "Constant variable '${Name}' defined." -Level "DEBUG"
     }
-    elseif (-not ($existingVariable.Options -contains 'Constant')) {
-        Remove-Variable -Name $Name -Scope Script
+    # Check if variable exists AND is not already constant before trying to remove/redefine
+    elseif ($existingVariable -and (-not ($existingVariable.Options -contains 'Constant'))) {
+        Write-LogMessage "Variable '${Name}' exists but is not constant. Redefining as constant." -Level "DEBUG"
+        Remove-Variable -Name $Name -Scope Script -Force # Add Force just in case
         Set-Variable -Name $Name -Value $Value -Option Constant -Scope Script
         Write-LogMessage "Variable '${Name}' redefined as constant." -Level "DEBUG"
     }
@@ -1751,10 +1753,16 @@ catch {
     Invoke-ScriptErrorHandling $_ # Changed from Handle-ScriptError
 }
 finally {
-   Write-LogMessage "Script execution completed." -Level "INFO"
-    # Only pause if running interactively AND an error occurred:
-    if ((-not (Test-ScheduledTask)) -and $global:ErrorOccurred) {   # Correctly uses $global:ErrorOccurred
-        Read-Host "An error occurred on line $($global:LastErrorLine). Press Enter to exit"
+    if ($global:ErrorOccurred) {
+        Write-LogMessage "Script execution finished with an ERROR on line $global:LastErrorLine." -Level "ERROR"
+        # Only pause if running interactively AND an error occurred:
+        if (-not (Test-ScheduledTask)) {
+            Read-Host "An error occurred on line $($global:LastErrorLine). Press Enter to exit"
+        }
+    } else {
+        # Check if script was interrupted (Ctrl+C often sets $LASTEXITCODE non-zero, but not reliably)
+        # A more robust check isn't simple, so we'll just log normal completion.
+        Write-LogMessage "Script execution completed successfully." -Level "INFO"
     }
 }
 #endregion
