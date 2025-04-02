@@ -104,6 +104,8 @@ if ([string]::IsNullOrWhiteSpace($ScriptSaveFolder)) {
 $global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
 $global:ErrorOccurred = $false  # Correctly initialized *OUTSIDE* the try block
 $global:LastErrorLine = "N/A"    # Correctly initialized *OUTSIDE* the try block
+# Removed $global:ScriptInterrupted flag
+
 
 #region Log Rotation
 function Invoke-LogFileRotation {
@@ -646,27 +648,54 @@ function Get-RedactedPassword { # Changed from Redact-Password to an approved ve
     return $InputString -replace ':\w+@', ':********@'
 }
 #endregion
-function Set-ConstantVariable { # Changed from Define-ConstantVariable
+function Set-ConstantVariable {
     param(
         [string]$Name,
         [object]$Value
     )
-    $existingVariable = Get-Variable -Scope Script -ErrorAction SilentlyContinue
-    if (-not $existingVariable) {
-        Set-Variable -Name $Name -Value $Value -Option Constant -Scope Script
-        Write-LogMessage "Constant variable '${Name}' defined." -Level "DEBUG"
+    $variablePath = "Variable:Script:$Name"
+    $needsSet = $true # Assume we need to set it
+
+    # Use try/catch around Get-Variable to handle both existence and permissions issues
+    try {
+        $existingVariable = Get-Variable -Name $Name -Scope Script -ErrorAction Stop
+        # Variable exists, check if it's constant
+        if ($existingVariable.Options -contains 'Constant') {
+            Write-LogMessage "Constant variable '${Name}' already exists." -Level "DEBUG"
+            $needsSet = $false
+        } else {
+            # Exists but not constant, remove it
+            Write-LogMessage "Variable '${Name}' exists but is not constant. Removing before setting." -Level "DEBUG"
+            Remove-Variable -Name $Name -Scope Script -Force -ErrorAction SilentlyContinue
+        }
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        # Variable does not exist, which is fine, we need to set it
+        Write-LogMessage "Variable '${Name}' does not exist. Setting as constant." -Level "DEBUG"
+    } catch {
+        # Other error getting variable (e.g., permissions), log warning but proceed to try setting
+        Write-LogMessage "Error checking existing variable '${Name}': $($_.Exception.Message). Attempting to set anyway." -Level "WARN"
     }
-    # Check if variable exists AND is not already constant before trying to remove/redefine
-    elseif ($existingVariable -and (-not ($existingVariable.Options -contains 'Constant'))) {
-        Write-LogMessage "Variable '${Name}' exists but is not constant. Redefining as constant." -Level "DEBUG"
-        Remove-Variable -Name $Name -Scope Script -Force # Add Force just in case
-        Set-Variable -Name $Name -Value $Value -Option Constant -Scope Script
-        Write-LogMessage "Variable '${Name}' redefined as constant." -Level "DEBUG"
-    }
-    else {
-        Write-LogMessage "Constant variable '${Name}' already exists and is constant." -Level "DEBUG"
+
+    # Set the variable if needed
+    if ($needsSet) {
+        try {
+            Set-Variable -Name $Name -Value $Value -Option Constant -Scope Script -ErrorAction Stop
+            Write-LogMessage "Constant variable '${Name}' set." -Level "DEBUG"
+        } catch {
+            Write-LogMessage "Failed to set constant variable '${Name}': $($_.Exception.Message)" -Level "ERROR"
+        }
     }
 }
+
+function Get-RedactedPassword { # Changed from Redact-Password to an approved verb
+    param (
+        [string]$InputString
+    )
+    # This regex matches the pattern :<password>@ in a URL and replaces the password
+    return $InputString -replace ':\w+@', ':********@'
+}
+#endregion
+# Removed duplicate Set-ConstantVariable function definition
 
 Set-ConstantVariable -Name 'NOTIFICATION_TASK_NAME' -Value 'LoxoneUpdateNotificationTask'
 Set-ConstantVariable -Name 'NOTIFICATION_TASK_DESCRIPTION' -Value 'Temporary task to show a notification to the currently logged-in user. Should be manually dismissed.'
@@ -1520,6 +1549,7 @@ try {
     }
     catch{
         $installedExePath = $null
+    # Removed trap statement
         Write-LogMessage "Loxone Config installation not found: $($_.Exception.Message)" -Level "INFO"
     }
 
@@ -1546,7 +1576,7 @@ try {
         # Define potential source and destination log directories
         $userDocuments = [Environment]::GetFolderPath('MyDocuments')
         $userMonitorLogDir = Join-Path -Path $userDocuments -ChildPath "Loxone\Loxone Config\Monitor"
-        $systemMonitorLogDir = "C:\Windows\SysWOW64\config\systemprofile\Documents\Loxone\Loxone Config\Monitor" # Corrected path
+        $systemMonitorLogDir = "C:\Windows\SysWOW64\config\systemprofile\Documents\Loxone\Loxone Config\Monitor"
         $monitorDestinationLogDir = Join-Path -Path $ScriptSaveFolder -ChildPath "MonitorLogs"
         $monitorSourceLogDir = $null # Initialize
 
@@ -1554,26 +1584,42 @@ try {
         if (-not ([string]::IsNullOrWhiteSpace($MonitorSourceLogDirectory))) {
             $monitorSourceLogDir = $MonitorSourceLogDirectory
             Write-LogMessage "Using specified Monitor Source Log Directory: $monitorSourceLogDir" -Level "INFO"
-            # If user specified path, we assume they know best and don't need to start/check the process here
         } else {
-            # Default logic: Check if monitor is running, decide path, or start it
+            # Default logic: Check if monitor is running, determine owner, decide path, or start it
             $existingMonitorProcess = Get-Process -Name "loxonemonitor" -ErrorAction SilentlyContinue
 
             if ($existingMonitorProcess) {
-                Write-LogMessage "loxonemonitor.exe is already running (PID: $($existingMonitorProcess.Id)). Determining log path..." -Level "INFO"
-                # Simple check: If script runs as SYSTEM, assume existing monitor does too. Otherwise, assume user.
-                $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-                $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
-                if ($currentUser.User -eq $systemSid) {
-                    $monitorSourceLogDir = $systemMonitorLogDir
-                    # Log the assumption clearly
-                    Write-LogMessage "Script running as SYSTEM. ASSUMING existing monitor is also SYSTEM's. Watching: $monitorSourceLogDir" -Level "INFO"
-                    Write-LogMessage "(Use -MonitorSourceLogDirectory if this assumption is incorrect)" -Level "INFO"
-                } else {
-                    $monitorSourceLogDir = $userMonitorLogDir
-                    # Log the assumption clearly
-                    Write-LogMessage "Script running as User ($($currentUser.Name)). ASSUMING existing monitor is also User's. Watching: $monitorSourceLogDir" -Level "INFO"
-                    Write-LogMessage "(Use -MonitorSourceLogDirectory if this assumption is incorrect)" -Level "INFO"
+                Write-LogMessage "loxonemonitor.exe is already running (PID: $($existingMonitorProcess.Id)). Checking process owner..." -Level "INFO"
+                try {
+                    # Get process owner using CIM
+                    $processCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($existingMonitorProcess.Id)" -ErrorAction Stop
+                    $ownerInfo = $processCim | Invoke-CimMethod -MethodName GetOwner
+                    $processOwner = "$($ownerInfo.Domain)\$($ownerInfo.User)"
+                    Write-LogMessage "Detected owner of running loxonemonitor.exe: $processOwner" -Level "INFO"
+
+                    # Check if owner is SYSTEM
+                    if ($processOwner -eq "NT AUTHORITY\SYSTEM") {
+                        $monitorSourceLogDir = $systemMonitorLogDir
+                        Write-LogMessage "Running monitor owned by SYSTEM. Watching SYSTEM log path: $monitorSourceLogDir" -Level "INFO"
+                    } else {
+                        $monitorSourceLogDir = $userMonitorLogDir
+                        Write-LogMessage "Running monitor owned by User ($processOwner). Watching USER log path: $monitorSourceLogDir" -Level "INFO"
+                    }
+                } catch {
+                    # Fallback if GetOwner fails (e.g., permissions) - use assumption logic
+                    $exceptionMessage = $_.Exception.Message
+                    Write-LogMessage "Could not determine owner of running loxonemonitor.exe: $exceptionMessage" -Level "WARN"
+                    Write-LogMessage "Falling back to assumption based on script's execution context." -Level "WARN"
+                    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                    $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+                    if ($currentUser.User -eq $systemSid) {
+                        $monitorSourceLogDir = $systemMonitorLogDir
+                        Write-LogMessage "FALLBACK: Script is running as SYSTEM. Assuming monitor is too. Watching: $monitorSourceLogDir" -Level "WARN"
+                    } else {
+                        $monitorSourceLogDir = $userMonitorLogDir
+                        Write-LogMessage "FALLBACK: Script is running as User ($($currentUser.Name)). Assuming monitor is too. Watching: $monitorSourceLogDir" -Level "WARN"
+                    }
+                    Write-LogMessage "(Use -MonitorSourceLogDirectory parameter to specify the correct path if this fallback is wrong)" -Level "WARN"
                 }
             } else {
                 Write-LogMessage "loxonemonitor.exe not running. Attempting to start it interactively..." -Level "INFO"
@@ -1753,6 +1799,7 @@ catch {
     Invoke-ScriptErrorHandling $_ # Changed from Handle-ScriptError
 }
 finally {
+    # Log error details first if an error was caught by the main try/catch
     if ($global:ErrorOccurred) {
         Write-LogMessage "Script execution finished with an ERROR on line $global:LastErrorLine." -Level "ERROR"
         # Only pause if running interactively AND an error occurred:
@@ -1760,9 +1807,8 @@ finally {
             Read-Host "An error occurred on line $($global:LastErrorLine). Press Enter to exit"
         }
     } else {
-        # Check if script was interrupted (Ctrl+C often sets $LASTEXITCODE non-zero, but not reliably)
-        # A more robust check isn't simple, so we'll just log normal completion.
-        Write-LogMessage "Script execution completed successfully." -Level "INFO"
+         # Log a neutral finished message otherwise (covers success and interruptions)
+         Write-LogMessage "Script execution finished." -Level "INFO"
     }
 }
 #endregion
