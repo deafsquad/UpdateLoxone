@@ -1477,7 +1477,9 @@ function Watch-And-Move-MonitorLogs {
         [Parameter(Mandatory = $true)]
         [string]$DestinationLogDir,
         [Parameter(Mandatory = $true)]
-        [int]$TimeoutMinutes
+        [int]$TimeoutMinutes,
+        [Parameter()]
+        [switch]$CreateTestFile # New parameter
     )
 
     Write-LogMessage "Starting to watch for new logs in '$SourceLogDir' for $TimeoutMinutes minutes." -Level "INFO"
@@ -1505,7 +1507,23 @@ function Watch-And-Move-MonitorLogs {
     $existingFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" | Select-Object -ExpandProperty FullName
 
     Write-DebugLog "Initial log files found: $($existingFiles.Count)"
+    $testFileCreated = $false # Flag to create test file only once
+    $testFileName = "_TestMonitorFile.log"
+
 while ($stopwatch.Elapsed -lt $timeout) {
+    # Create test file after a short delay if requested
+    if ($CreateTestFile -and (-not $testFileCreated) -and $stopwatch.Elapsed.TotalSeconds -ge 5) {
+        $testFilePath = Join-Path -Path $SourceLogDir -ChildPath $testFileName
+        try {
+            Set-Content -Path $testFilePath -Value "This is a test file created by UpdateLoxone.ps1 at $(Get-Date)" -Encoding UTF8 -Force -ErrorAction Stop
+            Write-LogMessage "Created test file: $testFilePath" -Level "INFO"
+            $testFileCreated = $true
+        } catch {
+            Write-LogMessage "Failed to create test file '$testFilePath': $($_.Exception.Message)" -Level "ERROR"
+            # Don't stop the watch, maybe permissions change or real file appears
+        }
+    }
+
     # Check for Ctrl+C attempt
     if ($Host.UI.RawUI.KeyAvailable) {
         $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
@@ -1699,7 +1717,12 @@ try {
 
         # Only proceed if we have a source directory determined (and didn't fail elevation)
         if ($monitorSourceLogDir) {
-             Watch-And-Move-MonitorLogs -SourceLogDir $monitorSourceLogDir -DestinationLogDir $monitorDestinationLogDir -TimeoutMinutes $MonitorLogWatchTimeoutMinutes
+             $watchResult = Watch-And-Move-MonitorLogs -SourceLogDir $monitorSourceLogDir -DestinationLogDir $monitorDestinationLogDir -TimeoutMinutes $MonitorLogWatchTimeoutMinutes -CreateTestFile
+             if ($watchResult) {
+                 Write-LogMessage "Log watch completed successfully (likely found test file)." -Level "INFO"
+             } else {
+                 Write-LogMessage "Log watch finished without finding test file (or was interrupted/timed out)." -Level "WARN"
+             }
         } else {
              Write-LogMessage "Could not determine or access Monitor Source Log Directory. Skipping log watch." -Level "WARN"
         }
