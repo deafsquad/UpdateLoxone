@@ -14,10 +14,8 @@ param(
     [Parameter()] [int]$MonitorLogWatchTimeoutMinutes = 240,
     [Parameter()] [switch]$TestMonitor = $false,
     [Parameter()] [string]$MonitorSourceLogDirectory = $null, # Optional: Specify custom path for monitor logs
-    [Parameter()] [switch]$TestKill = $false # Pause script for external termination test
-# Removed -TestInterruptLoop parameter
-
-
+    [Parameter()] [switch]$TestKill = $false, # Pause script for external termination test
+    [Parameter()] [switch]$SetupSystemMonitor = $false # Special mode to start monitor as SYSTEM for testing
 )
 
 # Immediately convert parameters to proper Boolean types.
@@ -104,19 +102,13 @@ Write-DebugLog -Message "Script directory determined as: ${scriptDir}"
 if ([string]::IsNullOrWhiteSpace($ScriptSaveFolder)) {
     $ScriptSaveFolder = "$env:USERPROFILE\Scripts"
 }
-# Removed $global:ScriptInterrupted flag
-
 
 # Initialize the global log file path early.
 $global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
-$global:ScriptInterrupted = $false # Flag for Ctrl+C
-
 $global:ErrorOccurred = $false  # Correctly initialized *OUTSIDE* the try block
 $global:LastErrorLine = "N/A"    # Correctly initialized *OUTSIDE* the try block
-# Removed unused global flags
-
-
-# Removed $global:ScriptInterrupted flag
+$global:UacCancelled = $false # Flag for UAC prompt cancellation
+$global:ScriptInterrupted = $false # Flag for Ctrl+C
 
 
 #region Log Rotation
@@ -665,7 +657,7 @@ function Set-ConstantVariable {
         [string]$Name,
         [object]$Value
     )
-    # Removed unused variable $variablePath
+    $variablePath = "Variable:Script:$Name"
     $needsSet = $true # Assume we need to set it
 
     # Use try/catch around Get-Variable to handle both existence and permissions issues
@@ -678,6 +670,7 @@ function Set-ConstantVariable {
         } else {
             # Exists but not constant, remove it
             Write-LogMessage "Variable '${Name}' exists but is not constant. Removing before setting." -Level "DEBUG"
+            # Use -ErrorAction SilentlyContinue to prevent errors if variable doesn't exist in this scope run
             Remove-Variable -Name $Name -Scope Script -Force -ErrorAction SilentlyContinue
         }
     } catch [System.Management.Automation.ItemNotFoundException] {
@@ -698,16 +691,6 @@ function Set-ConstantVariable {
         }
     }
 }
-
-function Get-RedactedPassword { # Changed from Redact-Password to an approved verb
-    param (
-        [string]$InputString
-    )
-    # This regex matches the pattern :<password>@ in a URL and replaces the password
-    return $InputString -replace ':\w+@', ':********@'
-}
-#endregion
-# Removed duplicate Set-ConstantVariable function definition
 
 Set-ConstantVariable -Name 'NOTIFICATION_TASK_NAME' -Value 'LoxoneUpdateNotificationTask'
 Set-ConstantVariable -Name 'NOTIFICATION_TASK_DESCRIPTION' -Value 'Temporary task to show a notification to the currently logged-in user. Should be manually dismissed.'
@@ -1118,22 +1101,57 @@ function Save-ScriptToUserLocation {
 function Invoke-AdminAndCorrectPathCheck { # Changed from Ensure-Admin-And-CorrectPath
     param()
     if ([string]::IsNullOrWhiteSpace($ScriptSaveFolder)) {
-        $ScriptSaveFolder = $global:OriginalScriptSaveFolder
-        if ([string]::IsNullOrWhiteSpace($ScriptSaveFolder)) {
-            $ScriptSaveFolder = "$env:USERPROFILE\Scripts"
-        }
+        # $ScriptSaveFolder should be set globally based on script location at the start
+        # If it's still empty here, something is wrong, but fallback just in case.
+        Write-LogMessage "ScriptSaveFolder is unexpectedly empty in Invoke-AdminAndCorrectPathCheck. Falling back to default." -Level "WARN"
+        $ScriptSaveFolder = "$env:USERPROFILE\Scripts" 
     }
     $targetPath = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.ps1"
     Write-DebugLog -Message "Invoke-AdminAndCorrectPathCheck: targetPath = '${targetPath}'."
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
-        $command = "& { . '$targetPath' -ScriptSaveFolder '$ScriptSaveFolder' -Channel '$Channel' -DebugMode $DebugMode -EnableCRC $EnableCRC -InstallMode '$InstallMode' -CloseApplications $CloseApplications -MaxLogFileSizeMB $MaxLogFileSizeMB -ScheduledTaskIntervalMinutes $ScheduledTaskIntervalMinutes -SkipUpdateIfAnyProcessIsRunning $SkipUpdateIfAnyProcessIsRunning }"
-        Write-DebugLog -Message "Invoke-AdminAndCorrectPathCheck: Command = '$command'."
-        Start-Process -FilePath "PowerShell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $command -Verb RunAs -WindowStyle Normal
-        exit
+        # Construct arguments, ensuring all relevant parameters are passed
+        $relaunchArgsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", """$targetPath""")
+        # Add parameters that were passed to the original script
+        if ($PSBoundParameters.ContainsKey('Channel')) { $relaunchArgsList += "-Channel", """$Channel""" }
+        if ($PSBoundParameters.ContainsKey('DebugMode')) { $relaunchArgsList += "-DebugMode", ('$true' -eq $DebugMode.ToString()) } # Pass boolean correctly
+        if ($PSBoundParameters.ContainsKey('EnableCRC')) { $relaunchArgsList += "-EnableCRC", ('$true' -eq $EnableCRC.ToString()) } # Pass boolean correctly
+        if ($PSBoundParameters.ContainsKey('InstallMode')) { $relaunchArgsList += "-InstallMode", """$InstallMode""" }
+        if ($PSBoundParameters.ContainsKey('CloseApplications')) { $relaunchArgsList += "-CloseApplications", ('$true' -eq $CloseApplications.ToString()) } # Pass boolean correctly
+        if ($PSBoundParameters.ContainsKey('ScriptSaveFolder')) { $relaunchArgsList += "-ScriptSaveFolder", """$ScriptSaveFolder""" }
+        if ($PSBoundParameters.ContainsKey('MaxLogFileSizeMB')) { $relaunchArgsList += "-MaxLogFileSizeMB", $MaxLogFileSizeMB }
+        if ($PSBoundParameters.ContainsKey('ScheduledTaskIntervalMinutes')) { $relaunchArgsList += "-ScheduledTaskIntervalMinutes", $ScheduledTaskIntervalMinutes }
+        if ($PSBoundParameters.ContainsKey('SkipUpdateIfAnyProcessIsRunning')) { $relaunchArgsList += "-SkipUpdateIfAnyProcessIsRunning", ('$true' -eq $SkipUpdateIfAnyProcessIsRunning.ToString()) } # Pass boolean correctly
+        if ($PSBoundParameters.ContainsKey('TestNotifications')) { $relaunchArgsList += "-TestNotifications" }
+        if ($PSBoundParameters.ContainsKey('MonitorLogWatchTimeoutMinutes')) { $relaunchArgsList += "-MonitorLogWatchTimeoutMinutes", $MonitorLogWatchTimeoutMinutes }
+        if ($PSBoundParameters.ContainsKey('TestMonitor')) { $relaunchArgsList += "-TestMonitor" }
+        if ($PSBoundParameters.ContainsKey('MonitorSourceLogDirectory')) { $relaunchArgsList += "-MonitorSourceLogDirectory", """$MonitorSourceLogDirectory""" }
+        if ($PSBoundParameters.ContainsKey('TestKill')) { $relaunchArgsList += "-TestKill" }
+        if ($PSBoundParameters.ContainsKey('SetupSystemMonitor')) { $relaunchArgsList += "-SetupSystemMonitor" }
+        
+        $relaunchArgs = $relaunchArgsList -join " "
+        Write-DebugLog -Message "Invoke-AdminAndCorrectPathCheck: Relaunch Args = '$relaunchArgs'."
+        
+        try {
+             Start-Process -FilePath "PowerShell.exe" -ArgumentList $relaunchArgs -Verb RunAs -WindowStyle Normal -ErrorAction Stop
+             Write-LogMessage "Re-launched script as Admin. Exiting current non-admin instance." -Level "INFO"
+             exit 0 # Exit the non-admin instance successfully
+        } catch {
+             $exceptionMessage = $_.Exception.Message
+             Write-LogMessage "Failed to re-launch script as Admin: $exceptionMessage." -Level "ERROR"
+             # Check if the error indicates UAC cancellation
+             if ($exceptionMessage -like "*The operation was canceled by the user*") {
+                 $global:UacCancelled = $true # Set flag just in case finally still runs
+                 Write-LogMessage "UAC prompt was likely cancelled by the user. Exiting with code 131." -Level "WARN"
+                 exit 131 # Exit immediately with specific code
+             }
+             # Exit with a generic error code if elevation failed for other reasons
+             exit 1 
+        }
     }
     Write-LogMessage "Script is running from the target directory and with administrator privileges." -Level "INFO"
 }
+
 
 function Register-ScheduledTaskForScript {
     param(
@@ -1153,7 +1171,23 @@ function Register-ScheduledTaskForScript {
             Write-LogMessage "Scheduled task '$TaskName' does not exist. Creating the task." -Level "INFO"
         }
         $triggerInterval = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $ScheduledTaskIntervalMinutes)
-        $actionArgs = "-NoProfile -ExecutionPolicy Bypass -File ""$ScriptPath"" -Channel ""$Channel"" -DebugMode $DebugMode -EnableCRC $EnableCRC -InstallMode ""$InstallMode"" -CloseApplications $CloseApplications -ScriptSaveFolder ""$ScriptSaveFolder"" -MaxLogFileSizeMB $MaxLogFileSizeMB -ScheduledTaskIntervalMinutes $ScheduledTaskIntervalMinutes -SkipUpdateIfAnyProcessIsRunning $SkipUpdateIfAnyProcessIsRunning"
+        # Construct arguments for the scheduled task, ensuring boolean switches are handled correctly
+        $actionArgsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", """$ScriptPath""")
+        if ($Channel) { $actionArgsList += "-Channel", """$Channel""" }
+        # Pass boolean parameters explicitly as $true/$false for clarity in task definition
+        if ($DebugMode) { $actionArgsList += "-DebugMode", "`$true" } else { $actionArgsList += "-DebugMode", "`$false" }
+        if ($EnableCRC) { $actionArgsList += "-EnableCRC", "`$true" } else { $actionArgsList += "-EnableCRC", "`$false" }
+        if ($InstallMode) { $actionArgsList += "-InstallMode", """$InstallMode""" }
+        if ($CloseApplications) { $actionArgsList += "-CloseApplications", "`$true" } else { $actionArgsList += "-CloseApplications", "`$false" }
+        if ($ScriptSaveFolder) { $actionArgsList += "-ScriptSaveFolder", """$ScriptSaveFolder""" }
+        if ($MaxLogFileSizeMB) { $actionArgsList += "-MaxLogFileSizeMB", $MaxLogFileSizeMB }
+        if ($ScheduledTaskIntervalMinutes) { $actionArgsList += "-ScheduledTaskIntervalMinutes", $ScheduledTaskIntervalMinutes }
+        if ($SkipUpdateIfAnyProcessIsRunning) { $actionArgsList += "-SkipUpdateIfAnyProcessIsRunning", "`$true" } else { $actionArgsList += "-SkipUpdateIfAnyProcessIsRunning", "`$false" }
+        # Do not pass test switches to the scheduled task
+        
+        $actionArgs = $actionArgsList -join " "
+        Write-DebugLog -Message "Scheduled Task Action Args: $actionArgs"
+
         $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument $actionArgs
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -WakeToRun:$false
         Write-LogMessage "Registering scheduled task '$TaskName' with detailed parameters." -Level "DEBUG"
@@ -1196,12 +1230,14 @@ function Invoke-FileDownloadWithProgress { # Changed from Download-FileWithProgr
         Write-LogMessage "Attempting to download to path: ${DestinationPath}" -Level "DEBUG"
         if (Test-Path $DestinationPath) {
             $existingFileSize = (Get-Item $DestinationPath).Length
-            if ($existingFileSize -ne $expectedFilesize) {
+            # Need $expectedFilesize defined in this scope or passed as parameter
+            # Assuming it might be defined globally or passed implicitly for now
+            if ($expectedFilesize -and $existingFileSize -ne $expectedFilesize) { 
                 Write-LogMessage "Existing ZIP file size (${existingFileSize} Bytes) does not match expected (${expectedFilesize} Bytes). Removing file to force redownload." -Level "WARN"
                 Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue
             }
             else {
-                Write-LogMessage "ZIP file already exists and size is as expected. Skipping download." -Level "INFO"
+                Write-LogMessage "ZIP file already exists and size is as expected (or expected size unknown). Skipping download." -Level "INFO"
                 return $false
             }
         }
@@ -1222,7 +1258,8 @@ function Invoke-FileDownloadWithProgress { # Changed from Download-FileWithProgr
             if ($totalBytes -gt 0) {
                 $percent = ($totalRead / $totalBytes) * 100
                 $elapsed = (Get-Date) - $startTime
-                $speed = ($totalRead / 1MB) / $elapsed.TotalSeconds
+                $speed = if ($elapsed.TotalSeconds -gt 0) { ($totalRead / 1MB) / $elapsed.TotalSeconds } else { 0 }
+                $remainingBytes = $totalBytes - $totalRead # Calculate remaining bytes
                 $remainingTime = if ($speed -gt 0) { [TimeSpan]::FromSeconds($remainingBytes / ($speed * 1MB)) } else { [TimeSpan]::Zero }
                 if ($percent -ge $lastProgress + 1) {
                     if (-not $isScheduledTask) {
@@ -1255,14 +1292,15 @@ function Invoke-ZipDownloadAndVerification { # Changed from Download-And-Verify-
         [string]$ZipUrl,
         [string]$DestinationPath,
         [string]$ExpectedCRC32,
-        [int64]$ExpectedFilesize,
+        [int64]$ExpectedFilesize, # Made explicit for clarity
         [int]$MaxRetries = 2
     )
     $success = $false
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
         try {
             Write-LogMessage "Starting download of the ZIP file (Attempt ${attempt} of ${MaxRetries})..." -Level "INFO"
-            $zipDownloadResult = Invoke-FileDownloadWithProgress -ZipUrl $ZipUrl -DestinationPath $DestinationPath -Activity "Download ZIP File"
+            # Pass $ExpectedFilesize to the download function
+            $zipDownloadResult = Invoke-FileDownloadWithProgress -ZipUrl $ZipUrl -DestinationPath $DestinationPath -Activity "Download ZIP File" -expectedFilesize $ExpectedFilesize 
             if (-not $zipDownloadResult) {
                 Write-LogMessage "ZIP file already exists. Skipping download." -Level "INFO"
             }
@@ -1357,7 +1395,8 @@ function Find-File {
         [string]$BasePath
     )
     try {
-        $monitorPath = Get-FileRecursive -Path $BasePath -Name "loxonemonitor.exe"
+        # Corrected function call
+        $monitorPath = Get-FileRecursive -Path $BasePath -Name "loxonemonitor.exe" 
         if ($monitorPath) {
             Write-DebugLog -Message "Found loxonemonitor.exe at: $monitorPath"
             return $monitorPath
@@ -1368,7 +1407,8 @@ function Find-File {
         }
     }
     catch {
-        Write-LogMessage "Error in Find-LoxoneMonitor: $($_.Exception.Message)" -Level "ERROR"
+        # Corrected function name in log message
+        Write-LogMessage "Error in Find-File: $($_.Exception.Message)" -Level "ERROR" 
         throw $_
     }
 }
@@ -1515,9 +1555,9 @@ function Watch-And-Move-MonitorLogs {
     $watchStartTime = Get-Date # Capture start time for comparison
     # $existingFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" | Select-Object -ExpandProperty FullName # No longer needed
 
-    Write-DebugLog "Initial log files found: $($existingFiles.Count)"
+    Write-DebugLog "Initial log files found: $($existingFiles.Count)" # This will show 0 now
     $testFileCreated = $false # Flag to create test file only once
-    $testFileName = "_TestMonitorFile.log"
+    # $testFileName = "_TestMonitorFile.log" # Defined earlier
 
 while ($stopwatch.Elapsed -lt $timeout) {
     # Create test file after a short delay if requested
@@ -1571,6 +1611,7 @@ while ($stopwatch.Elapsed -lt $timeout) {
                 # Otherwise (not test file or not in test mode), proceed with copy/remove
                 $destinationFile = Join-Path -Path $DestinationLogDir -ChildPath $file.Name
                 try {
+                    # Use Copy-Item then Remove-Item instead of Move-Item
                     Copy-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
                     Remove-Item -Path $file.FullName -Force -ErrorAction Stop # Delete source after successful copy
                     Write-LogMessage "Copied and removed log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
@@ -1597,9 +1638,7 @@ while ($stopwatch.Elapsed -lt $timeout) {
     # Wait before checking again (reduced sleep to check for keys more often)
     Start-Sleep -Seconds 5
     Write-DebugLog "Still watching... Elapsed: $($stopwatch.Elapsed.ToString('hh\:mm\:ss'))"
-    # Removed trap statement
 }
-# Removed extra closing brace
 
     # If loop finishes, timeout occurred
     $stopwatch.Stop()
@@ -1612,31 +1651,81 @@ while ($stopwatch.Elapsed -lt $timeout) {
 #region Main Script Execution
 Invoke-LogFileRotation -LogPath $global:LogFile
 
-    # Removed TestInterruptLoop logic block and misplaced trap
+    # --- Setup System Monitor Mode --- 
+    if ($SetupSystemMonitor) {
+        Write-LogMessage "Running in Setup System Monitor mode." -Level "INFO"
+        # This mode requires Admin privileges
+        $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) {
+            Write-LogMessage "Setup System Monitor mode requires Administrator privileges. Please re-run from an elevated prompt." -Level "ERROR"
+            exit 1
+        }
+
+        # Find monitor executable
+        # Ensure $installedExePath is determined first (it should be now)
+        $loxoneMonitorExePath = $null
+        # Re-determine installed path here just in case it wasn't done before main try
+        if (-not $installedExePath) {
+             $installedExePath = Get-InstalledApplicationPath -ErrorAction SilentlyContinue
+        }
+        if ($installedExePath) { 
+            $loxoneMonitorExePath = Find-File -BasePath $installedExePath
+        }
+        if (-not $loxoneMonitorExePath) {
+             Write-LogMessage "loxonemonitor.exe not found. Cannot set up SYSTEM process." -Level "ERROR"
+             exit 1
+        }
+
+
+        # Stop existing monitor process (if any)
+        Write-LogMessage "Stopping any existing loxonemonitor.exe process..." -Level "INFO"
+        Stop-Process -Name loxonemonitor -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2 # Give it a moment
+
+        # Create and run a temporary scheduled task as SYSTEM
+        $taskName = "TempStartLoxoneMonitorAsSystem"
+        $action = New-ScheduledTaskAction -Execute $loxoneMonitorExePath
+        $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -RunLevel Highest
+        # Use -Interactive switch if available and desired for visibility, otherwise it runs hidden
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -ExecutionTimeLimit (New-TimeSpan -Minutes 5) 
+        
+        try {
+            Write-LogMessage "Registering temporary task '$taskName' to run monitor as SYSTEM." -Level "INFO"
+            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop
+            Write-LogMessage "Running temporary task '$taskName'." -Level "INFO"
+            Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            Write-LogMessage "Loxone Monitor should now be running as SYSTEM. Waiting a few seconds..." -Level "INFO"
+            Start-Sleep -Seconds 5
+        } catch {
+            Write-LogMessage "Failed to create or run scheduled task '$taskName': $($_.Exception.Message)" -Level "ERROR"
+        } finally {
+            # Clean up the temporary task
+            Write-LogMessage "Unregistering temporary task '$taskName'." -Level "INFO"
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        Write-LogMessage "Setup System Monitor mode finished." -Level "INFO"
+        exit 0 # Exit after setting up the monitor
+    }
 
 #$totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew() # Removed unused variable
 
 try {
+    trap [System.Management.Automation.PipelineStoppedException] {
+        # Set flag and let the exception terminate the script naturally
+        # The finally block should execute during termination.
+        Write-LogMessage "PipelineStoppedException trapped (likely Ctrl+C). Setting interrupt flag." -Level "WARN"
+        $global:ScriptInterrupted = $true
+        # DO NOT use break or continue here
+    }
+
     Write-DebugLog -Message "Beginning main update process."
 
     # --- Check for Existing Installation (Moved Up) ---
-
-    # --- Test Kill Mode --- 
-    if ($TestKill) {
-        Write-LogMessage "Running in Test Kill mode. Pausing indefinitely. Terminate PID $PID externally." -Level "WARN"
-        Read-Host "Script paused for external termination test (PID $PID). Press Enter here AFTER terminating to see if finally block runs (unlikely)"
-        # Script will likely never reach here if terminated forcefully
-        Write-LogMessage "Read-Host completed after pause. This is unexpected if script was killed." -Level "WARN"
-        exit 99 # Use a distinct exit code if it somehow continues
-    }
-
     try {
         $installedExePath = Get-InstalledApplicationPath
     }
     catch{
         $installedExePath = $null
-    # Removed trap statement
-    # Removed trap statement
         Write-LogMessage "Loxone Config installation not found: $($_.Exception.Message)" -Level "INFO"
     }
 
@@ -1654,6 +1743,15 @@ try {
         Write-LogMessage "No existing Loxone Config installation found. Cannot run Monitor test without installation." -Level "WARN" # Updated message
         $normalizedInstalledVersion = ""  # No version to compare
         # We might want to exit here if TestMonitor requires an installation, or let Start-LoxoneMonitor handle the null path
+    }
+
+     # --- Test Kill Mode --- 
+    if ($TestKill) {
+        Write-LogMessage "Running in Test Kill mode. Pausing indefinitely. Terminate PID $PID externally." -Level "WARN"
+        Read-Host "Script paused for external termination test (PID $PID). Press Enter here AFTER terminating to see if finally block runs (unlikely)"
+        # Script will likely never reach here if terminated forcefully
+        Write-LogMessage "Read-Host completed after pause. This is unexpected if script was killed." -Level "WARN"
+        exit 99 # Use a distinct exit code if it somehow continues
     }
 
      # --- Test Monitor Mode ---
@@ -1728,35 +1826,9 @@ try {
             }
         }
 
-        # Check for Admin rights IF we determined we need to watch the SYSTEM path
-        if ($monitorSourceLogDir -eq $systemMonitorLogDir) {
-            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-            if (-not $isAdmin) {
-                Write-LogMessage "Need Admin rights to watch SYSTEM log path. Attempting self-elevation..." -Level "WARN"
-                # Construct arguments for re-launch, ensuring TestMonitor and the determined SYSTEM path are passed
-                # Note: Other parameters passed initially might need to be added here if relevant to TestMonitor
-                $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File ""$PSCommandPath"" -TestMonitor -MonitorSourceLogDirectory ""$systemMonitorLogDir"""
-                if ($DebugMode) { $relaunchArgs += " -DebugMode" } # Preserve DebugMode if set
-                # Add other relevant parameters if needed... e.g., -MonitorLogWatchTimeoutMinutes $MonitorLogWatchTimeoutMinutes
-
-                try {
-                    Start-Process -FilePath "PowerShell.exe" -ArgumentList $relaunchArgs -Verb RunAs -ErrorAction Stop
-                    Write-LogMessage "Re-launched script as Admin. Exiting current non-admin instance." -Level "INFO"
-                    exit 0 # Exit the non-admin instance
-                } catch {
-                     $exceptionMessage = $_.Exception.Message
-                     Write-LogMessage "Failed to re-launch script as Admin: $exceptionMessage. Cannot watch SYSTEM logs." -Level "ERROR"
-                     # Check if the error indicates UAC cancellation
-                     if ($exceptionMessage -like "*The operation was canceled by the user*") {
-                         $global:UacCancelled = $true
-                         Write-LogMessage "UAC prompt was likely cancelled by the user." -Level "WARN"
-                     }
-                     $monitorSourceLogDir = $null # Prevent watching attempt below
-                }
-            } else {
-                 Write-LogMessage "Already running as Admin. Proceeding to watch SYSTEM log path." -Level "INFO"
-            }
-        }
+        # Removed self-elevation logic from TestMonitor mode.
+        # Assumes monitor is already running as correct user (e.g., via -SetupSystemMonitor or manually)
+        # or that the script is being run with appropriate privileges for the detected path.
 
         # Only proceed if we have a source directory determined (and didn't fail elevation)
         if ($monitorSourceLogDir) {
@@ -1927,17 +1999,28 @@ catch {
     Invoke-ScriptErrorHandling $_ # Changed from Handle-ScriptError
 }
 finally {
-    # Log error details first if an error was caught by the main try/catch
+    # Check flags in order of precedence: Interruption > UAC Cancel > Caught Error > Success
     $exitCodeMsg = if ($LASTEXITCODE -ne $null) { "Last Exit Code: $LASTEXITCODE" } else { "Last Exit Code: (Not Set)" }
-    if ($global:ErrorOccurred) {
+
+    if ($global:ScriptInterrupted) {
+         Write-LogMessage "Script execution INTERRUPTED by user (Ctrl+C detected). $exitCodeMsg" -Level "WARN"
+         # Optionally pause if interrupted interactively
+         # if (-not (Test-ScheduledTask)) { Read-Host "Script interrupted. Press Enter to exit" }
+    }
+    elseif ($global:UacCancelled) {
+         Write-LogMessage "Script execution finished after UAC prompt was cancelled. $exitCodeMsg" -Level "WARN"
+         # Optionally pause if cancelled interactively
+         # if (-not (Test-ScheduledTask)) { Read-Host "UAC cancelled. Press Enter to exit" }
+    }
+    elseif ($global:ErrorOccurred) {
         Write-LogMessage "Script execution finished with an ERROR on line $global:LastErrorLine. $exitCodeMsg" -Level "ERROR"
         # Only pause if running interactively AND an error occurred:
         if (-not (Test-ScheduledTask)) {
             Read-Host "An error occurred on line $($global:LastErrorLine). Press Enter to exit"
         }
     } else {
-         # Log a neutral finished message otherwise (covers success and interruptions)
-         Write-LogMessage "Script execution finished. $exitCodeMsg" -Level "INFO"
+         # Log normal completion
+         Write-LogMessage "Script execution finished successfully. $exitCodeMsg" -Level "INFO"
     }
 }
 #endregion
