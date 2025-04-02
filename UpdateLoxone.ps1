@@ -13,7 +13,11 @@ param(
     [Parameter()] [switch]$TestNotifications = $false,
     [Parameter()] [int]$MonitorLogWatchTimeoutMinutes = 240,
     [Parameter()] [switch]$TestMonitor = $false,
-    [Parameter()] [string]$MonitorSourceLogDirectory = $null # Optional: Specify custom path for monitor logs
+    [Parameter()] [string]$MonitorSourceLogDirectory = $null, # Optional: Specify custom path for monitor logs
+    [Parameter()] [switch]$TestKill = $false # Pause script for external termination test
+# Removed -TestInterruptLoop parameter
+
+
 )
 
 # Immediately convert parameters to proper Boolean types.
@@ -84,7 +88,8 @@ function Write-LogMessage {
         "DEBUG" { if ($DebugMode) { Write-Verbose $logEntry } }
         "INFO"  { Write-Host $logEntry -ForegroundColor Green }
         "WARN"  { Write-Warning $logEntry }
-        "ERROR" { Write-Error $logEntry }
+        # Use Write-Warning for ERROR level to avoid script termination by default Write-Error behavior
+        "ERROR" { Write-Warning "ERROR: $Message" } # Prepend ERROR to distinguish from normal warnings
     }
 }
 
@@ -99,11 +104,18 @@ Write-DebugLog -Message "Script directory determined as: ${scriptDir}"
 if ([string]::IsNullOrWhiteSpace($ScriptSaveFolder)) {
     $ScriptSaveFolder = "$env:USERPROFILE\Scripts"
 }
+# Removed $global:ScriptInterrupted flag
+
 
 # Initialize the global log file path early.
 $global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
+$global:ScriptInterrupted = $false # Flag for Ctrl+C
+
 $global:ErrorOccurred = $false  # Correctly initialized *OUTSIDE* the try block
 $global:LastErrorLine = "N/A"    # Correctly initialized *OUTSIDE* the try block
+# Removed unused global flags
+
+
 # Removed $global:ScriptInterrupted flag
 
 
@@ -1493,40 +1505,53 @@ function Watch-And-Move-MonitorLogs {
     $existingFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" | Select-Object -ExpandProperty FullName
 
     Write-DebugLog "Initial log files found: $($existingFiles.Count)"
-
-    while ($stopwatch.Elapsed -lt $timeout) {
-        try { # Add inner try block
-            $currentFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" -ErrorAction Stop # Change to Stop
-            $newFiles = $currentFiles | Where-Object { $existingFiles -notcontains $_.FullName }
-
-            if ($newFiles) {
-                Write-LogMessage "New log file(s) detected." -Level "INFO"
-                foreach ($file in $newFiles) {
-                    $destinationFile = Join-Path -Path $DestinationLogDir -ChildPath $file.Name
-                    try {
-                        Move-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
-                        Write-LogMessage "Moved log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
-                    }
-                    catch {
-                        Write-LogMessage "Error moving log file '$($file.FullName)': $($_.Exception.Message)" -Level "ERROR"
-                        # Continue trying to move other files if one fails
-                    }
-                }
-                # Assuming we stop after finding the first new batch
-                $stopwatch.Stop()
-                Write-LogMessage "Finished watching for logs after finding new file(s)." -Level "INFO" # Corrected trailing \
-                return $true
-            }
-        } catch { # Add inner catch block
-             Write-LogMessage "CRITICAL ERROR during log watch loop: $($_.Exception.Message). Stopping watch." -Level "ERROR"
-             $stopwatch.Stop()
-             return $false # Indicate failure
+while ($stopwatch.Elapsed -lt $timeout) {
+    # Check for Ctrl+C attempt
+    if ($Host.UI.RawUI.KeyAvailable) {
+        $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        # Check for Ctrl+C (Character 'c' with Control key modifier)
+        if ($key.Character -eq 'c' -and $key.Control) {
+            Write-LogMessage "Ctrl+C detected during log watch loop. Setting interruption flag." -Level "WARN"
+            $global:ScriptInterrupted = $true
+            $stopwatch.Stop() # Stop the timer
+            return $false # Exit the watch function, indicating interruption/failure
         }
-
-        # Wait before checking again
-        Start-Sleep -Seconds 15
-        Write-DebugLog "Still watching... Elapsed: $($stopwatch.Elapsed.ToString('hh\:mm\:ss'))"
     }
+
+    try { # Inner try block for file operations
+        $currentFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" -ErrorAction Stop # Change to Stop
+        $newFiles = $currentFiles | Where-Object { $existingFiles -notcontains $_.FullName }
+
+        if ($newFiles) {
+            Write-LogMessage "New log file(s) detected." -Level "INFO"
+            foreach ($file in $newFiles) {
+                $destinationFile = Join-Path -Path $DestinationLogDir -ChildPath $file.Name
+                try {
+                    Move-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
+                    Write-LogMessage "Moved log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
+                }
+                catch {
+                    Write-LogMessage "Error moving log file '$($file.FullName)': $($_.Exception.Message)" -Level "ERROR"
+                    # Continue trying to move other files if one fails
+                }
+            }
+            # Assuming we stop after finding the first new batch
+            $stopwatch.Stop()
+            Write-LogMessage "Finished watching for logs after finding new file(s)." -Level "INFO"
+            return $true # Indicate success (found files)
+        }
+    } catch { # Inner catch block for file operation errors
+         Write-LogMessage "CRITICAL ERROR during log watch file operations: $($_.Exception.Message). Stopping watch." -Level "ERROR"
+         $stopwatch.Stop()
+         return $false # Indicate failure
+    }
+
+    # Wait before checking again (reduced sleep to check for keys more often)
+    Start-Sleep -Seconds 5
+    Write-DebugLog "Still watching... Elapsed: $($stopwatch.Elapsed.ToString('hh\:mm\:ss'))"
+    # Removed trap statement
+}
+# Removed extra closing brace
 
     # If loop finishes, timeout occurred
     $stopwatch.Stop()
@@ -1538,17 +1563,31 @@ function Watch-And-Move-MonitorLogs {
 
 #region Main Script Execution
 Invoke-LogFileRotation -LogPath $global:LogFile
+
+    # Removed TestInterruptLoop logic block and misplaced trap
+
 #$totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew() # Removed unused variable
 
 try {
     Write-DebugLog -Message "Beginning main update process."
 
     # --- Check for Existing Installation (Moved Up) ---
+
+    # --- Test Kill Mode --- 
+    if ($TestKill) {
+        Write-LogMessage "Running in Test Kill mode. Pausing indefinitely. Terminate PID $PID externally." -Level "WARN"
+        Read-Host "Script paused for external termination test (PID $PID). Press Enter here AFTER terminating to see if finally block runs (unlikely)"
+        # Script will likely never reach here if terminated forcefully
+        Write-LogMessage "Read-Host completed after pause. This is unexpected if script was killed." -Level "WARN"
+        exit 99 # Use a distinct exit code if it somehow continues
+    }
+
     try {
         $installedExePath = Get-InstalledApplicationPath
     }
     catch{
         $installedExePath = $null
+    # Removed trap statement
     # Removed trap statement
         Write-LogMessage "Loxone Config installation not found: $($_.Exception.Message)" -Level "INFO"
     }
@@ -1644,7 +1683,13 @@ try {
                     Write-LogMessage "Re-launched script as Admin. Exiting current non-admin instance." -Level "INFO"
                     exit 0 # Exit the non-admin instance
                 } catch {
-                     Write-LogMessage "Failed to re-launch script as Admin: $($_.Exception.Message). Cannot watch SYSTEM logs." -Level "ERROR"
+                     $exceptionMessage = $_.Exception.Message
+                     Write-LogMessage "Failed to re-launch script as Admin: $exceptionMessage. Cannot watch SYSTEM logs." -Level "ERROR"
+                     # Check if the error indicates UAC cancellation
+                     if ($exceptionMessage -like "*The operation was canceled by the user*") {
+                         $global:UacCancelled = $true
+                         Write-LogMessage "UAC prompt was likely cancelled by the user." -Level "WARN"
+                     }
                      $monitorSourceLogDir = $null # Prevent watching attempt below
                 }
             } else {
@@ -1817,15 +1862,16 @@ catch {
 }
 finally {
     # Log error details first if an error was caught by the main try/catch
+    $exitCodeMsg = if ($LASTEXITCODE -ne $null) { "Last Exit Code: $LASTEXITCODE" } else { "Last Exit Code: (Not Set)" }
     if ($global:ErrorOccurred) {
-        Write-LogMessage "Script execution finished with an ERROR on line $global:LastErrorLine. Last Exit Code: $LASTEXITCODE" -Level "ERROR"
+        Write-LogMessage "Script execution finished with an ERROR on line $global:LastErrorLine. $exitCodeMsg" -Level "ERROR"
         # Only pause if running interactively AND an error occurred:
         if (-not (Test-ScheduledTask)) {
             Read-Host "An error occurred on line $($global:LastErrorLine). Press Enter to exit"
         }
     } else {
          # Log a neutral finished message otherwise (covers success and interruptions)
-         Write-LogMessage "Script execution finished. Last Exit Code: $LASTEXITCODE" -Level "INFO"
+         Write-LogMessage "Script execution finished. $exitCodeMsg" -Level "INFO"
     }
 }
 #endregion
