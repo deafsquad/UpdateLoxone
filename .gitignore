@@ -1,0 +1,8 @@
+# Ignore everything by default
+*
+
+# But keep PowerShell script files
+!*.ps1
+
+# Keep this .gitignore file
+!.gitignore
