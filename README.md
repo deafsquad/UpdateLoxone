@@ -26,9 +26,15 @@ This PowerShell script automates the process of checking for, downloading, and i
 *   **Internet Access:** Required to check for updates, download installers, and potentially install BurntToast.
 *   **Network Access:** Required to communicate with Loxone Miniservers for version checks and updates.
 
+## Script Files
+
+*   **`UpdateLoxone.ps1`:** The main script to be executed or scheduled. Handles parameter parsing, update checks, downloads, installation, and calls functions from the utility module.
+*   **`UpdateLoxoneUtils.psm1`:** A PowerShell module containing all the helper functions used by the main script (logging, version checks, network operations, task management, etc.). This file must be present in the same directory as `UpdateLoxone.ps1`.
+*   **`Run-UpdateLoxoneTests.ps1`:** A script for testing the functions within `UpdateLoxoneUtils.psm1`. See "Testing" section below.
+
 ## Configuration Files
 
-*(Place these files in the same directory as the script)*
+*(Place these files in the same directory as the scripts)*
 
 *   **`UpdateLoxoneMSList.txt`:** (Optional) A text file containing the connection URLs for Loxone Miniservers to be updated, one per line.
     *   Format: `http://username:password@ip-address-or-hostname` or `https://username:password@ip-address-or-hostname`.
@@ -56,7 +62,7 @@ This PowerShell script automates the process of checking for, downloading, and i
 
 ## Usage
 
-1.  Place the `UpdateLoxone.ps1` script in a desired location (e.g., `C:\Scripts\UpdateLoxone`). Ensure this location is stable as the scheduled task will reference it.
+1.  Place the `UpdateLoxone.ps1` and `UpdateLoxoneUtils.psm1` scripts together in a desired location (e.g., `C:\Scripts\UpdateLoxone`). Ensure this location is stable as the scheduled task will reference it.
 2.  (Optional) Create `UpdateLoxoneMSList.txt` in the same directory with your Miniserver details, or wait for the script to prompt you on the first interactive run.
 3.  Run the script **once** from an **Administrator PowerShell prompt** to set up the scheduled task:
     ```powershell
@@ -100,3 +106,25 @@ This PowerShell script automates the process of checking for, downloading, and i
 *   The script relies on specific Loxone web endpoints (`update.loxone.com`, `/dev/cfg/version`, `/sps/log/...`) which could change in the future.
 *   Error handling attempts to log details and notify users, but complex failures might still occur. Check `UpdateLoxone.log` for details.
 *   Managing the scheduled task (e.g., changing interval, disabling) can be done via the Windows Task Scheduler (`taskschd.msc`). Find the task named `LoxoneUpdateTask`.
+
+## Testing
+
+A separate script, `Run-UpdateLoxoneTests.ps1`, is provided to test the core functions within the `UpdateLoxoneUtils.psm1` module.
+
+*   **Purpose:** Verify individual function logic in different contexts (normal, simulated task, elevated).
+*   **Usage:**
+    ```powershell
+    # Run all tests (attempts elevation by default)
+    .\Run-UpdateLoxoneTests.ps1
+
+    # Run only tests in the 'Logging' category
+    .\Run-UpdateLoxoneTests.ps1 -TestName Logging
+
+    # Run only a specific function test
+    .\Run-UpdateLoxoneTests.ps1 -TestName Get-RedactedPassword
+
+    # Run all tests but skip the elevated run attempt
+    .\Run-UpdateLoxoneTests.ps1 -SkipElevation
+    ```
+*   The script runs tests non-elevated first, then attempts to re-launch itself elevated (unless `-SkipElevation` is used) to run tests requiring admin rights and re-run others in an elevated context.
+*   A combined summary is displayed in the initial console window after all runs complete.
