@@ -1,0 +1,9 @@
+# Example Miniserver List for UpdateLoxone.ps1
+#
+# Add one Miniserver connection URL per line.
+# The format should be: http://username:password@ip-address-or-hostname
+# or https://username:password@ip-address-or-hostname
+#
+# Example:
+# http://admin:password123@192.168.1.77
+# https://user:securepass@miniserver.local

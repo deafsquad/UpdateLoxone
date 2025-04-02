@@ -754,8 +754,52 @@ function Update-MS {
     Write-LogMessage "Starting Update-MS function..." -Level "INFO"
     Write-DebugLog -Message "Parameters: DesiredVersion='${DesiredVersion}', MSListPath='${MSListPath}', InstalledExePath='${InstalledExePath}', ScriptSaveFolder='${ScriptSaveFolder}'"
     if (-not (Test-Path $MSListPath)) {
-        Write-LogMessage "Miniserver list file not found at path: ${MSListPath}" -Level "ERROR"
-        throw "Miniserver list file not found at ${MSListPath}."
+        Write-LogMessage "Miniserver list file not found at path: ${MSListPath}" -Level "WARN" # Changed level
+
+        if (-not (Test-ScheduledTask)) { # Check if interactive
+            Write-Host "Miniserver list file '$MSListPath' not found." -ForegroundColor Yellow
+            $yes = [System.Management.Automation.Host.ChoiceDescription]::new("&Yes", "Configure the first Miniserver now.")
+            $no = [System.Management.Automation.Host.ChoiceDescription]::new("&No", "Skip Miniserver configuration and updates for this run.")
+            $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
+            $choice = $Host.UI.PromptForChoice("Configure Miniserver?", "Would you like to configure the first Miniserver now?", $options, 1) # Default No
+
+            if ($choice -eq 0) { # User chose Yes
+                $msIP = Read-Host -Prompt "Enter Miniserver IP Address or Hostname"
+                $msUser = Read-Host -Prompt "Enter Miniserver Username"
+                Write-Warning "Storing passwords in plain text in the list file is insecure. Consider alternative access methods if possible."
+                $msPassSecure = Read-Host -Prompt "Enter Miniserver Password" -AsSecureString
+                # Convert SecureString to plain text (INSECURE, but matches file format)
+                $Ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($msPassSecure)
+                $msPassPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($Ptr)
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($Ptr)
+
+                if (-not ([string]::IsNullOrWhiteSpace($msIP)) -and -not ([string]::IsNullOrWhiteSpace($msUser)) -and -not ([string]::IsNullOrWhiteSpace($msPassPlain))) {
+                    # Assuming HTTP for simplicity, user can edit later
+                    $msUrl = "http://${msUser}:${msPassPlain}@${msIP}"
+                    try {
+                        Set-Content -Path $MSListPath -Value $msUrl -Encoding UTF8 -Force
+                        Write-LogMessage "Created Miniserver list file '$MSListPath' with entry: $(Get-RedactedPassword -InputString $msUrl)" -Level "INFO"
+                        Write-Host "Miniserver list file created at '$MSListPath' with the first entry." -ForegroundColor Green
+                        # File now exists, let the rest of the function proceed
+                    } catch {
+                        Write-LogMessage "Failed to create Miniserver list file '$MSListPath': $($_.Exception.Message)" -Level "ERROR"
+                        Write-Warning "Failed to create the file. Miniserver updates will be skipped."
+                        return # Exit function if file creation failed
+                    }
+                } else {
+                    Write-Warning "Invalid input provided. Miniserver configuration skipped."
+                    Write-LogMessage "User skipped Miniserver configuration due to invalid input." -Level "WARN"
+                    return # Exit function
+                }
+            } else { # User chose No or cancelled
+                Write-LogMessage "User chose not to configure Miniserver list. Skipping Miniserver updates." -Level "WARN"
+                Write-Host "Skipping Miniserver updates for this run." -ForegroundColor Yellow
+                return # Exit function
+            }
+        } else { # Running as scheduled task and file not found
+            Write-LogMessage "Running as scheduled task and Miniserver list file not found. Skipping Miniserver updates." -Level "WARN"
+            return # Exit function
+        }
     }
     try {
         $miniserverList = Get-Content -Path $MSListPath | Where-Object { $_ -and $_.Trim() -ne "" }
