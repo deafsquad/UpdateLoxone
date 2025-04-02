@@ -12,7 +12,8 @@ param(
     [Parameter()] [object]$SkipUpdateIfAnyProcessIsRunning = $false,
     [Parameter()] [switch]$TestNotifications = $false,
     [Parameter()] [int]$MonitorLogWatchTimeoutMinutes = 240,
-    [Parameter()] [switch]$TestMonitor = $false
+    [Parameter()] [switch]$TestMonitor = $false,
+    [Parameter()] [string]$MonitorSourceLogDirectory = $null # Optional: Specify custom path for monitor logs
 )
 
 # Immediately convert parameters to proper Boolean types.
@@ -1508,8 +1509,27 @@ try {
     if ($TestMonitor) {
         Write-LogMessage "Running in Test Monitor mode." -Level "INFO"
 
-        # Define the source and destination log directories
-        $monitorSourceLogDir = "C:\\Windows\\SysWOW64\\config\\systemprofile\\Documents\\Loxone\\Loxone Config\\Monitor>"
+        # Determine the source log directory
+        if (-not ([string]::IsNullOrWhiteSpace($MonitorSourceLogDirectory))) {
+            $monitorSourceLogDir = $MonitorSourceLogDirectory
+            Write-LogMessage "Using specified Monitor Source Log Directory: $monitorSourceLogDir" -Level "INFO"
+        } else {
+            # Determine default path based on user context
+            $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+            $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18") # Well-known SID for SYSTEM
+
+            if ($currentUser.User -eq $systemSid) {
+                # Running as SYSTEM (likely scheduled task)
+                $monitorSourceLogDir = "C:\Windows\SysWOW64\config\systemprofile\Documents\Loxone\Loxone Config\Monitor" # Corrected path, removed trailing >
+                Write-LogMessage "Running as SYSTEM, using default Monitor Source Log Directory: $monitorSourceLogDir" -Level "INFO"
+            } else {
+                # Running as interactive user
+                $userDocuments = [Environment]::GetFolderPath('MyDocuments')
+                $monitorSourceLogDir = Join-Path -Path $userDocuments -ChildPath "Loxone\Loxone Config\Monitor"
+                Write-LogMessage "Running as User ($($currentUser.Name)), using default Monitor Source Log Directory: $monitorSourceLogDir" -Level "INFO"
+            }
+        }
+        # Define the destination log directory (remains the same)
         $monitorDestinationLogDir = Join-Path -Path $ScriptSaveFolder -ChildPath "MonitorLogs"
 
         Start-LoxoneMonitor -InstalledExePath $installedExePath -ScriptSaveFolder $ScriptSaveFolder
