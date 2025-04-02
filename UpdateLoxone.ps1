@@ -1589,37 +1589,30 @@ try {
             $existingMonitorProcess = Get-Process -Name "loxonemonitor" -ErrorAction SilentlyContinue
 
             if ($existingMonitorProcess) {
-                Write-LogMessage "loxonemonitor.exe is already running (PID: $($existingMonitorProcess.Id)). Checking process owner..." -Level "INFO"
+                Write-LogMessage "loxonemonitor.exe is already running (PID: $($existingMonitorProcess.Id)). Checking process SessionId..." -Level "INFO"
                 try {
-                    # Get process owner using CIM
+                    # Get process SessionId using CIM (more reliable than GetOwner across contexts)
                     $processCim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($existingMonitorProcess.Id)" -ErrorAction Stop
-                    $ownerInfo = $processCim | Invoke-CimMethod -MethodName GetOwner
-                    $processOwner = "$($ownerInfo.Domain)\$($ownerInfo.User)"
-                    Write-LogMessage "Detected owner of running loxonemonitor.exe: $processOwner" -Level "INFO"
+                    $processSessionId = $processCim.SessionId
+                    Write-LogMessage "Detected SessionId of running loxonemonitor.exe: $processSessionId" -Level "INFO"
 
-                    # Check if owner is SYSTEM
-                    if ($processOwner -eq "NT AUTHORITY\SYSTEM") {
+                    # Session 0 typically indicates SYSTEM or other non-interactive service accounts
+                    if ($processSessionId -eq 0) {
                         $monitorSourceLogDir = $systemMonitorLogDir
-                        Write-LogMessage "Running monitor owned by SYSTEM. Watching SYSTEM log path: $monitorSourceLogDir" -Level "INFO"
+                        Write-LogMessage "Running monitor detected in Session 0 (likely SYSTEM). Watching SYSTEM log path: $monitorSourceLogDir" -Level "INFO"
                     } else {
                         $monitorSourceLogDir = $userMonitorLogDir
-                        Write-LogMessage "Running monitor owned by User ($processOwner). Watching USER log path: $monitorSourceLogDir" -Level "INFO"
+                        Write-LogMessage "Running monitor detected in Session $processSessionId (likely User). Watching USER log path: $monitorSourceLogDir" -Level "INFO"
                     }
                 } catch {
-                    # Fallback if GetOwner fails (e.g., permissions) - use assumption logic
+                    # If Get-CimInstance fails (often due to permissions when script user != process owner),
+                    # deduce negatively: assume it's the SYSTEM process we can't query.
                     $exceptionMessage = $_.Exception.Message
-                    Write-LogMessage "Could not determine owner of running loxonemonitor.exe: $exceptionMessage" -Level "WARN"
-                    Write-LogMessage "Falling back to assumption based on script's execution context." -Level "WARN"
-                    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-                    $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
-                    if ($currentUser.User -eq $systemSid) {
-                        $monitorSourceLogDir = $systemMonitorLogDir
-                        Write-LogMessage "FALLBACK: Script is running as SYSTEM. Assuming monitor is too. Watching: $monitorSourceLogDir" -Level "WARN"
-                    } else {
-                        $monitorSourceLogDir = $userMonitorLogDir
-                        Write-LogMessage "FALLBACK: Script is running as User ($($currentUser.Name)). Assuming monitor is too. Watching: $monitorSourceLogDir" -Level "WARN"
-                    }
-                    Write-LogMessage "(Use -MonitorSourceLogDirectory parameter to specify the correct path if this fallback is wrong)" -Level "WARN"
+                    Write-LogMessage "Could not query running loxonemonitor.exe details: $exceptionMessage" -Level "WARN"
+                    Write-LogMessage "Assuming monitor process is running as SYSTEM due to query failure." -Level "WARN"
+                    $monitorSourceLogDir = $systemMonitorLogDir
+                    Write-LogMessage "Watching SYSTEM log path based on assumption: $monitorSourceLogDir" -Level "INFO"
+                    Write-LogMessage "(Use -MonitorSourceLogDirectory parameter to specify the correct path if this assumption is wrong)" -Level "WARN"
                 }
             } else {
                 Write-LogMessage "loxonemonitor.exe not running. Attempting to start it interactively..." -Level "INFO"
@@ -1635,11 +1628,35 @@ try {
             }
         }
 
-        # Only proceed if we have a source directory determined
+        # Check for Admin rights IF we determined we need to watch the SYSTEM path
+        if ($monitorSourceLogDir -eq $systemMonitorLogDir) {
+            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            if (-not $isAdmin) {
+                Write-LogMessage "Need Admin rights to watch SYSTEM log path. Attempting self-elevation..." -Level "WARN"
+                # Construct arguments for re-launch, ensuring TestMonitor and the determined SYSTEM path are passed
+                # Note: Other parameters passed initially might need to be added here if relevant to TestMonitor
+                $relaunchArgs = "-NoProfile -ExecutionPolicy Bypass -File ""$PSCommandPath"" -TestMonitor -MonitorSourceLogDirectory ""$systemMonitorLogDir"""
+                if ($DebugMode) { $relaunchArgs += " -DebugMode" } # Preserve DebugMode if set
+                # Add other relevant parameters if needed... e.g., -MonitorLogWatchTimeoutMinutes $MonitorLogWatchTimeoutMinutes
+
+                try {
+                    Start-Process -FilePath "PowerShell.exe" -ArgumentList $relaunchArgs -Verb RunAs -ErrorAction Stop
+                    Write-LogMessage "Re-launched script as Admin. Exiting current non-admin instance." -Level "INFO"
+                    exit 0 # Exit the non-admin instance
+                } catch {
+                     Write-LogMessage "Failed to re-launch script as Admin: $($_.Exception.Message). Cannot watch SYSTEM logs." -Level "ERROR"
+                     $monitorSourceLogDir = $null # Prevent watching attempt below
+                }
+            } else {
+                 Write-LogMessage "Already running as Admin. Proceeding to watch SYSTEM log path." -Level "INFO"
+            }
+        }
+
+        # Only proceed if we have a source directory determined (and didn't fail elevation)
         if ($monitorSourceLogDir) {
              Watch-And-Move-MonitorLogs -SourceLogDir $monitorSourceLogDir -DestinationLogDir $monitorDestinationLogDir -TimeoutMinutes $MonitorLogWatchTimeoutMinutes
         } else {
-             Write-LogMessage "Could not determine Monitor Source Log Directory. Skipping log watch." -Level "WARN"
+             Write-LogMessage "Could not determine or access Monitor Source Log Directory. Skipping log watch." -Level "WARN"
         }
 
         Stop-LoxoneMonitor
@@ -1801,14 +1818,14 @@ catch {
 finally {
     # Log error details first if an error was caught by the main try/catch
     if ($global:ErrorOccurred) {
-        Write-LogMessage "Script execution finished with an ERROR on line $global:LastErrorLine." -Level "ERROR"
+        Write-LogMessage "Script execution finished with an ERROR on line $global:LastErrorLine. Last Exit Code: $LASTEXITCODE" -Level "ERROR"
         # Only pause if running interactively AND an error occurred:
         if (-not (Test-ScheduledTask)) {
             Read-Host "An error occurred on line $($global:LastErrorLine). Press Enter to exit"
         }
     } else {
          # Log a neutral finished message otherwise (covers success and interruptions)
-         Write-LogMessage "Script execution finished." -Level "INFO"
+         Write-LogMessage "Script execution finished. Last Exit Code: $LASTEXITCODE" -Level "INFO"
     }
 }
 #endregion
