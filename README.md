@@ -51,7 +51,7 @@ This PowerShell script automates the process of checking for, downloading, and i
 *   `-TestNotifications`: (Optional) Run in a mode that only tests sending start/end notifications. Default: `$false`.
 *   `-MonitorLogWatchTimeoutMinutes`: (Optional) Timeout in minutes for watching Loxone Monitor logs (used only with `-TestMonitor`). Default: `240`.
 *   `-TestMonitor`: (Optional) Run in a mode that tests starting the Loxone Monitor, watching its logs, and moving them. Default: `$false`.
-*   `-MonitorSourceLogDirectory`: (Optional) Specify the source directory for Loxone Monitor logs when using `-TestMonitor`. If omitted, defaults to the SYSTEM profile's Documents folder when run as SYSTEM, or the current user's Documents folder otherwise.
+*   `-MonitorSourceLogDirectory`: (Optional) Specify the source directory for Loxone Monitor logs when using `-TestMonitor`. If omitted, the script attempts to determine the correct path: if `loxonemonitor.exe` is already running, it assumes the log path based on whether the *script* is running as SYSTEM or a user (logging this assumption); if the monitor isn't running, it starts it interactively and watches the interactive user's Documents folder (`%USERPROFILE%\Documents\Loxone\Loxone Config\Monitor`). **Use this parameter to override the default if the automatic detection guesses incorrectly** (e.g., if the monitor was started by SYSTEM but the script is run interactively).
 
 
 ## Usage

@@ -1464,25 +1464,32 @@ function Watch-And-Move-MonitorLogs {
     Write-DebugLog "Initial log files found: $($existingFiles.Count)"
 
     while ($stopwatch.Elapsed -lt $timeout) {
-        $currentFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" -ErrorAction SilentlyContinue
-        $newFiles = $currentFiles | Where-Object { $existingFiles -notcontains $_.FullName }
+        try { # Add inner try block
+            $currentFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" -ErrorAction Stop # Change to Stop
+            $newFiles = $currentFiles | Where-Object { $existingFiles -notcontains $_.FullName }
 
-        if ($newFiles) {
-            Write-LogMessage "New log file(s) detected." -Level "INFO"
-            foreach ($file in $newFiles) {
-                $destinationFile = Join-Path -Path $DestinationLogDir -ChildPath $file.Name
-                try {
-                    Move-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
-                    Write-LogMessage "Moved log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
+            if ($newFiles) {
+                Write-LogMessage "New log file(s) detected." -Level "INFO"
+                foreach ($file in $newFiles) {
+                    $destinationFile = Join-Path -Path $DestinationLogDir -ChildPath $file.Name
+                    try {
+                        Move-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
+                        Write-LogMessage "Moved log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
+                    }
+                    catch {
+                        Write-LogMessage "Error moving log file '$($file.FullName)': $($_.Exception.Message)" -Level "ERROR"
+                        # Continue trying to move other files if one fails
+                    }
                 }
-                catch {
-                    Write-LogMessage "Error moving log file '$($file.FullName)': $($_.Exception.Message)" -Level "ERROR"
-                }
+                # Assuming we stop after finding the first new batch
+                $stopwatch.Stop()
+                Write-LogMessage "Finished watching for logs after finding new file(s)." -Level "INFO" # Corrected trailing \
+                return $true
             }
-            # Assuming we stop after finding the first new batch
-            $stopwatch.Stop()
-            Write-LogMessage "Finished watching for logs after finding new file(s).\" -Level "INFO"
-            return $true
+        } catch { # Add inner catch block
+             Write-LogMessage "CRITICAL ERROR during log watch loop: $($_.Exception.Message). Stopping watch." -Level "ERROR"
+             $stopwatch.Stop()
+             return $false # Indicate failure
         }
 
         # Wait before checking again
@@ -1505,36 +1512,87 @@ Invoke-LogFileRotation -LogPath $global:LogFile
 try {
     Write-DebugLog -Message "Beginning main update process."
 
-     # --- Test Monitor Mode --- 
+    # --- Check for Existing Installation (Moved Up) ---
+    try {
+        $installedExePath = Get-InstalledApplicationPath
+    }
+    catch{
+        $installedExePath = $null
+        Write-LogMessage "Loxone Config installation not found: $($_.Exception.Message)" -Level "INFO"
+    }
+
+
+    if ($installedExePath) {
+        Write-DebugLog -Message "Installed application path = '${installedExePath}'"
+        $localAppExe = Join-Path -Path $installedExePath -ChildPath "LoxoneConfig.exe"
+        $installedVersion = Get-InstalledVersion -ExePath $localAppExe #This will now not throw if not installed
+  if ($null -ne $installedVersion){ # <<< CHANGED: Correct comparison
+   Write-LogMessage "Installed version: ${installedVersion}" -Level "INFO"
+  }
+        $normalizedInstalledVersion = Convert-VersionString $installedVersion
+    }
+     else {
+        Write-LogMessage "No existing Loxone Config installation found. Cannot run Monitor test without installation." -Level "WARN" # Updated message
+        $normalizedInstalledVersion = ""  # No version to compare
+        # We might want to exit here if TestMonitor requires an installation, or let Start-LoxoneMonitor handle the null path
+    }
+
+     # --- Test Monitor Mode ---
     if ($TestMonitor) {
         Write-LogMessage "Running in Test Monitor mode." -Level "INFO"
 
-        # Determine the source log directory
+        # Define potential source and destination log directories
+        $userDocuments = [Environment]::GetFolderPath('MyDocuments')
+        $userMonitorLogDir = Join-Path -Path $userDocuments -ChildPath "Loxone\Loxone Config\Monitor"
+        $systemMonitorLogDir = "C:\Windows\SysWOW64\config\systemprofile\Documents\Loxone\Loxone Config\Monitor" # Corrected path
+        $monitorDestinationLogDir = Join-Path -Path $ScriptSaveFolder -ChildPath "MonitorLogs"
+        $monitorSourceLogDir = $null # Initialize
+
+        # Check if user specified a source directory
         if (-not ([string]::IsNullOrWhiteSpace($MonitorSourceLogDirectory))) {
             $monitorSourceLogDir = $MonitorSourceLogDirectory
             Write-LogMessage "Using specified Monitor Source Log Directory: $monitorSourceLogDir" -Level "INFO"
+            # If user specified path, we assume they know best and don't need to start/check the process here
         } else {
-            # Determine default path based on user context
-            $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-            $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18") # Well-known SID for SYSTEM
+            # Default logic: Check if monitor is running, decide path, or start it
+            $existingMonitorProcess = Get-Process -Name "loxonemonitor" -ErrorAction SilentlyContinue
 
-            if ($currentUser.User -eq $systemSid) {
-                # Running as SYSTEM (likely scheduled task)
-                $monitorSourceLogDir = "C:\Windows\SysWOW64\config\systemprofile\Documents\Loxone\Loxone Config\Monitor" # Corrected path, removed trailing >
-                Write-LogMessage "Running as SYSTEM, using default Monitor Source Log Directory: $monitorSourceLogDir" -Level "INFO"
+            if ($existingMonitorProcess) {
+                Write-LogMessage "loxonemonitor.exe is already running (PID: $($existingMonitorProcess.Id)). Determining log path..." -Level "INFO"
+                # Simple check: If script runs as SYSTEM, assume existing monitor does too. Otherwise, assume user.
+                $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+                if ($currentUser.User -eq $systemSid) {
+                    $monitorSourceLogDir = $systemMonitorLogDir
+                    # Log the assumption clearly
+                    Write-LogMessage "Script running as SYSTEM. ASSUMING existing monitor is also SYSTEM's. Watching: $monitorSourceLogDir" -Level "INFO"
+                    Write-LogMessage "(Use -MonitorSourceLogDirectory if this assumption is incorrect)" -Level "INFO"
+                } else {
+                    $monitorSourceLogDir = $userMonitorLogDir
+                    # Log the assumption clearly
+                    Write-LogMessage "Script running as User ($($currentUser.Name)). ASSUMING existing monitor is also User's. Watching: $monitorSourceLogDir" -Level "INFO"
+                    Write-LogMessage "(Use -MonitorSourceLogDirectory if this assumption is incorrect)" -Level "INFO"
+                }
             } else {
-                # Running as interactive user
-                $userDocuments = [Environment]::GetFolderPath('MyDocuments')
-                $monitorSourceLogDir = Join-Path -Path $userDocuments -ChildPath "Loxone\Loxone Config\Monitor"
-                Write-LogMessage "Running as User ($($currentUser.Name)), using default Monitor Source Log Directory: $monitorSourceLogDir" -Level "INFO"
+                Write-LogMessage "loxonemonitor.exe not running. Attempting to start it interactively..." -Level "INFO"
+                try {
+                    Start-LoxoneMonitor -InstalledExePath $installedExePath -ScriptSaveFolder $ScriptSaveFolder
+                    # Since we started it interactively, watch the user path
+                    $monitorSourceLogDir = $userMonitorLogDir
+                    Write-LogMessage "Monitor started interactively. Watching USER monitor log path: $monitorSourceLogDir" -Level "INFO"
+                } catch {
+                    Write-LogMessage "Failed to start Loxone Monitor: $($_.Exception.Message). Cannot proceed with log watch." -Level "ERROR"
+                    # Exit or handle error appropriately - here we'll let it fall through, Watch function will handle non-existent dir
+                }
             }
         }
-        # Define the destination log directory (remains the same)
-        $monitorDestinationLogDir = Join-Path -Path $ScriptSaveFolder -ChildPath "MonitorLogs"
 
-        Start-LoxoneMonitor -InstalledExePath $installedExePath -ScriptSaveFolder $ScriptSaveFolder
-
-        Watch-And-Move-MonitorLogs -SourceLogDir $monitorSourceLogDir -DestinationLogDir $monitorDestinationLogDir -TimeoutMinutes $MonitorLogWatchTimeoutMinutes
+        # Only proceed if we have a source directory determined
+        if ($monitorSourceLogDir) {
+             Watch-And-Move-MonitorLogs -SourceLogDir $monitorSourceLogDir -DestinationLogDir $monitorDestinationLogDir -TimeoutMinutes $MonitorLogWatchTimeoutMinutes
+        } else {
+             Write-LogMessage "Could not determine Monitor Source Log Directory. Skipping log watch." -Level "WARN"
+        }
 
         Stop-LoxoneMonitor
 
@@ -1563,29 +1621,7 @@ try {
         Write-LogMessage "Called by scheduler, skipping scheduler creation." -Level "INFO"
     }
 
-    # --- Check for Existing Installation ---
-    try {
-        $installedExePath = Get-InstalledApplicationPath
-    }
-    catch{
-        $installedExePath = $null
-        Write-LogMessage "Loxone Config installation not found: $($_.Exception.Message)" -Level "INFO"
-    }
-
-
-    if ($installedExePath) {
-        Write-DebugLog -Message "Installed application path = '${installedExePath}'"
-        $localAppExe = Join-Path -Path $installedExePath -ChildPath "LoxoneConfig.exe"
-        $installedVersion = Get-InstalledVersion -ExePath $localAppExe #This will now not throw if not installed
-		if ($null -ne $installedVersion){ # <<< CHANGED: Correct comparison
-			Write-LogMessage "Installed version: ${installedVersion}" -Level "INFO"
-		}
-        $normalizedInstalledVersion = Convert-VersionString $installedVersion
-    }
-     else {
-        Write-LogMessage "No existing Loxone Config installation found.  Proceeding with full download and install." -Level "INFO"
-        $normalizedInstalledVersion = ""  # No version to compare
-    }
+    # --- Installation Check Block Moved Up ---
 
 
     if ($SkipUpdateIfAnyProcessIsRunning -and $installedExePath) {
