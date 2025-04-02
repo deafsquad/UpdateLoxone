@@ -665,7 +665,7 @@ function Set-ConstantVariable {
         [string]$Name,
         [object]$Value
     )
-    $variablePath = "Variable:Script:$Name"
+    # Removed unused variable $variablePath
     $needsSet = $true # Assume we need to set it
 
     # Use try/catch around Get-Variable to handle both existence and permissions issues
@@ -1501,10 +1501,19 @@ function Watch-And-Move-MonitorLogs {
         Write-LogMessage "Error creating destination directory '$DestinationLogDir': $($_.Exception.Message)" -Level "ERROR"
         return $false # Cannot proceed without destination
     }
+    # Ensure any previous test file in destination is removed
+    $testFileName = "_TestMonitorFile.log"
+    $destTestFilePath = Join-Path -Path $DestinationLogDir -ChildPath $testFileName
+    if (Test-Path $destTestFilePath) {
+        Remove-Item -Path $destTestFilePath -Force -ErrorAction SilentlyContinue
+        Write-DebugLog "Removed existing test file from destination: $destTestFilePath"
+    }
+
 
     $timeout = New-TimeSpan -Minutes $TimeoutMinutes
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $existingFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" | Select-Object -ExpandProperty FullName
+    $watchStartTime = Get-Date # Capture start time for comparison
+    # $existingFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" | Select-Object -ExpandProperty FullName # No longer needed
 
     Write-DebugLog "Initial log files found: $($existingFiles.Count)"
     $testFileCreated = $false # Flag to create test file only once
@@ -1537,26 +1546,47 @@ while ($stopwatch.Elapsed -lt $timeout) {
     }
 
     try { # Inner try block for file operations
-        $currentFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" -ErrorAction Stop # Change to Stop
-        $newFiles = $currentFiles | Where-Object { $existingFiles -notcontains $_.FullName }
+        # Get current files, handle potential access errors gracefully
+        try {
+             $currentFiles = Get-ChildItem -Path $SourceLogDir -Filter "*.log" -ErrorAction Stop
+        } catch {
+             Write-LogMessage "Error accessing source log directory '$SourceLogDir' during check: $($_.Exception.Message)" -Level "WARN"
+             $currentFiles = @() # Treat as no files found on error
+        }
+        # Detect files modified *after* the watch started
+        $newOrUpdatedFiles = $currentFiles | Where-Object { $_.LastWriteTime -gt $watchStartTime }
 
-        if ($newFiles) {
-            Write-LogMessage "New log file(s) detected." -Level "INFO"
-            foreach ($file in $newFiles) {
+        if ($newOrUpdatedFiles) {
+            Write-LogMessage "New or updated log file(s) detected since watch started." -Level "INFO"
+            # Removed unused $testFileMoved flag
+            foreach ($file in $newOrUpdatedFiles) { # Corrected variable name
+                # If in test mode and this is the test file, just log detection and exit successfully
+                if ($CreateTestFile -and $file.Name -eq $testFileName) {
+                    Write-LogMessage "Test file '$($file.Name)' detected successfully." -Level "INFO"
+                    $stopwatch.Stop()
+                    Write-LogMessage "Finished watching for logs after detecting test file." -Level "INFO"
+                    return $true # Indicate test success
+                }
+
+                # Otherwise (not test file or not in test mode), proceed with copy/remove
                 $destinationFile = Join-Path -Path $DestinationLogDir -ChildPath $file.Name
                 try {
-                    Move-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
-                    Write-LogMessage "Moved log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
+                    Copy-Item -Path $file.FullName -Destination $destinationFile -Force -ErrorAction Stop
+                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop # Delete source after successful copy
+                    Write-LogMessage "Copied and removed log file '$($file.Name)' to '$DestinationLogDir'." -Level "INFO"
                 }
                 catch {
-                    Write-LogMessage "Error moving log file '$($file.FullName)': $($_.Exception.Message)" -Level "ERROR"
+                    Write-LogMessage "Error copying/removing log file '$($file.FullName)': $($_.Exception.Message)" -Level "ERROR"
                     # Continue trying to move other files if one fails
                 }
             }
-            # Assuming we stop after finding the first new batch
-            $stopwatch.Stop()
-            Write-LogMessage "Finished watching for logs after finding new file(s)." -Level "INFO"
-            return $true # Indicate success (found files)
+            # If the loop finished without returning (meaning test file wasn't the one moved, or not in test mode)
+            # Stop after processing the first batch of new/updated files found (unless it was the test file, which returned earlier)
+            if ($newOrUpdatedFiles.Count -gt 0) { # Corrected variable name check
+                 $stopwatch.Stop()
+                 Write-LogMessage "Finished watching for logs after processing first batch of new/updated file(s)." -Level "INFO"
+                 return $true # Indicate success (found files)
+            }
         }
     } catch { # Inner catch block for file operation errors
          Write-LogMessage "CRITICAL ERROR during log watch file operations: $($_.Exception.Message). Stopping watch." -Level "ERROR"
@@ -1670,17 +1700,30 @@ try {
                     $monitorSourceLogDir = $systemMonitorLogDir
                     Write-LogMessage "Watching SYSTEM log path based on assumption: $monitorSourceLogDir" -Level "INFO"
                     Write-LogMessage "(Use -MonitorSourceLogDirectory parameter to specify the correct path if this assumption is wrong)" -Level "WARN"
+                } # End of Catch block for Get-CimInstance
+            } # End of if ($existingMonitorProcess)
+            else { # Start of Else block (monitor not running)
+                Write-LogMessage "loxonemonitor.exe not running. Attempting to start it directly..." -Level "INFO"
+                # Find the executable first (logic adapted from Start-LoxoneMonitor)
+                $loxoneMonitorExePath = $null
+                if ($installedExePath) {
+                    $loxoneMonitorExePath = Find-File -BasePath $installedExePath
                 }
-            } else {
-                Write-LogMessage "loxonemonitor.exe not running. Attempting to start it interactively..." -Level "INFO"
-                try {
-                    Start-LoxoneMonitor -InstalledExePath $installedExePath -ScriptSaveFolder $ScriptSaveFolder
-                    # Since we started it interactively, watch the user path
-                    $monitorSourceLogDir = $userMonitorLogDir
-                    Write-LogMessage "Monitor started interactively. Watching USER monitor log path: $monitorSourceLogDir" -Level "INFO"
-                } catch {
-                    Write-LogMessage "Failed to start Loxone Monitor: $($_.Exception.Message). Cannot proceed with log watch." -Level "ERROR"
-                    # Exit or handle error appropriately - here we'll let it fall through, Watch function will handle non-existent dir
+
+                if (-not $loxoneMonitorExePath) {
+                    Write-LogMessage "loxonemonitor.exe not found under path: ${installedExePath}. Cannot start for test." -Level "ERROR"
+                    # Skip watch if we can't start it
+                } else {
+                    try {
+                        # Use Start-Process directly instead of Start-LoxoneMonitor/Start-ProcessInInteractiveSession
+                        Start-Process -FilePath $loxoneMonitorExePath -ErrorAction Stop
+                        Write-LogMessage "Started loxonemonitor.exe directly (PID: Check Task Manager)." -Level "INFO"
+                        # Since we started it directly as the current user, watch the user path
+                        $monitorSourceLogDir = $userMonitorLogDir
+                        Write-LogMessage "Watching USER monitor log path after starting: $monitorSourceLogDir" -Level "INFO"
+                    } catch {
+                        Write-LogMessage "Failed to start Loxone Monitor directly: $($_.Exception.Message). Cannot proceed with log watch." -Level "ERROR"
+                    }
                 }
             }
         }
