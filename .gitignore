@@ -3,6 +3,8 @@
 
 # But keep PowerShell script files
 !*.ps1
+!README.md
+
 
 # Keep this .gitignore file
 !.gitignore
