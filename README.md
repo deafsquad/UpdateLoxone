@@ -13,7 +13,7 @@ This PowerShell script automates the process of checking for, downloading, and i
 *   **Process Handling:** Optionally closes running Loxone Config instances before updating or skips updates if Loxone Config is running.
 *   **Desktop Notifications:** Provides desktop notifications (using BurntToast module) for update status and errors to logged-in interactive users.
 *   **Scheduled Task Integration:** Can automatically create/update a Windows Scheduled Task (`LoxoneUpdateTask`) to run the script periodically as the SYSTEM user with highest privileges.
-*   **Robust Logging:** Creates detailed log files (`UpdateLoxone.log`) with automatic rotation (keeps the last 24 archives by default, named `UpdateLoxone_yyyyMMdd_HHmmss.log`).
+*   **Robust Logging:** Creates detailed log files (`UpdateLoxone.log`) with automatic rotation (keeps the last 24 archives by default, named `UpdateLoxone_yyyyMMdd_HHmmss.log`). Log lines include Process ID and elevation status (e.g., `[PID:1234|Elevated:True]`).
 *   **Error Handling:** Includes detailed error logging (command, line number, variables) and sends notifications on failure before exiting.
 *   **Debug Mode:** Provides verbose logging for troubleshooting.
 *   **Loxone Monitor Testing:** Includes a `-TestMonitor` mode to test starting the Loxone Monitor process and watching/moving its log files.
@@ -69,13 +69,13 @@ This PowerShell script automates the process of checking for, downloading, and i
     # Example: Set up task using Release channel, closing apps
     .\UpdateLoxone.ps1 -Channel Release -CloseApplications $true
     ```
-4.  The script will copy itself to the `-ScriptSaveFolder` (if different), attempt self-elevation if needed, and then create/update a scheduled task named `LoxoneUpdateTask`.
-5.  This task runs as the `SYSTEM` user with highest privileges, triggered initially and then repeating every `-ScheduledTaskIntervalMinutes` (default 10).
+4.  During this first interactive run, the script will attempt self-elevation if needed (to gain Administrator privileges) and then create/update a scheduled task named `LoxoneUpdateTask` pointing to the script's location (determined by `-ScriptSaveFolder`, which defaults to the script's own directory).
+5.  This task runs as the `SYSTEM` user with highest privileges, triggered initially and then repeating every `-ScheduledTaskIntervalMinutes` (default 10). Task registration/update is skipped on subsequent non-interactive runs (i.e., when run by the scheduler itself).
 6.  Subsequent runs performed by the scheduled task will handle the update checks and installations silently.
 
 ## Workflow Overview (Scheduled Task)
 
-1.  **Log Rotation:** Checks and rotates the main log file if size exceeds limit.
+1.  **Log Rotation:** If running as the initial (non-elevated) instance, checks and rotates the main log file if size exceeds limit. Rotation is skipped if running as the self-elevated instance to maintain log continuity.
 2.  **Installation Check:** Determines the path and version of the currently installed Loxone Config.
 3.  **Process Check:** If `-SkipUpdateIfAnyProcessIsRunning` is `$true`, checks if `LoxoneConfig.exe` is running and exits if it is.
 4.  **Update Check:** Downloads `updatecheck.xml` from Loxone.
