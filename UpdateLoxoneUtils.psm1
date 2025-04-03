@@ -452,21 +452,64 @@ function Invoke-ZipFileExtraction {
 
 function Get-ExecutableSignature {
     param(
-        [string]$ExePath,
-        [string]$TrustedThumbprintFile
+        [Parameter(Mandatory=$true)]
+        [string]$ExePath, # Path to the executable to check (e.g., downloaded installer)
+        [Parameter()]
+        [string]$ReferenceExePath, # Optional: Path to an existing executable for thumbprint comparison (e.g., installed LoxoneConfig.exe)
+        [string]$TrustedThumbprintFile # Currently unused parameter, kept for potential future use
     )
+    Write-DebugLog "Get-ExecutableSignature called. ExePath='$ExePath', ReferenceExePath='$ReferenceExePath'"
     try {
-        $signature = Get-AuthenticodeSignature -FilePath $ExePath
-        if ($signature.Status -eq "Valid") {
-            Write-LogMessage "Executable '${ExePath}' is digitally signed and valid." -Level "INFO"
+        # 1. Check the signature of the primary executable ($ExePath)
+        Write-DebugLog "Getting signature for primary executable: '$ExePath'"
+        $signature = Get-AuthenticodeSignature -FilePath $ExePath -ErrorAction Stop
+        
+        if ($signature.Status -ne "Valid") {
+            Write-LogMessage "Signature status for '${ExePath}' is NOT Valid: $($signature.Status). Halting installation." -Level "ERROR"
+            throw "Signature check failed for '$ExePath'. Status: $($signature.Status)"
         }
-        else {
-            Write-LogMessage "Executable '${ExePath}' signature status: ${($signature.Status)}" -Level "WARN"
+        
+        Write-LogMessage "Signature for '${ExePath}' is Valid." -Level "INFO"
+        $downloadedThumbprint = $signature.SignerCertificate.Thumbprint
+        Write-LogMessage "Thumbprint for '${ExePath}': $downloadedThumbprint" -Level "INFO"
+
+        # 2. Compare with reference executable if provided
+        if (-not ([string]::IsNullOrEmpty($ReferenceExePath))) {
+            Write-DebugLog "ReferenceExePath provided: '$ReferenceExePath'. Attempting comparison."
+            if (Test-Path $ReferenceExePath) {
+                try {
+                    Write-DebugLog "Getting signature for reference executable: '$ReferenceExePath'"
+                    $referenceSignature = Get-AuthenticodeSignature -FilePath $ReferenceExePath -ErrorAction Stop
+                    
+                    if ($referenceSignature.Status -eq "Valid") {
+                        $referenceThumbprint = $referenceSignature.SignerCertificate.Thumbprint
+                        Write-LogMessage "Thumbprint for reference '${ReferenceExePath}': $referenceThumbprint" -Level "INFO"
+                        
+                        if ($downloadedThumbprint -eq $referenceThumbprint) {
+                            Write-LogMessage "Thumbprint MATCHES reference executable. OK." -Level "INFO"
+                        } else {
+                            Write-LogMessage "Thumbprint MISMATCH! Downloaded='${downloadedThumbprint}', Reference='${referenceThumbprint}'. Proceeding with caution." -Level "WARN"
+                            # Consider if this should be an error or configurable behavior
+                        }
+                    } else {
+                        Write-LogMessage "Could not get a valid signature from reference executable '${ReferenceExePath}'. Status: $($referenceSignature.Status). Skipping thumbprint comparison." -Level "WARN"
+                    }
+                } catch {
+                    Write-LogMessage "Error getting signature from reference executable '${ReferenceExePath}': $($_.Exception.Message). Skipping thumbprint comparison." -Level "WARN"
+                }
+            } else {
+                Write-LogMessage "Reference executable path '${ReferenceExePath}' not found. Skipping thumbprint comparison." -Level "WARN"
+            }
+        } else {
+            Write-DebugLog "No ReferenceExePath provided. Skipping thumbprint comparison."
         }
-    }
-    catch {
-        Write-LogMessage "Error verifying digital signature of '${ExePath}': ${($_.Exception.Message)}" -Level "ERROR"
-        throw $_
+        
+        # If we got here, the primary signature was at least valid.
+        return $true # Indicate success (basic validity passed)
+        
+    } catch {
+        Write-LogMessage "Error during signature verification for '${ExePath}': ${($_.Exception.Message)}" -Level "ERROR"
+        throw $_ # Re-throw the exception to halt the process
     }
 }
 

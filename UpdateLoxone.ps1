@@ -496,7 +496,7 @@ try {
         Write-LogMessage ".exe installer extracted to ${($extractedExe.FullName)}." -Level "INFO"
 
          # Verify Signature (even for initial install)
-        Get-ExecutableSignature -ExePath $extractedExe.FullName -TrustedThumbprintFile (Join-Path -Path $ScriptSaveFolder -ChildPath "TrustedCertThumbprint.txt") # Changed from Verify-ExecutableSignatureAndCertificate
+        Get-ExecutableSignature -ExePath $extractedExe.FullName -ReferenceExePath $localAppExe # Pass installed exe path for thumbprint comparison
 
         Write-LogMessage "Starting Loxone Config installer..." -Level "INFO"
         Start-LoxoneUpdateInstaller -InstallerPath $extractedExe.FullName -InstallMode $InstallMode
