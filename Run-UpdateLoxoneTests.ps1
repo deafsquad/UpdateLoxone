@@ -292,6 +292,58 @@ function Invoke-TestSuite {
             return $failedCount -eq 0
         }
     }
+    if (Test-ShouldRun -CategoryName "Version" -IndividualTestName "Get-InstalledVersion") {
+        Invoke-Test -Name "Get-InstalledVersion (Real File)" -TestBlock {
+            $results = @{
+                Found = $false
+                NotFound = $false
+                # Error case skipped due to mocking complexity
+            }
+            $realExePath = $PSHOME + "\powershell.exe" # Use a real exe known to exist
+            $nonExistentPath = Join-Path $script:TestScriptSaveFolder "non_existent_version_test.exe"
+            
+            # --- Test 1: Found version (using real powershell.exe) ---
+            try {
+                # Ensure the real exe exists
+                if (-not (Test-Path $realExePath)) { throw "Real executable '$realExePath' not found for test." }
+                
+                $version1 = Get-InstalledVersion -ExePath $realExePath
+                # We don't know the exact version, just check if it's a non-empty string
+                if (-not ([string]::IsNullOrWhiteSpace($version1))) {
+                    $results.Found = $true
+                    Write-Host "  DEBUG TEST: Found version '$version1' for '$realExePath'."
+                } else {
+                    Write-Warning "Found test failed. Expected a version string, Got '$version1'"
+                }
+            } catch {
+                 Write-Warning "Found test failed with exception: $($_.Exception.Message)"
+            }
+
+            # --- Test 2: Not Found ---
+            try {
+                # Ensure the file does NOT exist
+                if (Test-Path $nonExistentPath) { Remove-Item $nonExistentPath -Force }
+
+                $version2 = Get-InstalledVersion -ExePath $nonExistentPath
+                if ($null -eq $version2) { $results.NotFound = $true } else { Write-Warning "NotFound test failed. Expected null, Got '$version2'" }
+            } catch {
+                 Write-Warning "NotFound test failed. Threw unexpected exception: $($_.Exception.Message)"
+            }
+
+            # --- Final Check ---
+            # Only checking Found and NotFound now
+            $failedCount = 0
+            if (-not $results.Found) { $failedCount++ }
+            if (-not $results.NotFound) { $failedCount++ }
+            
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Get-InstalledVersion."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
 
 
 
