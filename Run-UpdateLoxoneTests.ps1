@@ -69,6 +69,50 @@ try {
     exit 1
 }
 
+# --- Helper Functions ---
+# Helper function to determine if a specific test should run
+function Test-ShouldRun { # Renamed function
+    param( [string]$IndividualTestName, [string]$CategoryName )
+    # Access $TestName from the outer script scope
+    return ($script:TestName -contains "All" -or $script:TestName -contains $IndividualTestName -or $script:TestName -contains $CategoryName)
+}
+
+# Helper function for running tests
+function Invoke-Test { # Renamed function
+    param( [string]$Name, [scriptblock]$TestBlock )
+    
+    Write-Host "Running Test: $Name" -ForegroundColor White
+    $testPassed = $false; $errorMessage = $null
+    try {
+        $result = & $TestBlock
+            if ($LASTEXITCODE -eq 0 -or $? -eq $true) {
+                 if ($result -is [bool] -and (-not $result)) {
+                     $testPassed = $false; $errorMessage = "Test block returned false."
+                 } else { $testPassed = $true }
+            } else { $errorMessage = "Test block failed (LASTEXITCODE: $LASTEXITCODE, Error: $($Error[0].ToString()))"; $testPassed = $false }
+        } 
+        catch {
+            $errorMessage = "Exception during test: $($_.Exception.Message)"
+            $testPassed = $false
+        } 
+        finally {
+            # Empty finally block - no cleanup needed for individual tests for now
+        }
+
+        if ($testPassed) {
+            Write-Host "  Result: PASS" -ForegroundColor Green
+            $script:currentTestSuiteResults[$Name] = "PASS" } 
+        else {
+            Write-Host "  Result: FAIL" -ForegroundColor Red
+            if ($errorMessage) {
+                Write-Host "    Reason: $errorMessage" -ForegroundColor Red
+            }
+            $script:currentTestSuiteResults[$Name] = "FAIL"
+            $script:currentTestSuiteOverallResult = $false # Update script-scoped overall result for the current suite
+        }
+        Write-Host 
+    }
+
 # --- Test Execution Function ---
 function Invoke-TestSuite {
     param(
@@ -81,69 +125,77 @@ function Invoke-TestSuite {
     
     $script:SimulateTask = $IsTaskContext # Set simulation flag for this run
 
-    $currentTestResults = @{}
-    $localOverallResult = $true # Use local variable for this suite run's result
-
-    # Helper function to determine if a specific test should run
-    function Should-Run-Test {
-        param( [string]$IndividualTestName, [string]$CategoryName )
-        # Access $TestName from the outer script scope
-        return ($script:TestName -contains "All" -or $script:TestName -contains $IndividualTestName -or $script:TestName -contains $CategoryName)
-    }
-
-    # Helper function for running tests
-    function Run-Test {
-        param( [string]$Name, [scriptblock]$TestBlock )
-        
-        Write-Host "Running Test: $Name" -ForegroundColor White
-        $testPassed = $false; $errorMessage = $null
-        try {
-            $result = & $TestBlock
-            if ($LASTEXITCODE -eq 0 -or $? -eq $true) {
-                 if ($result -is [bool] -and (-not $result)) {
-                     $testPassed = $false; $errorMessage = "Test block returned false."
-                 } else { $testPassed = $true }
-            } else { $errorMessage = "Test block failed (LASTEXITCODE: $LASTEXITCODE, Error: $($Error[0].ToString()))"; $testPassed = $false }
-        } catch { $errorMessage = "Exception during test: $($_.Exception.Message)"; $testPassed = $false }
-
-        if ($testPassed) { Write-Host "  Result: PASS" -ForegroundColor Green; $currentTestResults[$Name] = "PASS" } 
-        else { Write-Host "  Result: FAIL" -ForegroundColor Red; if ($errorMessage) { Write-Host "    Reason: $errorMessage" -ForegroundColor Red }; $currentTestResults[$Name] = "FAIL"; $script:localOverallResult = $false } # Update local overall result
-        Write-Host 
-    }
+    $script:currentTestSuiteResults = @{} # Use script scope for results within this suite run
+    $script:currentTestSuiteOverallResult = $true # Use script scope for overall result of this suite run
 
     # --- Define Test Cases ---
-    if (Should-Run-Test -CategoryName "Logging" -IndividualTestName "Write-LogMessage") {
-        Run-Test -Name "Write-LogMessage (INFO)" -TestBlock { Write-LogMessage -Message "Test INFO message (Context: $simType $contextType)" -Level "INFO"; return (Select-String -Path $global:LogFile -Pattern "Test INFO message \(Context: $simType $contextType\)" -Quiet) }
-        Run-Test -Name "Write-LogMessage (ERROR)" -TestBlock { Write-LogMessage -Message "Test ERROR message (Context: $simType $contextType)" -Level "ERROR"; return (Select-String -Path $global:LogFile -Pattern "Test ERROR message \(Context: $simType $contextType\)" -Quiet) }
+    if (Test-ShouldRun -CategoryName "Logging" -IndividualTestName "Write-LogMessage") {
+        Invoke-Test -Name "Write-LogMessage (INFO)" -TestBlock { Write-LogMessage -Message "Test INFO message (Context: $simType $contextType)" -Level "INFO"; return (Select-String -Path $global:LogFile -Pattern "Test INFO message \(Context: $simType $contextType\)" -Quiet) }
+        Invoke-Test -Name "Write-LogMessage (ERROR)" -TestBlock { Write-LogMessage -Message "Test ERROR message (Context: $simType $contextType)" -Level "ERROR"; return (Select-String -Path $global:LogFile -Pattern "Test ERROR message \(Context: $simType $contextType\)" -Quiet) }
     }
-    if (Should-Run-Test -CategoryName "Logging" -IndividualTestName "Invoke-LogFileRotation") {
-         Run-Test -Name "Invoke-LogFileRotation" -TestBlock { Set-Content -Path $global:LogFile -Value "Dummy log content $(Get-Random)"; Invoke-LogFileRotation -LogPath $global:LogFile -MaxArchives 1; $archiveExists = Get-ChildItem -Path $script:TestScriptSaveFolder -Filter "Test-UpdateLoxone_*.log" | Measure-Object | Select-Object -ExpandProperty Count; $originalGone = -not (Test-Path $global:LogFile); Get-ChildItem -Path $script:TestScriptSaveFolder -Filter "Test-UpdateLoxone_*.log" | Remove-Item -Force -ErrorAction SilentlyContinue; return $originalGone -and ($archiveExists -ge 1) }
+    if (Test-ShouldRun -CategoryName "Logging" -IndividualTestName "Invoke-LogFileRotation") {
+         Invoke-Test -Name "Invoke-LogFileRotation" -TestBlock { Set-Content -Path $global:LogFile -Value "Dummy log content $(Get-Random)"; Invoke-LogFileRotation -LogPath $global:LogFile -MaxArchives 1; $archiveExists = Get-ChildItem -Path $script:TestScriptSaveFolder -Filter "Test-UpdateLoxone_*.log" | Measure-Object | Select-Object -ExpandProperty Count; $originalGone = -not (Test-Path $global:LogFile); Get-ChildItem -Path $script:TestScriptSaveFolder -Filter "Test-UpdateLoxone_*.log" | Remove-Item -Force -ErrorAction SilentlyContinue; return $originalGone -and ($archiveExists -ge 1) }
     }
-    if (Should-Run-Test -CategoryName "Version" -IndividualTestName "Convert-VersionString") {
-         Run-Test -Name "Convert-VersionString" -TestBlock { $v1 = "10.1.2.3"; $v2 = "15.6.04.01"; $norm1 = Convert-VersionString $v1; $norm2 = Convert-VersionString $v2; return ($norm1 -eq "10.1.2.3") -and ($norm2 -eq "15.6.4.1") }
+    if (Test-ShouldRun -CategoryName "Version" -IndividualTestName "Convert-VersionString") {
+         Invoke-Test -Name "Convert-VersionString" -TestBlock { $v1 = "10.1.2.3"; $v2 = "15.6.04.01"; $norm1 = Convert-VersionString $v1; $norm2 = Convert-VersionString $v2; return ($norm1 -eq "10.1.2.3") -and ($norm2 -eq "15.6.4.1") }
     }
-    if (Should-Run-Test -CategoryName "Utils" -IndividualTestName "Get-RedactedPassword") {
-         Run-Test -Name "Get-RedactedPassword" -TestBlock { $url1 = "http://user:password@host.com"; $url2 = "https://admin:12345@192.168.1.1"; $redacted1 = Get-RedactedPassword $url1; $redacted2 = Get-RedactedPassword $url2; return ($redacted1 -eq "http://user:********@host.com") -and ($redacted2 -eq "https://admin:********@192.168.1.1") }
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Get-RedactedPassword") {
+         Invoke-Test -Name "Get-RedactedPassword" -TestBlock { $url1 = "http://user:password@host.com"; $url2 = "https://admin:12345@192.168.1.1"; $redacted1 = Get-RedactedPassword $url1; $redacted2 = Get-RedactedPassword $url2; return ($redacted1 -eq "http://user:********@host.com") -and ($redacted2 -eq "https://admin:********@192.168.1.1") }
     }
-    if (Should-Run-Test -CategoryName "Utils" -IndividualTestName "Save-ScriptToUserLocation") {
-        Run-Test -Name "Save-ScriptToUserLocation" -TestBlock { $tempDestDir = Join-Path -Path $script:TestScriptSaveFolder -ChildPath "TempTestSaveFolder"; $tempDestFile = Join-Path -Path $tempDestDir -ChildPath "Run-UpdateLoxoneTests.ps1"; if (Test-Path $tempDestDir) { Remove-Item -Path $tempDestDir -Recurse -Force }; $resultPath = $null; try { $originalMyInvocation = $MyInvocation; $mockMyInvocation = @{ MyCommand = @{ Path = $PSCommandPath } }; $MyInvocation = $mockMyInvocation; $resultPath = Save-ScriptToUserLocation -DestinationDir $tempDestDir -ScriptName "Run-UpdateLoxoneTests.ps1" } finally { if ($originalMyInvocation) { $MyInvocation = $originalMyInvocation } else { Remove-Variable MyInvocation -ErrorAction SilentlyContinue } }; $fileExists = Test-Path -Path $tempDestFile; $fileNotEmpty = $false; if ($fileExists) { $fileSize = (Get-Item -Path $tempDestFile).Length; if ($fileSize -gt 0) { $fileNotEmpty = $true } else { Write-Warning "Copied file '$tempDestFile' is empty." } } else { Write-Warning "Copied file '$tempDestFile' not found." }; $pathMatches = ($resultPath -eq $tempDestFile); if (-not $pathMatches) { Write-Warning "Save-ScriptToUserLocation returned incorrect path. Expected: '$tempDestFile', Got: '$resultPath'" }; if (Test-Path $tempDestDir) { Remove-Item -Path $tempDestDir -Recurse -Force }; return ($fileExists -and $fileNotEmpty -and $pathMatches) }
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Save-ScriptToUserLocation") {
+        Invoke-Test -Name "Save-ScriptToUserLocation" -TestBlock { 
+            # Setup: Create a dummy source script file to copy
+            $dummySourceName = "DummySourceForSaveTest.ps1"
+            $dummySourcePath = Join-Path -Path $script:TestScriptSaveFolder -ChildPath $dummySourceName
+            Set-Content -Path $dummySourcePath -Value "# Test Source Content $(Get-Random)" -Force
+            
+            $tempDestDir = Join-Path -Path $script:TestScriptSaveFolder -ChildPath "TempTestSaveFolder"
+            $tempDestFile = Join-Path -Path $tempDestDir -ChildPath $dummySourceName # Expecting dummy file name
+            if (Test-Path $tempDestDir) { Remove-Item -Path $tempDestDir -Recurse -Force }
+
+            # Execute: Call the function to copy the dummy script using the -SourcePath parameter
+            $resultPath = $null
+            try {
+                 $resultPath = Save-ScriptToUserLocation -DestinationDir $tempDestDir -ScriptName $dummySourceName -SourcePath $dummySourcePath -ErrorAction Stop
+            } catch {
+                 Write-Warning "Save-ScriptToUserLocation test failed during execution: $($_.Exception.Message)"
+                 # Let validation fail below
+            }
+            
+            # Validate: Check if function returned correct path, file exists, and is not empty
+            $fileExists = Test-Path -Path $tempDestFile
+            $fileNotEmpty = $false
+            if ($fileExists) {
+                 $fileSize = (Get-Item -Path $tempDestFile).Length
+                 if ($fileSize -gt 0) { $fileNotEmpty = $true } else { Write-Warning "Copied file '$tempDestFile' is empty." }
+            } else { Write-Warning "Copied file '$tempDestFile' not found." }
+            $pathMatches = ($resultPath -eq $tempDestFile)
+            if (-not $pathMatches) { Write-Warning "Save-ScriptToUserLocation returned incorrect path. Expected: '$tempDestFile', Got: '$resultPath'" }
+
+            # Cleanup
+            if (Test-Path $tempDestDir) { Remove-Item -Path $tempDestDir -Recurse -Force }
+            Remove-Item -Path $dummySourcePath -Force -ErrorAction SilentlyContinue # Cleanup dummy source
+
+            # Return result
+            return ($fileExists -and $fileNotEmpty -and $pathMatches)
+        }
     }
-    if (Should-Run-Test -CategoryName "Process" -IndividualTestName "Get-ProcessStatus") {
-        Run-Test -Name "Get-ProcessStatus (Notepad Running/Stopped)" -TestBlock { $proc = Start-Process notepad -PassThru -ErrorAction SilentlyContinue; if (-not $proc) { throw "Failed to start notepad for test." }; Start-Sleep -Seconds 1; $isRunning = Get-ProcessStatus -ProcessName "notepad"; $stopResult = Get-ProcessStatus -ProcessName "notepad" -StopProcess; Start-Sleep -Seconds 1; $isStopped = Get-ProcessStatus -ProcessName "notepad"; if (-not $isRunning) { Write-Warning "Get-ProcessStatus failed to detect running process."; return $false }; if (-not $stopResult) { Write-Warning "Get-ProcessStatus failed to report stop success."; return $false }; if ($isStopped) { Write-Warning "Get-ProcessStatus failed to detect stopped process."; return $false }; return $true }
+    if (Test-ShouldRun -CategoryName "Process" -IndividualTestName "Get-ProcessStatus") {
+        Invoke-Test -Name "Get-ProcessStatus (Notepad Running/Stopped)" -TestBlock { $proc = Start-Process notepad -PassThru -ErrorAction SilentlyContinue; if (-not $proc) { throw "Failed to start notepad for test." }; Start-Sleep -Seconds 1; $isRunning = Get-ProcessStatus -ProcessName "notepad"; $stopResult = Get-ProcessStatus -ProcessName "notepad" -StopProcess; Start-Sleep -Seconds 1; $isStopped = Get-ProcessStatus -ProcessName "notepad"; if (-not $isRunning) { Write-Warning "Get-ProcessStatus failed to detect running process."; return $false }; if (-not $stopResult) { Write-Warning "Get-ProcessStatus failed to report stop success."; return $false }; if ($isStopped) { Write-Warning "Get-ProcessStatus failed to detect stopped process."; return $false }; return $true }
     }
-    if (Should-Run-Test -CategoryName "Task" -IndividualTestName "Test-ScheduledTask") {
-         Run-Test -Name "Test-ScheduledTask (Context: $simType)" -TestBlock { $originalFunc = $null; if ($script:SimulateTask) { $originalFunc = Get-Command Test-ScheduledTask; $mockFunc = [scriptblock]::Create('$true'); Set-Item Function:\Test-ScheduledTask -Value $mockFunc }; $result = $null; try { $result = Test-ScheduledTask } finally { if ($originalFunc) { Set-Item Function:\Test-ScheduledTask -Value $originalFunc.ScriptBlock } }; if ($script:SimulateTask) { return $result } else { return (-not $result) } }
+    if (Test-ShouldRun -CategoryName "Task" -IndividualTestName "Test-ScheduledTask") {
+         Invoke-Test -Name "Test-ScheduledTask (Context: $simType)" -TestBlock { $originalFunc = $null; if ($script:SimulateTask) { $originalFunc = Get-Command Test-ScheduledTask; $mockFunc = [scriptblock]::Create('$true'); Set-Item Function:\Test-ScheduledTask -Value $mockFunc }; $result = $null; try { $result = Test-ScheduledTask } finally { if ($originalFunc) { Set-Item Function:\Test-ScheduledTask -Value $originalFunc.ScriptBlock } }; if ($script:SimulateTask) { return $result } else { return (-not $result) } }
     }
-    if (Should-Run-Test -CategoryName "Notifications" -IndividualTestName "Show-NotificationToLoggedInUsers") {
-        Run-Test -Name "Show-NotificationToLoggedInUsers (Context: $simType)" -TestBlock { $originalFunc = Get-Command Test-ScheduledTask; $mockFunc = [scriptblock]::Create('$script:SimulateTask'); Set-Item Function:\Test-ScheduledTask -Value $mockFunc; try { Show-NotificationToLoggedInUsers -Title "Test Notification" -Message "Context Test ($simType $contextType)" } finally { Set-Item Function:\Test-ScheduledTask -Value $originalFunc.ScriptBlock }; if ($script:SimulateTask) { return -not (Select-String -Path $global:LogFile -Pattern "Attempting notification via scheduled task method." -Quiet) } else { return (Select-String -Path $global:LogFile -Pattern "Running interactively. Attempting direct notification." -Quiet) } }
+    if (Test-ShouldRun -CategoryName "Notifications" -IndividualTestName "Show-NotificationToLoggedInUsers") {
+        Invoke-Test -Name "Show-NotificationToLoggedInUsers (Context: $simType)" -TestBlock { $originalFunc = Get-Command Test-ScheduledTask; $mockFunc = [scriptblock]::Create('$script:SimulateTask'); Set-Item Function:\Test-ScheduledTask -Value $mockFunc; try { Show-NotificationToLoggedInUsers -Title "Test Notification" -Message "Context Test ($simType $contextType)" } finally { Set-Item Function:\Test-ScheduledTask -Value $originalFunc.ScriptBlock }; if ($script:SimulateTask) { return -not (Select-String -Path $global:LogFile -Pattern "Attempting notification via scheduled task method." -Quiet) } else { return (Select-String -Path $global:LogFile -Pattern "Running interactively. Attempting direct notification." -Quiet) } }
     }
     # Add tests that require Elevation (will fail if not elevated)
-    if (Should-Run-Test -CategoryName "Admin" -IndividualTestName "Register-ScheduledTaskForScript") {
-        Run-Test -Name "Register-ScheduledTaskForScript (Requires Elevation)" -TestBlock { $testTaskName = "TestLoxoneUpdateTask_$(Get-Random)"; $dummyScriptPath = Join-Path $script:TestScriptSaveFolder "dummy.ps1"; Set-Content -Path $dummyScriptPath -Value "# Dummy" -Force; $success = $true; try { Register-ScheduledTaskForScript -ScriptPath $dummyScriptPath -TaskName $testTaskName -ScheduledTaskIntervalMinutes $script:ScheduledTaskIntervalMinutes -Channel "Test" -DebugMode $script:DebugMode -EnableCRC $true -InstallMode "verysilent" -CloseApplications $false -ScriptSaveFolder $script:ScriptSaveFolder -MaxLogFileSizeMB 1 -SkipUpdateIfAnyProcessIsRunning $false; if ($script:IsElevatedRun -and -not (Get-ScheduledTask -TaskName $testTaskName -ErrorAction SilentlyContinue)) { $success = $false; Write-Warning "Scheduled task '$testTaskName' was not created even when elevated." } elseif (-not $script:IsElevatedRun -and (Get-ScheduledTask -TaskName $testTaskName -ErrorAction SilentlyContinue)) { $success = $false; Write-Warning "Scheduled task '$testTaskName' was created unexpectedly without elevation." } elseif (-not $script:IsElevatedRun) { Write-Host "  INFO: Task registration correctly failed (not elevated)." -ForegroundColor Gray; $success = $true } } catch { if (-not $script:IsElevatedRun) { Write-Host "  INFO: Task registration correctly failed with error (not elevated): $($_.Exception.Message)" -ForegroundColor Gray; $success = $true } else { $success = $false; Write-Warning "Error during Register-ScheduledTaskForScript test (Elevated): $($_.Exception.Message)" } } finally { Unregister-ScheduledTask -TaskName $testTaskName -Confirm:$false -ErrorAction SilentlyContinue; if (Test-Path $dummyScriptPath) { Remove-Item -Path $dummyScriptPath -Force -ErrorAction SilentlyContinue } }; return $success }
+    if (Test-ShouldRun -CategoryName "Admin" -IndividualTestName "Register-ScheduledTaskForScript") {
+        Invoke-Test -Name "Register-ScheduledTaskForScript (Requires Elevation)" -TestBlock { $testTaskName = "TestLoxoneUpdateTask_$(Get-Random)"; $dummyScriptPath = Join-Path $script:TestScriptSaveFolder "dummy.ps1"; Set-Content -Path $dummyScriptPath -Value "# Dummy" -Force; $success = $true; try { Register-ScheduledTaskForScript -ScriptPath $dummyScriptPath -TaskName $testTaskName -ScheduledTaskIntervalMinutes $script:ScheduledTaskIntervalMinutes -Channel "Test" -DebugMode $script:DebugMode -EnableCRC $true -InstallMode "verysilent" -CloseApplications $false -ScriptSaveFolder $script:ScriptSaveFolder -MaxLogFileSizeMB 1 -SkipUpdateIfAnyProcessIsRunning $false; if ($script:IsElevatedRun -and -not (Get-ScheduledTask -TaskName $testTaskName -ErrorAction SilentlyContinue)) { $success = $false; Write-Warning "Scheduled task '$testTaskName' was not created even when elevated." } elseif (-not $script:IsElevatedRun -and (Get-ScheduledTask -TaskName $testTaskName -ErrorAction SilentlyContinue)) { $success = $false; Write-Warning "Scheduled task '$testTaskName' was created unexpectedly without elevation." } elseif (-not $script:IsElevatedRun) { Write-Host "  INFO: Task registration correctly failed (not elevated)." -ForegroundColor Gray; $success = $true } } catch { if (-not $script:IsElevatedRun) { Write-Host "  INFO: Task registration correctly failed with error (not elevated): $($_.Exception.Message)" -ForegroundColor Gray; $success = $true } else { $success = $false; Write-Warning "Error during Register-ScheduledTaskForScript test (Elevated): $($_.Exception.Message)" } } finally { Unregister-ScheduledTask -TaskName $testTaskName -Confirm:$false -ErrorAction SilentlyContinue; if (Test-Path $dummyScriptPath) { Remove-Item -Path $dummyScriptPath -Force -ErrorAction SilentlyContinue } }; return $success }
     }
 
     # Return results for this run
-    return @{ Result = $localOverallResult; Details = $currentTestResults } 
+    return @{ Result = $script:currentTestSuiteOverallResult; Details = $script:currentTestSuiteResults } 
 } # End of Invoke-TestSuite function
 
 # --- Main Execution Logic ---
