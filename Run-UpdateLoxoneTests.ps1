@@ -533,6 +533,139 @@ function Invoke-TestSuite {
     }
 
 
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Get-ExecutableSignature") {
+        Invoke-Test -Name "Get-ExecutableSignature (Mocked Signature)" -TestBlock {
+            $results = @{
+                ValidOnly = $false
+                Match = $false
+                MismatchWarn = $false
+                InvalidFail = $false
+                RefNotFoundWarn = $false
+                RefInvalidWarn = $false
+            }
+            $dummyExePath = Join-Path $script:TestScriptSaveFolder "dummy_sig_test.exe"
+            $dummyRefPath = Join-Path $script:TestScriptSaveFolder "dummy_ref_sig_test.exe"
+            $nonExistentRefPath = Join-Path $script:TestScriptSaveFolder "non_existent_ref.exe"
+
+            # Store original Get-AuthenticodeSignature if it exists
+            $originalGetSig = Get-Command Get-AuthenticodeSignature -ErrorAction SilentlyContinue
+
+            # --- Test 1: Valid signature, no reference --- 
+            try {
+                function Get-AuthenticodeSignature { param($FilePath) Write-Host "  DEBUG MOCK (ValidOnly): Get-AuthenticodeSignature Path='$FilePath'"; return [PSCustomObject]@{ Status = 'Valid'; SignerCertificate = [PSCustomObject]@{ Thumbprint = 'THUMBPRINT_A' } } }
+                if (Get-ExecutableSignature -ExePath $dummyExePath) { $results.ValidOnly = $true } else { Write-Warning "ValidOnly test failed." }
+            } catch {
+                Write-Warning "ValidOnly test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-AuthenticodeSignature -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Test 2: Valid signature, matching reference --- 
+            try {
+                function Get-AuthenticodeSignature { 
+                    param($FilePath) 
+                    Write-Host "  DEBUG MOCK (Match): Get-AuthenticodeSignature Path='$FilePath'"
+                    if ($FilePath -eq $dummyExePath) { return [PSCustomObject]@{ Status = 'Valid'; SignerCertificate = [PSCustomObject]@{ Thumbprint = 'THUMBPRINT_A' } } }
+                    if ($FilePath -eq $dummyRefPath) { return [PSCustomObject]@{ Status = 'Valid'; SignerCertificate = [PSCustomObject]@{ Thumbprint = 'THUMBPRINT_A' } } }
+                    throw "Unexpected path in Match test: $FilePath"
+                }
+                # Need to ensure reference file *exists* for Test-Path inside the function
+                Set-Content -Path $dummyRefPath -Value "ref" -Force
+                if (Get-ExecutableSignature -ExePath $dummyExePath -ReferenceExePath $dummyRefPath) { $results.Match = $true } else { Write-Warning "Match test failed." }
+            } catch {
+                Write-Warning "Match test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-AuthenticodeSignature -Force -ErrorAction SilentlyContinue
+                if (Test-Path $dummyRefPath) { Remove-Item $dummyRefPath -Force }
+            }
+
+            # --- Test 3: Valid signature, mismatching reference --- 
+            try {
+                function Get-AuthenticodeSignature { 
+                    param($FilePath) 
+                    Write-Host "  DEBUG MOCK (Mismatch): Get-AuthenticodeSignature Path='$FilePath'"
+                    if ($FilePath -eq $dummyExePath) { return [PSCustomObject]@{ Status = 'Valid'; SignerCertificate = [PSCustomObject]@{ Thumbprint = 'THUMBPRINT_A' } } }
+                    if ($FilePath -eq $dummyRefPath) { return [PSCustomObject]@{ Status = 'Valid'; SignerCertificate = [PSCustomObject]@{ Thumbprint = 'THUMBPRINT_B' } } }
+                    throw "Unexpected path in Mismatch test: $FilePath"
+                }
+                Set-Content -Path $dummyRefPath -Value "ref" -Force
+                # Expect true (valid primary sig), but check log for warning
+                if (Get-ExecutableSignature -ExePath $dummyExePath -ReferenceExePath $dummyRefPath) {
+                    Start-Sleep -Milliseconds 100
+                    if (Select-String -Path $global:LogFile -Pattern "Thumbprint MISMATCH" -Quiet) {
+                        $results.MismatchWarn = $true
+                    } else { Write-Warning "MismatchWarn test failed: Expected log message not found." }
+                } else { Write-Warning "MismatchWarn test failed: Function returned false." }
+            } catch {
+                Write-Warning "MismatchWarn test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-AuthenticodeSignature -Force -ErrorAction SilentlyContinue
+                if (Test-Path $dummyRefPath) { Remove-Item $dummyRefPath -Force }
+            }
+
+            # --- Test 4: Invalid signature --- 
+            try {
+                function Get-AuthenticodeSignature { param($FilePath) Write-Host "  DEBUG MOCK (Invalid): Get-AuthenticodeSignature Path='$FilePath'"; return [PSCustomObject]@{ Status = 'HashMismatch' } }
+                Get-ExecutableSignature -ExePath $dummyExePath
+                Write-Warning "InvalidFail test failed: Expected exception but none was thrown."
+            } catch {
+                $results.InvalidFail = $true # Exception expected
+                Write-Host "  DEBUG TEST: InvalidFail passed (Exception caught as expected)."
+            } finally {
+                Remove-Item function:\Get-AuthenticodeSignature -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Test 5: Reference not found --- 
+            try {
+                function Get-AuthenticodeSignature { param($FilePath) Write-Host "  DEBUG MOCK (RefNotFound): Get-AuthenticodeSignature Path='$FilePath'"; return [PSCustomObject]@{ Status = 'Valid'; SignerCertificate = [PSCustomObject]@{ Thumbprint = 'THUMBPRINT_A' } } }
+                if (Test-Path $nonExistentRefPath) { Remove-Item $nonExistentRefPath -Force } # Ensure not found
+                # Expect true (valid primary sig), but check log for warning
+                if (Get-ExecutableSignature -ExePath $dummyExePath -ReferenceExePath $nonExistentRefPath) {
+                    Start-Sleep -Milliseconds 100
+                    if (Select-String -Path $global:LogFile -Pattern "Reference executable path .* not found" -Quiet) {
+                        $results.RefNotFoundWarn = $true
+                    } else { Write-Warning "RefNotFoundWarn test failed: Expected log message not found." }
+                } else { Write-Warning "RefNotFoundWarn test failed: Function returned false." }
+            } catch {
+                Write-Warning "RefNotFoundWarn test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-AuthenticodeSignature -Force -ErrorAction SilentlyContinue
+            }
+            
+            # --- Test 6: Reference invalid signature --- 
+            try {
+                function Get-AuthenticodeSignature { 
+                    param($FilePath) 
+                    Write-Host "  DEBUG MOCK (RefInvalid): Get-AuthenticodeSignature Path='$FilePath'"
+                    if ($FilePath -eq $dummyExePath) { return [PSCustomObject]@{ Status = 'Valid'; SignerCertificate = [PSCustomObject]@{ Thumbprint = 'THUMBPRINT_A' } } }
+                    if ($FilePath -eq $dummyRefPath) { return [PSCustomObject]@{ Status = 'HashMismatch' } }
+                    throw "Unexpected path in RefInvalid test: $FilePath"
+                }
+                Set-Content -Path $dummyRefPath -Value "ref" -Force
+                # Expect true (valid primary sig), but check log for warning
+                if (Get-ExecutableSignature -ExePath $dummyExePath -ReferenceExePath $dummyRefPath) {
+                    Start-Sleep -Milliseconds 100
+                    if (Select-String -Path $global:LogFile -Pattern "Could not get a valid signature from reference executable" -Quiet) {
+                        $results.RefInvalidWarn = $true
+                    } else { Write-Warning "RefInvalidWarn test failed: Expected log message not found." }
+                } else { Write-Warning "RefInvalidWarn test failed: Function returned false." }
+            } catch {
+                Write-Warning "RefInvalidWarn test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-AuthenticodeSignature -Force -ErrorAction SilentlyContinue
+                if (Test-Path $dummyRefPath) { Remove-Item $dummyRefPath -Force }
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Get-ExecutableSignature."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
     if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Format-DoubleCharacter") {
         Invoke-Test -Name "Format-DoubleCharacter" -TestBlock {
             $results = @{
