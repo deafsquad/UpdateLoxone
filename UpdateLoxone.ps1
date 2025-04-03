@@ -6,7 +6,7 @@ param(
     [Parameter()][ValidateSet("silent", "verysilent", IgnoreCase = $true)] [string]$InstallMode = "verysilent",
     [Parameter()] [object]$CloseApplications = $false,
     # Default will be overridden below by the script's own location.
-    [Parameter()] [string]$ScriptSaveFolder = "$env:USERPROFILE\Scripts",
+    [Parameter()] [string]$ScriptSaveFolder = $null, # Default to null, will be set below
     [Parameter()] [int]$MaxLogFileSizeMB = 1,
     [Parameter()] [int]$ScheduledTaskIntervalMinutes = 10,
     [Parameter()] [object]$SkipUpdateIfAnyProcessIsRunning = $false,
@@ -15,16 +15,32 @@ param(
     [Parameter()] [switch]$TestMonitor = $false,
     [Parameter()] [string]$MonitorSourceLogDirectory = $null, # Optional: Specify custom path for monitor logs
     [Parameter()] [switch]$TestKill = $false, # Pause script for external termination test
-    [Parameter()] [switch]$SetupSystemMonitor = $false # Special mode to start monitor as SYSTEM for testing
+    [Parameter()] [switch]$SetupSystemMonitor = $false, # Special mode to start monitor as SYSTEM for testing
+    [Parameter(DontShow=$true)][switch]$Elevated = $false # Internal switch for self-elevation
 )
 
+# $PSScriptRoot is the default for $ScriptSaveFolder parameter.
+# Check if $PSScriptRoot is empty (can happen in some interactive sessions)
+# and if the parameter wasn't explicitly provided with a different value.
+if ([string]::IsNullOrEmpty($ScriptSaveFolder) -and -not $PSBoundParameters.ContainsKey('ScriptSaveFolder')) {
+   Write-Warning "PSScriptRoot is empty and ScriptSaveFolder not provided. Falling back to user profile + '\UpdateLoxone' for interactive debugging."
+   $ScriptSaveFolder = Join-Path -Path $env:USERPROFILE -ChildPath "UpdateLoxone" # Fallback using UserProfile
+}
+Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Determined ScriptSaveFolder: '$ScriptSaveFolder'"
+# Immediately convert parameters to proper Boolean types.
 # Immediately convert parameters to proper Boolean types.
 $DebugMode = [bool]$DebugMode
 $EnableCRC = [bool]$EnableCRC
 $CloseApplications = [bool]$CloseApplications
 $SkipUpdateIfAnyProcessIsRunning = [bool]$SkipUpdateIfAnyProcessIsRunning
 
+# Define download directory
+$downloadDir = Join-Path -Path $ScriptSaveFolder -ChildPath "Downloads" # Define download dir relative to script save folder
+Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Download directory set to: '$downloadDir'"
 # Set VerbosePreference based on DebugMode.
+# Check if running as Administrator
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Running as Admin: $isAdmin"
 if ($DebugMode) {
     $VerbosePreference = "Continue"
 } else {
@@ -32,29 +48,25 @@ if ($DebugMode) {
 }
 
 ###############################################################################
-#                           FUNCTION DEFINITIONS                              #
+#                            INITIALIZATION & IMPORTS                         #
 ###############################################################################
 
 
-# Import the utility functions from the module
 try {
-    # Determine the script's directory using $PSScriptRoot (more reliable)
-    # $PSScriptRoot is automatically defined when a script runs
-    $scriptDir = $PSScriptRoot 
-    if ([string]::IsNullOrEmpty($scriptDir)) {
-        # Fallback for interactive/ISE execution where $PSScriptRoot might be null
-        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-    }
-
-# Initialize the global log file path and status flags
-$global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
-$global:ErrorOccurred = $false
-$global:LastErrorLine = "N/A"
-$global:UacCancelled = $false
-$global:ScriptInterrupted = $false
-Write-Host "[$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")] [DEBUG] Global variables initialized. LogFile: $($global:LogFile)"
-
-    Import-Module -Name (Join-Path -Path $scriptDir -ChildPath "UpdateLoxoneUtils.psm1") -Force -ErrorAction Stop
+     # Construct module path - prioritize $PSScriptRoot, fallback to CWD for interactive
+     $moduleUtilPath = "UpdateLoxoneUtils.psm1"
+     $moduleFullPath = ""
+    if (-not [string]::IsNullOrEmpty($PSScriptRoot)) {
+        $moduleFullPath = Join-Path -Path $PSScriptRoot -ChildPath $moduleUtilPath
+     } elseif (Test-Path (Join-Path (Get-Location) $moduleUtilPath)) {
+         # Fallback for interactive if module is in CWD
+         $moduleFullPath = Join-Path (Get-Location) $moduleUtilPath
+         Write-Warning "Could not determine PSScriptRoot, attempting to load module from CWD: $moduleFullPath"
+     } else {
+         throw "Cannot determine script path or find module '$moduleUtilPath' in CWD."
+     }
+     
+     Import-Module -Name $moduleFullPath -Force -ErrorAction Stop
     # Use Write-Host as Write-DebugLog might not be available yet if import fails partially
     Write-Host "[$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")] [DEBUG] Successfully imported UpdateLoxoneUtils module."
 } catch {
@@ -63,6 +75,15 @@ Write-Host "[$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")] [DEBUG] Global variables
 }
 # Cleaned up placeholders after moving functions to module
 
+ # Initialize the global log file path and status flags AFTER module import (so Write-DebugLog is available)
+ # Use the $ScriptSaveFolder parameter value (which defaults to $PSScriptRoot)
+ $global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
+ $global:ErrorOccurred = $false
+ $global:LastErrorLine = "N/A"
+ $global:UacCancelled = $false
+ $global:ScriptInterrupted = $false
+ Write-DebugLog "Global variables initialized. LogFile: $($global:LogFile)" # Now uses Write-DebugLog
+ 
 #region Main Script Execution
 Invoke-LogFileRotation -LogPath $global:LogFile
 
@@ -144,9 +165,11 @@ try {
         Write-DebugLog -Message "Installed application path = '${installedExePath}'"
         $localAppExe = Join-Path -Path $installedExePath -ChildPath "LoxoneConfig.exe"
         $installedVersion = Get-InstalledVersion -ExePath $localAppExe #This will now not throw if not installed
-  if ($null -ne $installedVersion){ # <<< CHANGED: Correct comparison
-   Write-LogMessage "Installed version: ${installedVersion}" -Level "INFO"
-  }
+        if (-not [string]::IsNullOrEmpty($installedVersion)) {
+            Write-LogMessage "Installed version: ${installedVersion}" -Level "INFO"
+        } else {
+            Write-LogMessage "Could not determine installed version from '$localAppExe'." -Level "WARN"
+        }
         $normalizedInstalledVersion = Convert-VersionString $installedVersion
     }
      else {
@@ -270,14 +293,39 @@ try {
 
     # --- Scheduled Task Setup (Run this first) ---
     $scheduledTaskName = "LoxoneUpdateTask"
-    if (-not (Test-ScheduledTask)) {
-        $scriptDestination = Save-ScriptToUserLocation -DestinationDir $ScriptSaveFolder -ScriptName "UpdateLoxone.ps1"
-        Invoke-AdminAndCorrectPathCheck
+    # If this is the first run (not the elevated instance) AND we are not Admin, attempt elevation.
+    if (-not $Elevated -and -not $isAdmin) {
+        Write-LogMessage "Scheduled task requires Admin rights. Attempting self-elevation..." -Level "WARN"
+        # Prepare arguments for re-launch, passing all original parameters + -Elevated
+        $relaunchArgsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", """$($MyInvocation.MyCommand.Path)""")
+        $PSBoundParameters.Keys | ForEach-Object {
+            $paramName = $_; $paramValue = $PSBoundParameters[$paramName]
+            if ($paramValue -is [System.Management.Automation.SwitchParameter]) {
+                if ($paramValue.IsPresent) { $relaunchArgsList += "-$paramName" }
+            } else {
+                # Ensure values with spaces are quoted correctly
+                $relaunchArgsList += "-$paramName", """$($paramValue -replace '"','""')""" # Double up internal quotes
+            }
+        }
+        $relaunchArgsList += "-Elevated" # Add the internal switch
+        $relaunchArgs = $relaunchArgsList -join " "
+        Write-DebugLog "Relaunch Args: $relaunchArgs"
+        try {
+            Start-Process -FilePath "PowerShell.exe" -ArgumentList $relaunchArgs -Verb RunAs -ErrorAction Stop
+            Write-LogMessage "Elevated process launched. Exiting current non-elevated instance." -Level "INFO"
+            exit 0 # Exit the non-elevated instance
+        } catch { Write-LogMessage "Failed to self-elevate: $($_.Exception.Message). Task registration will likely fail." -Level "ERROR" }
+    }
+    # If we are Admin (either initially or after elevation), register/update the task.
+    # The function uses -Force, so it handles creation or update.
+    elseif ($isAdmin) {
+        Write-LogMessage "Running as Admin. Ensuring scheduled task '$scheduledTaskName' is registered/updated." -Level "INFO"
+        Write-DebugLog "About to call Register-ScheduledTaskForScript. Value of `$DebugMode in this scope: $DebugMode"
+        $scriptDestination = $MyInvocation.MyCommand.Path # Use current script path
         Register-ScheduledTaskForScript -ScriptPath $scriptDestination -TaskName $scheduledTaskName
     }
-    else {
-        Write-LogMessage "Called by scheduler, skipping scheduler creation." -Level "INFO"
-    }
+    # If not Admin and elevation failed or was skipped, the script continues but task registration won't happen.
+    # We rely on the -Elevated switch to prevent the elevated instance from trying again.
 
     # --- Installation Check Block Moved Up ---
 
@@ -288,8 +336,8 @@ try {
             Write-LogMessage "LoxoneConfig.exe is running. Skipping update." -Level "INFO"
             exit 0  # Exit if Loxone Config is running and skip is enabled
         }
+        # No need for else log here, Get-ProcessStatus logs if not running
         else {
-            Write-LogMessage "LoxoneConfig.exe is not running. Proceeding with update." -Level "INFO"
         }
     }
 
@@ -306,15 +354,13 @@ try {
         throw $_
     }
 
+    # --- Process Update XML ---
     if ($DebugMode) {
         Write-LogMessage "XML Root: $($xml.DocumentElement.Name)" -Level "DEBUG"
         Write-LogMessage "Available update channels:" -Level "DEBUG"
         foreach ($node in $xml.DocumentElement.ChildNodes) {
             Write-LogMessage "- $($node.name)" -Level "DEBUG"
         }
-    }
-    else {
-        Write-LogMessage "Update XML loaded. Channels are available." -Level "INFO"
     }
 
     $channelNode = $xml.Miniserversoftware.$Channel
@@ -374,6 +420,7 @@ try {
 		 # --- Miniserver Update (Always runs after LoxoneConfig install/update) ---
 		Write-LogMessage "Proceeding with Miniserver update." -Level "INFO"
 		  Update-MS -DesiredVersion $updateVersion `
+        Write-DebugLog "Update-MS Call 1: ScriptSaveFolder='$ScriptSaveFolder', MSListPath='$(Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxoneMSList.txt")'"
 				  -MSListPath (Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxoneMSList.txt") `
 				  -LogFile $global:LogFile `
 				  -MaxLogFileSizeMB $MaxLogFileSizeMB `
@@ -389,7 +436,8 @@ try {
     }
 	 # --- Miniserver Update (Always runs) ---
     Write-LogMessage "Proceeding with Miniserver update." -Level "INFO"
-      Update-MS -DesiredVersion $updateVersion `
+     Write-DebugLog "Update-MS Call 2: ScriptSaveFolder='$ScriptSaveFolder', MSListPath='$(Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxoneMSList.txt")'"
+       Update-MS -DesiredVersion $updateVersion `
               -MSListPath (Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxoneMSList.txt") `
               -LogFile $global:LogFile `
               -MaxLogFileSizeMB $MaxLogFileSizeMB `
@@ -411,6 +459,7 @@ catch {
 finally {
     # Check flags in order of precedence: Interruption > UAC Cancel > Caught Error > Success
     $exitCodeMsg = if ($LASTEXITCODE -ne $null) { "Last Exit Code: $LASTEXITCODE" } else { "Last Exit Code: (Not Set)" }
+     # Note: $LASTEXITCODE might not be accurate if script exited via 'exit' in catch block
 
     if ($global:ScriptInterrupted) {
          Write-LogMessage "Script execution INTERRUPTED by user (Ctrl+C detected). $exitCodeMsg" -Level "WARN"
@@ -423,7 +472,7 @@ finally {
          # if (-not (Test-ScheduledTask)) { Read-Host "UAC cancelled. Press Enter to exit" }
     }
     elseif ($global:ErrorOccurred) {
-        Write-LogMessage "Script execution finished with an ERROR on line $global:LastErrorLine. $exitCodeMsg" -Level "ERROR"
+        Write-LogMessage "Script execution finished with an ERROR detected on line $global:LastErrorLine. $exitCodeMsg" -Level "ERROR"
         # Only pause if running interactively AND an error occurred:
         if (-not (Test-ScheduledTask)) {
             Read-Host "An error occurred on line $($global:LastErrorLine). Press Enter to exit"
