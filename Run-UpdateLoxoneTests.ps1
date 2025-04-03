@@ -464,6 +464,75 @@ function Invoke-TestSuite {
 
             } catch {
                 Write-Warning "Invoke-ZipFileExtraction test failed during setup or execution: $($_.Exception.Message)"
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Test-ScheduledTask") {
+        Invoke-Test -Name "Test-ScheduledTask (Simulated Parent)" -TestBlock {
+            $results = @{
+                IsTask = $false
+                IsNotTask = $false
+                ErrorCase = $false
+            }
+            
+            # Store original Get-CimInstance if it exists
+            $originalGCI = Get-Command Get-CimInstance -ErrorAction SilentlyContinue
+
+            # --- Test 1: Parent is taskeng.exe --- 
+            try {
+                function Get-CimInstance {
+                    param($ClassName, $Filter)
+                    Write-Host "  DEBUG MOCK (IsTask): Get-CimInstance called. Class='$ClassName', Filter='$Filter'"
+                    if ($Filter -match "ProcessId = $PID") { return [PSCustomObject]@{ ParentProcessId = 1234 } }
+                    if ($Filter -match "ProcessId = 1234") { return [PSCustomObject]@{ Name = 'taskeng.exe' } }
+                    throw "Unexpected Get-CimInstance call in IsTask test"
+                }
+                if (Test-ScheduledTask) { $results.IsTask = $true } else { Write-Warning "IsTask test failed. Expected true, Got false." }
+            } catch {
+                Write-Warning "IsTask test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-CimInstance -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Test 2: Parent is explorer.exe --- 
+            try {
+                function Get-CimInstance {
+                    param($ClassName, $Filter)
+                    Write-Host "  DEBUG MOCK (IsNotTask): Get-CimInstance called. Class='$ClassName', Filter='$Filter'"
+                    if ($Filter -match "ProcessId = $PID") { return [PSCustomObject]@{ ParentProcessId = 5678 } }
+                    if ($Filter -match "ProcessId = 5678") { return [PSCustomObject]@{ Name = 'explorer.exe' } }
+                    throw "Unexpected Get-CimInstance call in IsNotTask test"
+                }
+                if (-not (Test-ScheduledTask)) { $results.IsNotTask = $true } else { Write-Warning "IsNotTask test failed. Expected false, Got true." }
+            } catch {
+                Write-Warning "IsNotTask test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-CimInstance -Force -ErrorAction SilentlyContinue
+            }
+            
+            # --- Test 3: Error during Get-CimInstance --- 
+            try {
+                function Get-CimInstance {
+                    param($ClassName, $Filter)
+                    Write-Host "  DEBUG MOCK (ErrorCase): Get-CimInstance called. Class='$ClassName', Filter='$Filter'"
+                    throw "Simulated CIM error"
+                }
+                # Expect false when an error occurs
+                if (-not (Test-ScheduledTask)) { $results.ErrorCase = $true } else { Write-Warning "ErrorCase test failed. Expected false, Got true." }
+            } catch {
+                # The function itself shouldn't throw, it should return false
+                Write-Warning "ErrorCase test failed. Function threw unexpected exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-CimInstance -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Test-ScheduledTask."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
     if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Format-DoubleCharacter") {
         Invoke-Test -Name "Format-DoubleCharacter" -TestBlock {
             $results = @{
