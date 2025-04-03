@@ -291,41 +291,55 @@ try {
         exit 0
     }
 
-    # --- Scheduled Task Setup (Run this first) ---
+    # --- Scheduled Task Setup ---
     $scheduledTaskName = "LoxoneUpdateTask"
-    # If this is the first run (not the elevated instance) AND we are not Admin, attempt elevation.
-    if (-not $Elevated -and -not $isAdmin) {
-        Write-LogMessage "Scheduled task requires Admin rights. Attempting self-elevation..." -Level "WARN"
-        # Prepare arguments for re-launch, passing all original parameters + -Elevated
-        $relaunchArgsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", """$($MyInvocation.MyCommand.Path)""")
-        $PSBoundParameters.Keys | ForEach-Object {
-            $paramName = $_; $paramValue = $PSBoundParameters[$paramName]
-            if ($paramValue -is [System.Management.Automation.SwitchParameter]) {
-                if ($paramValue.IsPresent) { $relaunchArgsList += "-$paramName" }
-            } else {
-                # Ensure values with spaces are quoted correctly
-                $relaunchArgsList += "-$paramName", """$($paramValue -replace '"','""')""" # Double up internal quotes
+    $isRunningAsTask = Test-ScheduledTask # Assume this function exists and works
+
+    Write-DebugLog "Checking interactivity and admin status. IsRunningAsTask: $isRunningAsTask, IsAdmin: $isAdmin, ElevatedSwitch: $Elevated"
+
+    # Only attempt elevation or registration if NOT running as a task (i.e., interactive)
+    if (-not $isRunningAsTask) {
+        Write-DebugLog "Script detected as running interactively. Proceeding with elevation/registration checks."
+        # If this is the first run (not the elevated instance) AND we are not Admin, attempt elevation.
+        if (-not $Elevated -and -not $isAdmin) {
+            Write-LogMessage "Scheduled task requires Admin rights for interactive setup. Attempting self-elevation..." -Level "WARN"
+            # Prepare arguments for re-launch, passing all original parameters + -Elevated
+            $relaunchArgsList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", """$($MyInvocation.MyCommand.Path)""")
+            $PSBoundParameters.Keys | ForEach-Object {
+                $paramName = $_; $paramValue = $PSBoundParameters[$paramName]
+                if ($paramValue -is [System.Management.Automation.SwitchParameter]) {
+                    if ($paramValue.IsPresent) { $relaunchArgsList += "-$paramName" }
+                } else {
+                    # Ensure values with spaces are quoted correctly
+                    $relaunchArgsList += "-$paramName", """$($paramValue -replace '"','""')""" # Double up internal quotes
+                }
             }
+            $relaunchArgsList += "-Elevated" # Add the internal switch
+            $relaunchArgs = $relaunchArgsList -join " "
+            Write-DebugLog "Relaunch Args: $relaunchArgs"
+            try {
+                Start-Process -FilePath "PowerShell.exe" -ArgumentList $relaunchArgs -Verb RunAs -ErrorAction Stop
+                Write-LogMessage "Elevated process launched. Exiting current non-elevated instance." -Level "INFO"
+                exit 0 # Exit the non-elevated instance
+            } catch { Write-LogMessage "Failed to self-elevate: $($_.Exception.Message). Task registration will likely fail." -Level "ERROR" }
         }
-        $relaunchArgsList += "-Elevated" # Add the internal switch
-        $relaunchArgs = $relaunchArgsList -join " "
-        Write-DebugLog "Relaunch Args: $relaunchArgs"
-        try {
-            Start-Process -FilePath "PowerShell.exe" -ArgumentList $relaunchArgs -Verb RunAs -ErrorAction Stop
-            Write-LogMessage "Elevated process launched. Exiting current non-elevated instance." -Level "INFO"
-            exit 0 # Exit the non-elevated instance
-        } catch { Write-LogMessage "Failed to self-elevate: $($_.Exception.Message). Task registration will likely fail." -Level "ERROR" }
+        # If we are Admin (either initially or after elevation), register/update the task.
+        # The function uses -Force, so it handles creation or update.
+        elseif ($isAdmin) {
+            Write-LogMessage "Running interactively as Admin. Ensuring scheduled task '$scheduledTaskName' is registered/updated." -Level "INFO"
+            Write-DebugLog "About to call Register-ScheduledTaskForScript. Value of `$DebugMode in this scope: $DebugMode"
+            $scriptDestination = $MyInvocation.MyCommand.Path # Use current script path
+            Register-ScheduledTaskForScript -ScriptPath $scriptDestination -TaskName $scheduledTaskName
+        }
+        # If not Admin and elevation failed or was skipped, log it (interactive context)
+        elseif (-not $isAdmin) {
+             Write-LogMessage "Running interactively without Admin rights and elevation failed or was skipped. Scheduled task cannot be registered/updated." -Level "WARN"
+        }
     }
-    # If we are Admin (either initially or after elevation), register/update the task.
-    # The function uses -Force, so it handles creation or update.
-    elseif ($isAdmin) {
-        Write-LogMessage "Running as Admin. Ensuring scheduled task '$scheduledTaskName' is registered/updated." -Level "INFO"
-        Write-DebugLog "About to call Register-ScheduledTaskForScript. Value of `$DebugMode in this scope: $DebugMode"
-        $scriptDestination = $MyInvocation.MyCommand.Path # Use current script path
-        Register-ScheduledTaskForScript -ScriptPath $scriptDestination -TaskName $scheduledTaskName
+    else {
+        Write-DebugLog "Script detected as running via Scheduled Task. Skipping elevation and task registration/update."
     }
-    # If not Admin and elevation failed or was skipped, the script continues but task registration won't happen.
-    # We rely on the -Elevated switch to prevent the elevated instance from trying again.
+    # We rely on the -Elevated switch to prevent the elevated instance from trying again if elevation was attempted.
 
     # --- Installation Check Block Moved Up ---
 
