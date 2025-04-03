@@ -41,7 +41,7 @@ This PowerShell script automates the process of checking for, downloading, and i
     *   **Security Warning:** Passwords are stored in plain text. Use with caution.
     *   If this file is missing when the script runs interactively, you will be prompted to create it with the first entry. If missing when run via scheduled task, Miniserver updates will be skipped (logged as a warning).
 *   **`UpdateLoxoneMSList.txt.example`:** An example file showing the format for `UpdateLoxoneMSList.txt`.
-*   **`TrustedCertThumbprint.txt`:** (Optional) Intended for verifying executable signatures (currently placeholder logic in the script).
+*   **`TrustedCertThumbprint.txt`:** (Optional) This file is currently **not used** by the script's signature verification logic. The script only performs a basic check if the downloaded installer has a valid Authenticode signature using `Get-AuthenticodeSignature`.
 
 ## Parameters
 
@@ -84,7 +84,7 @@ This PowerShell script automates the process of checking for, downloading, and i
     *   Downloads the installer ZIP.
     *   Verifies file size and optionally CRC32 checksum.
     *   Extracts the `.exe` installer.
-    *   Verifies the installer's digital signature (basic check).
+    *   Verifies if the installer has a valid Authenticode digital signature (basic check using `Get-AuthenticodeSignature`; does not check against a trusted thumbprint).
     *   Runs the installer silently (`-InstallMode`).
 7.  **Miniserver Update Process (runs after Config update or if Config was already up-to-date):**
     *   Calls `Update-MS` function.
