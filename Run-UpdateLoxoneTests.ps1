@@ -147,6 +147,44 @@ function Invoke-TestSuite {
          Invoke-Test -Name "Convert-VersionString" -TestBlock { $v1 = "10.1.2.3"; $v2 = "15.6.04.01"; $norm1 = Convert-VersionString $v1; $norm2 = Convert-VersionString $v2; return ($norm1 -eq "10.1.2.3") -and ($norm2 -eq "15.6.4.1") }
     }
     if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Get-RedactedPassword") {
+    # Test case already exists, but let's make it explicit and more thorough
+    if (Test-ShouldRun -CategoryName "Version" -IndividualTestName "Convert-VersionString") {
+        Invoke-Test -Name "Convert-VersionString (Detailed)" -TestBlock {
+            $results = @{
+                Normal = $false
+                LeadingZeros = $false
+                SinglePart = $false
+                Empty = $false
+                Null = $false
+            }
+            
+            $v1 = "10.1.2.3"; $e1 = "10.1.2.3"
+            $v2 = "15.6.04.01"; $e2 = "15.6.4.1"
+            $v3 = "14"; $e3 = "14"
+            $v4 = ""; $e4 = ""
+            $v5 = $null; $e5 = $null
+
+            $r1 = Convert-VersionString $v1
+            $r2 = Convert-VersionString $v2
+            $r3 = Convert-VersionString $v3
+            $r4 = Convert-VersionString $v4
+            $r5 = Convert-VersionString $v5
+
+            if ($r1 -eq $e1) { $results.Normal = $true } else { Write-Warning "Normal version failed. Expected '$e1', Got '$r1'" }
+            if ($r2 -eq $e2) { $results.LeadingZeros = $true } else { Write-Warning "LeadingZeros version failed. Expected '$e2', Got '$r2'" }
+            if ($r3 -eq $e3) { $results.SinglePart = $true } else { Write-Warning "SinglePart version failed. Expected '$e3', Got '$r3'" }
+            if ($r4 -eq $e4) { $results.Empty = $true } else { Write-Warning "Empty version failed. Expected '$e4', Got '$r4'" }
+            if ($r5 -eq $e4) { $results.Null = $true } else { Write-Warning "Null version failed. Expected empty string (''), Got '$r5'" } # Expect empty string for null input
+
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Convert-VersionString."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
          # Reverted test case for original regex logic
          Invoke-Test -Name "Get-RedactedPassword" -TestBlock { 
              $url1 = "http://user:password@host.com"; 
@@ -356,6 +394,59 @@ function Invoke-TestSuite {
     }
 
     # Return results for this run
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Get-FileRecursive") {
+        Invoke-Test -Name "Get-FileRecursive (Temp Files)" -TestBlock {
+            $results = @{
+                FoundDirect = $false
+                FoundRecursive = $false
+                NotFound = $false
+            }
+            $baseTestDir = Join-Path $script:TestScriptSaveFolder "RecurseTest"
+            $subDir = Join-Path $baseTestDir "Sub"
+            $file1Name = "find_me_direct.txt"
+            $file2Name = "find_me_recursive.txt"
+            $file3Name = "dont_find_me.txt"
+            $file1Path = Join-Path $baseTestDir $file1Name
+            $file2Path = Join-Path $subDir $file2Name
+
+            # --- Test Setup --- 
+            try {
+                # Create directory structure
+                if (Test-Path $baseTestDir) { Remove-Item $baseTestDir -Recurse -Force -ErrorAction Stop }
+                New-Item -Path $subDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                # Create test files
+                Set-Content -Path $file1Path -Value "File 1" -Encoding UTF8 -Force -ErrorAction Stop
+                Set-Content -Path $file2Path -Value "File 2" -Encoding UTF8 -Force -ErrorAction Stop
+
+                # --- Test 1: Found Directly --- 
+                $found1 = Get-FileRecursive -BasePath $baseTestDir -FileName $file1Name
+                if ($found1 -eq $file1Path) { $results.FoundDirect = $true } else { Write-Warning "FoundDirect test failed. Expected '$file1Path', Got '$found1'" }
+
+                # --- Test 2: Found Recursively --- 
+                $found2 = Get-FileRecursive -BasePath $baseTestDir -FileName $file2Name
+                if ($found2 -eq $file2Path) { $results.FoundRecursive = $true } else { Write-Warning "FoundRecursive test failed. Expected '$file2Path', Got '$found2'" }
+
+                # --- Test 3: Not Found --- 
+                $found3 = Get-FileRecursive -BasePath $baseTestDir -FileName $file3Name
+                if ($null -eq $found3) { $results.NotFound = $true } else { Write-Warning "NotFound test failed. Expected null, Got '$found3'" }
+
+            } catch {
+                Write-Warning "Get-FileRecursive test failed during setup or execution: $($_.Exception.Message)"
+            } finally {
+                # --- Cleanup --- 
+                if (Test-Path $baseTestDir) { Remove-Item $baseTestDir -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Get-FileRecursive."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
     return @{ Result = $script:currentTestSuiteOverallResult; Details = $script:currentTestSuiteResults } 
 } # End of Invoke-TestSuite function
 
