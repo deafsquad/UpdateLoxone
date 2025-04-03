@@ -533,6 +533,165 @@ function Invoke-TestSuite {
     }
 
 
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Wait-For-PingSuccess") {
+        Invoke-Test -Name "Wait-For-PingSuccess (Mocked Connection)" -TestBlock {
+            $results = @{
+                SuccessImmediate = $false
+                SuccessAfterDelay = $false # Simulate needing a few checks
+                Timeout = $false
+            }
+            $dummyIP = "1.2.3.4"
+            $testTimeoutSec = 1 # Use short timeout for testing
+            $testIntervalSec = 0.1 # Use short interval
+
+            # Store original commands
+            $originalTNC = Get-Command Test-NetConnection -ErrorAction SilentlyContinue
+            $originalSleep = Get-Command Start-Sleep -ErrorAction SilentlyContinue
+            
+            # --- Test 1: Success Immediate --- 
+            try {
+                function Test-NetConnection { param($ComputerName, $Port, $InformationLevel) Write-Host "  DEBUG MOCK (SuccessImmediate): Test-NetConnection '$ComputerName'"; return $true }
+                function Start-Sleep { param($Seconds) Write-Host "  DEBUG MOCK (SuccessImmediate): Start-Sleep '$Seconds' (Skipped)" }
+                
+                if (Wait-For-PingSuccess -IPAddress $dummyIP -TimeoutSeconds $testTimeoutSec -IntervalSeconds $testIntervalSec) {
+                    $results.SuccessImmediate = $true
+                } else { Write-Warning "SuccessImmediate test failed. Expected true." }
+            } catch {
+                Write-Warning "SuccessImmediate test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Test-NetConnection -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Start-Sleep -Force -ErrorAction SilentlyContinue
+            }
+            
+            # --- Test 2: Success After Delay --- 
+            try {
+                $script:tncCallCount = 0 # Use script scope to track calls across mock invocations
+                function Test-NetConnection { 
+                    param($ComputerName, $Port, $InformationLevel) 
+                    Write-Host "  DEBUG MOCK (SuccessAfterDelay): Test-NetConnection '$ComputerName' (Call $($script:tncCallCount + 1))"
+                    $script:tncCallCount++
+                    return ($script:tncCallCount -ge 3) # Succeed on 3rd call
+                }
+                function Start-Sleep { param($Seconds) Write-Host "  DEBUG MOCK (SuccessAfterDelay): Start-Sleep '$Seconds' (Skipped)" }
+                
+                if (Wait-For-PingSuccess -IPAddress $dummyIP -TimeoutSeconds $testTimeoutSec -IntervalSeconds $testIntervalSec) {
+                    if ($script:tncCallCount -ge 3) {
+                         $results.SuccessAfterDelay = $true
+                    } else {
+                         Write-Warning "SuccessAfterDelay test failed. Returned true, but TNC called $($script:tncCallCount) times (expected >= 3)."
+                    }
+                } else { Write-Warning "SuccessAfterDelay test failed. Expected true." }
+            } catch {
+                Write-Warning "SuccessAfterDelay test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Test-NetConnection -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Start-Sleep -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Test 3: Timeout --- 
+            try {
+                function Test-NetConnection { param($ComputerName, $Port, $InformationLevel) Write-Host "  DEBUG MOCK (Timeout): Test-NetConnection '$ComputerName'"; return $false }
+                function Start-Sleep { param($Seconds) Write-Host "  DEBUG MOCK (Timeout): Start-Sleep '$Seconds' (Skipped)" }
+                
+                if (-not (Wait-For-PingSuccess -IPAddress $dummyIP -TimeoutSeconds $testTimeoutSec -IntervalSeconds $testIntervalSec)) {
+                    $results.Timeout = $true
+                } else { Write-Warning "Timeout test failed. Expected false." }
+            } catch {
+                Write-Warning "Timeout test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Test-NetConnection -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Start-Sleep -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Wait-For-PingSuccess."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Wait-For-PingTimeout") {
+        Invoke-Test -Name "Wait-For-PingTimeout (Mocked Connection)" -TestBlock {
+            $results = @{
+                TimeoutImmediate = $false
+                TimeoutAfterDelay = $false
+                Success = $false # i.e., remains reachable
+            }
+            $dummyIP = "1.2.3.4"
+            $testTimeoutSec = 1 # Use short timeout for testing
+            $testIntervalSec = 0.1 # Use short interval
+
+            # Store original commands
+            $originalTNC = Get-Command Test-NetConnection -ErrorAction SilentlyContinue
+            $originalSleep = Get-Command Start-Sleep -ErrorAction SilentlyContinue
+            
+            # --- Test 1: Timeout Immediate (Becomes Unreachable) --- 
+            try {
+                function Test-NetConnection { param($ComputerName, $Port, $InformationLevel) Write-Host "  DEBUG MOCK (TimeoutImmediate): Test-NetConnection '$ComputerName'"; return $false }
+                function Start-Sleep { param($Seconds) Write-Host "  DEBUG MOCK (TimeoutImmediate): Start-Sleep '$Seconds' (Skipped)" }
+                
+                if (Wait-For-PingTimeout -IPAddress $dummyIP -TimeoutSeconds $testTimeoutSec -IntervalSeconds $testIntervalSec) {
+                    $results.TimeoutImmediate = $true
+                } else { Write-Warning "TimeoutImmediate test failed. Expected true." }
+            } catch {
+                Write-Warning "TimeoutImmediate test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Test-NetConnection -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Start-Sleep -Force -ErrorAction SilentlyContinue
+            }
+            
+            # --- Test 2: Timeout After Delay --- 
+            try {
+                $script:tncCallCount = 0 # Use script scope
+                function Test-NetConnection { 
+                    param($ComputerName, $Port, $InformationLevel) 
+                    Write-Host "  DEBUG MOCK (TimeoutAfterDelay): Test-NetConnection '$ComputerName' (Call $($script:tncCallCount + 1))"
+                    $script:tncCallCount++
+                    return ($script:tncCallCount -lt 3) # Fail (become unreachable) on 3rd call
+                }
+                function Start-Sleep { param($Seconds) Write-Host "  DEBUG MOCK (TimeoutAfterDelay): Start-Sleep '$Seconds' (Skipped)" }
+                
+                if (Wait-For-PingTimeout -IPAddress $dummyIP -TimeoutSeconds $testTimeoutSec -IntervalSeconds $testIntervalSec) {
+                     if ($script:tncCallCount -ge 3) {
+                         $results.TimeoutAfterDelay = $true
+                    } else {
+                         Write-Warning "TimeoutAfterDelay test failed. Returned true, but TNC called $($script:tncCallCount) times (expected >= 3)."
+                    }
+                } else { Write-Warning "TimeoutAfterDelay test failed. Expected true." }
+            } catch {
+                Write-Warning "TimeoutAfterDelay test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Test-NetConnection -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Start-Sleep -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Test 3: Success (Remains Reachable) --- 
+            try {
+                function Test-NetConnection { param($ComputerName, $Port, $InformationLevel) Write-Host "  DEBUG MOCK (Success): Test-NetConnection '$ComputerName'"; return $true }
+                function Start-Sleep { param($Seconds) Write-Host "  DEBUG MOCK (Success): Start-Sleep '$Seconds' (Skipped)" }
+                
+                if (-not (Wait-For-PingTimeout -IPAddress $dummyIP -TimeoutSeconds $testTimeoutSec -IntervalSeconds $testIntervalSec)) {
+                    $results.Success = $true
+                } else { Write-Warning "Success test failed. Expected false." }
+            } catch {
+                Write-Warning "Success test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Test-NetConnection -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Start-Sleep -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Wait-For-PingTimeout."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
     if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Stop-LoxoneMonitor") {
         Invoke-Test -Name "Stop-LoxoneMonitor (Mocked Process)" -TestBlock {
             $results = @{
