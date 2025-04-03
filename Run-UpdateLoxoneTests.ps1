@@ -464,6 +464,61 @@ function Invoke-TestSuite {
 
             } catch {
                 Write-Warning "Invoke-ZipFileExtraction test failed during setup or execution: $($_.Exception.Message)"
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Find-File") {
+        Invoke-Test -Name "Find-File (Temp Files)" -TestBlock {
+            $results = @{
+                Found = $false
+                NotFound = $false
+            }
+            $baseTestDir = Join-Path $script:TestScriptSaveFolder "FindFileTest"
+            $subDir = Join-Path $baseTestDir "Sub"
+            $targetFileName = "loxonemonitor.exe"
+            $otherFileName = "other.exe"
+            $targetFilePath = Join-Path $subDir $targetFileName
+            $otherFilePath = Join-Path $baseTestDir $otherFileName
+
+            # --- Test Setup --- 
+            try {
+                # Create directory structure
+                if (Test-Path $baseTestDir) { Remove-Item $baseTestDir -Recurse -Force -ErrorAction Stop }
+                New-Item -Path $subDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                # Create test files
+                Set-Content -Path $targetFilePath -Value "monitor" -Encoding UTF8 -Force -ErrorAction Stop
+                Set-Content -Path $otherFilePath -Value "other" -Encoding UTF8 -Force -ErrorAction Stop
+
+                # --- Test 1: Found --- 
+                # Find-File specifically looks for loxonemonitor.exe
+                $found1 = Find-File -BasePath $baseTestDir
+                if ($found1 -eq $targetFilePath) { $results.Found = $true } else { Write-Warning "Found test failed. Expected '$targetFilePath', Got '$found1'" }
+
+                # --- Test 2: Not Found (Base path doesn't contain target file) --- 
+                # Create a different base dir without the target file
+                $baseTestDir2 = Join-Path $script:TestScriptSaveFolder "FindFileTest2"
+                if (Test-Path $baseTestDir2) { Remove-Item $baseTestDir2 -Recurse -Force -ErrorAction Stop }
+                New-Item -Path $baseTestDir2 -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                Set-Content -Path (Join-Path $baseTestDir2 "another.txt") -Value "abc" -Encoding UTF8 -Force -ErrorAction Stop
+                
+                $found2 = Find-File -BasePath $baseTestDir2
+                if ($null -eq $found2) { $results.NotFound = $true } else { Write-Warning "NotFound test failed. Expected null, Got '$found2'" }
+
+            } catch {
+                Write-Warning "Find-File test failed during setup or execution: $($_.Exception.Message)"
+            } finally {
+                # --- Cleanup --- 
+                if (Test-Path $baseTestDir) { Remove-Item $baseTestDir -Recurse -Force -ErrorAction SilentlyContinue }
+                if (Test-Path $baseTestDir2) { Remove-Item $baseTestDir2 -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Find-File."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
             } finally {
                 # --- Cleanup --- 
                 if (Test-Path $zipFilePath) { Remove-Item $zipFilePath -Force -ErrorAction SilentlyContinue }
