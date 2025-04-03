@@ -417,6 +417,70 @@ function Invoke-TestSuite {
                 # Create test files
                 Set-Content -Path $file1Path -Value "File 1" -Encoding UTF8 -Force -ErrorAction Stop
                 Set-Content -Path $file2Path -Value "File 2" -Encoding UTF8 -Force -ErrorAction Stop
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Invoke-ZipFileExtraction") {
+        Invoke-Test -Name "Invoke-ZipFileExtraction (Temp Zip)" -TestBlock {
+            $results = @{
+                Extracted = $false
+                ContentMatch = $false
+            }
+            $testContent = "Zip Extraction Test Content $(Get-Random)"
+            $sourceFileName = "zip_source.txt"
+            $zipFileName = "test_archive.zip"
+            $extractDirName = "ZipExtractTest"
+            
+            $sourceFilePath = Join-Path $script:TestScriptSaveFolder $sourceFileName
+            $zipFilePath = Join-Path $script:TestScriptSaveFolder $zipFileName
+            $extractDirPath = Join-Path $script:TestScriptSaveFolder $extractDirName
+            $extractedFilePath = Join-Path $extractDirPath $sourceFileName
+
+            # --- Test Setup --- 
+            try {
+                # Cleanup previous if any
+                if (Test-Path $zipFilePath) { Remove-Item $zipFilePath -Force -ErrorAction SilentlyContinue }
+                if (Test-Path $extractDirPath) { Remove-Item $extractDirPath -Recurse -Force -ErrorAction SilentlyContinue }
+                if (Test-Path $sourceFilePath) { Remove-Item $sourceFilePath -Force -ErrorAction SilentlyContinue }
+
+                # Create source file and zip it
+                Set-Content -Path $sourceFilePath -Value $testContent -Encoding UTF8 -Force -ErrorAction Stop
+                Compress-Archive -Path $sourceFilePath -DestinationPath $zipFilePath -Force -ErrorAction Stop
+                Remove-Item $sourceFilePath -Force # Remove original source after zipping
+                New-Item -Path $extractDirPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+
+                # --- Test Execution --- 
+                Invoke-ZipFileExtraction -ZipPath $zipFilePath -DestinationPath $extractDirPath
+
+                # --- Validation --- 
+                if (Test-Path $extractedFilePath) {
+                    $results.Extracted = $true
+                    $extractedContent = (Get-Content -Path $extractedFilePath -Raw -Encoding UTF8).Trim() # Trim whitespace/newlines
+                    if ($extractedContent -eq $testContent) { # Compare trimmed content
+                        $results.ContentMatch = $true
+                    } else {
+                        Write-Warning "ContentMatch test failed. Expected '$testContent', Got '$extractedContent'"
+                    }
+                } else {
+                    Write-Warning "Extracted test failed. File '$extractedFilePath' not found."
+                }
+
+            } catch {
+                Write-Warning "Invoke-ZipFileExtraction test failed during setup or execution: $($_.Exception.Message)"
+            } finally {
+                # --- Cleanup --- 
+                if (Test-Path $zipFilePath) { Remove-Item $zipFilePath -Force -ErrorAction SilentlyContinue }
+                if (Test-Path $extractDirPath) { Remove-Item $extractDirPath -Recurse -Force -ErrorAction SilentlyContinue }
+                if (Test-Path $sourceFilePath) { Remove-Item $sourceFilePath -Force -ErrorAction SilentlyContinue } # Just in case
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Invoke-ZipFileExtraction."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
 
                 # --- Test 1: Found Directly --- 
                 $found1 = Get-FileRecursive -BasePath $baseTestDir -FileName $file1Name
