@@ -19,24 +19,10 @@ param(
     [Parameter(DontShow=$true)][switch]$Elevated = $false # Internal switch for self-elevation
 )
 
-# -----------------------------------------------------------
-# Force the script’s own folder as the base.
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$ScriptSaveFolder = $scriptDir
-# Write-DebugLog requires the module, use Write-Host for this very early message
-Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Script directory determined as: '$scriptDir'. Set as ScriptSaveFolder."
-# -----------------------------------------------------------
+# ScriptSaveFolder and LogFile will be determined after module import using Get-ScriptSaveFolder function.
 
-# Ensure ScriptSaveFolder is defined (fallback if $scriptDir was somehow empty).
-if ([string]::IsNullOrWhiteSpace($ScriptSaveFolder)) {
-    Write-Warning "Script directory could not be determined. Falling back to '$env:USERPROFILE\UpdateLoxone' for ScriptSaveFolder."
-    $ScriptSaveFolder = Join-Path -Path $env:USERPROFILE -ChildPath "UpdateLoxone"
-}
-Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Final ScriptSaveFolder set to: '$ScriptSaveFolder'"
-
-# Initialize the global log file path early, using the determined ScriptSaveFolder.
-$global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
-Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Global LogFile path set to: '$global:LogFile'"
+# $ScriptSaveFolder will be determined after module import.
+# $global:LogFile will be set after $ScriptSaveFolder is determined.
 # Immediately convert parameters to proper Boolean types.
 # Immediately convert parameters to proper Boolean types.
 $DebugMode = [bool]$DebugMode
@@ -131,19 +117,28 @@ try {
      Import-Module -Name $moduleFullPath -Force -ErrorAction Stop
     # Use Write-Host as Write-DebugLog might not be available yet if import fails partially
     Write-Host "[$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")] [DEBUG] Successfully imported UpdateLoxoneUtils module."
+    # Now determine the ScriptSaveFolder using the function from the module
+    $ScriptSaveFolder = Get-ScriptSaveFolder -InvocationInfo $MyInvocation -BoundParameters $PSBoundParameters
+    Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] ScriptSaveFolder determined by function: '$ScriptSaveFolder'"
+
+    # Initialize the global log file path using the determined ScriptSaveFolder.
+    $global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
+    Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Global LogFile path set to: '$global:LogFile'"
+    
+    # Initialize remaining global status flags (Write-DebugLog is now available)
+    $global:ErrorOccurred = $false
+    $global:LastErrorLine = "N/A"
+    $global:UacCancelled = $false
+    $global:ScriptInterrupted = $false
+    Write-DebugLog "Global variables initialized. LogFile: $($global:LogFile)"
+
 } catch {
-    Write-Warning "FATAL: Could not import utility module 'UpdateLoxoneUtils.psm1'. Script cannot continue. Error: $($_.Exception.Message)"
+    Write-Warning "FATAL: Could not import utility module 'UpdateLoxoneUtils.psm1' or determine ScriptSaveFolder. Script cannot continue. Error: $($_.Exception.Message)"
+    # Log to temp file if possible - tempLogPath was removed, consider alternative if needed
+    # if ($tempLogPath) { "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [FATAL] Script initialization failed. Error: $($_.Exception.Message)" | Out-File -FilePath $tempLogPath -Append -Encoding UTF8 }
     exit 1
 }
 # Cleaned up placeholders after moving functions to module
-
- # Initialize remaining global status flags AFTER module import (so Write-DebugLog is available)
- # $global:LogFile is already set above.
- $global:ErrorOccurred = $false
- $global:LastErrorLine = "N/A"
- $global:UacCancelled = $false
- $global:ScriptInterrupted = $false
- Write-DebugLog "Remaining global variables initialized. LogFile was set earlier to: $($global:LogFile)" # Now uses Write-DebugLog
  
  #region Main Script Execution
  Write-LogMessage "Script starting execution. PID: $PID. IsElevatedInstance: $Elevated" -Level "INFO"

@@ -244,6 +244,58 @@ function Invoke-TestSuite {
         }
     }
 
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Get-ScriptSaveFolder") {
+        Invoke-Test -Name "Get-ScriptSaveFolder (Simulated)" -TestBlock {
+            $results = @{
+                Default = $false
+                ParamProvided = $false
+                EmptyInvocation = $false
+                EmptyParam = $false
+            }
+            $testUserProfile = "C:\TestUserProfile"
+            $mockScriptPath = "C:\GoodPath\UpdateLoxone.ps1"
+            $expectedDefaultPath = "C:\GoodPath" # Expected from mockScriptPath
+            $expectedParamPath = "C:\ExplicitParamPath"
+            $expectedFallbackPath = Join-Path -Path $testUserProfile -ChildPath "UpdateLoxone"
+
+            # --- Test Cases ---
+            
+            # Test 1: Default behavior (no param, valid invocation)
+            $mockInvocation1 = [PSCustomObject]@{ MyCommand = [PSCustomObject]@{ Definition = $mockScriptPath } }
+            $mockBoundParams1 = @{}
+            $result1 = Get-ScriptSaveFolder -InvocationInfo $mockInvocation1 -BoundParameters $mockBoundParams1 -UserProfilePath $testUserProfile
+            if ($result1 -eq $expectedDefaultPath) { $results.Default = $true } else { Write-Warning "Default test failed. Expected '$expectedDefaultPath', Got '$result1'" }
+
+            # Test 2: Parameter provided
+            $mockInvocation2 = [PSCustomObject]@{ MyCommand = [PSCustomObject]@{ Definition = $mockScriptPath } }
+            $mockBoundParams2 = @{ ScriptSaveFolder = $expectedParamPath }
+            $result2 = Get-ScriptSaveFolder -InvocationInfo $mockInvocation2 -BoundParameters $mockBoundParams2 -UserProfilePath $testUserProfile
+            if ($result2 -eq $expectedParamPath) { $results.ParamProvided = $true } else { Write-Warning "ParamProvided test failed. Expected '$expectedParamPath', Got '$result2'" }
+
+            # Test 3: Empty/Invalid Invocation Path (fallback to UserProfile)
+            $mockInvocation3 = [PSCustomObject]@{ MyCommand = [PSCustomObject]@{ Definition = '' } } # Empty definition
+            $mockBoundParams3 = @{}
+            $result3 = Get-ScriptSaveFolder -InvocationInfo $mockInvocation3 -BoundParameters $mockBoundParams3 -UserProfilePath $testUserProfile
+            if ($result3 -eq $expectedFallbackPath) { $results.EmptyInvocation = $true } else { Write-Warning "EmptyInvocation test failed. Expected '$expectedFallbackPath', Got '$result3'" }
+
+            # Test 4: Empty Parameter provided (fallback to UserProfile)
+            $mockInvocation4 = [PSCustomObject]@{ MyCommand = [PSCustomObject]@{ Definition = $mockScriptPath } }
+            $mockBoundParams4 = @{ ScriptSaveFolder = "" } # Empty string parameter
+            $result4 = Get-ScriptSaveFolder -InvocationInfo $mockInvocation4 -BoundParameters $mockBoundParams4 -UserProfilePath $testUserProfile
+            if ($result4 -eq $expectedFallbackPath) { $results.EmptyParam = $true } else { Write-Warning "EmptyParam test failed. Expected '$expectedFallbackPath', Got '$result4'" }
+
+            # --- Final Check ---
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Get-ScriptSaveFolder."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
+
+
 
     # Test case for Get-ExecutableSignature removed as Mock requires Pester structure.
     # Add tests that require Elevation (will fail if not elevated)

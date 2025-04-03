@@ -1,6 +1,64 @@
 # Module: UpdateLoxoneUtils.psm1
 # Contains helper functions for the UpdateLoxone.ps1 script
 
+#region Get-ScriptSaveFolder Function
+function Get-ScriptSaveFolder {
+    [CmdletBinding()]
+    param(
+        # Simulate the automatic $MyInvocation variable - using [object] for easier testing/mocking
+        [Parameter(Mandatory=$true)]
+        [object]$InvocationInfo,
+        
+        # Simulate the automatic $PSBoundParameters dictionary
+        [Parameter(Mandatory=$true)]
+        [hashtable]$BoundParameters,
+
+        # Allow passing a specific value for testing USERPROFILE
+        [string]$UserProfilePath = $env:USERPROFILE
+    )
+
+    Write-DebugLog "Get-ScriptSaveFolder: Invocation Command Definition = '$($InvocationInfo.MyCommand.Definition)'"
+    Write-DebugLog "Get-ScriptSaveFolder: BoundParameters contains ScriptSaveFolder = $($BoundParameters.ContainsKey('ScriptSaveFolder'))"
+    if ($BoundParameters.ContainsKey('ScriptSaveFolder')) {
+        Write-DebugLog "Get-ScriptSaveFolder: ScriptSaveFolder Parameter Value = '$($BoundParameters['ScriptSaveFolder'])'"
+    }
+
+    $determinedSaveFolder = $null
+
+    # 1. Check if ScriptSaveFolder parameter was explicitly provided
+    if ($BoundParameters.ContainsKey('ScriptSaveFolder')) {
+        $determinedSaveFolder = $BoundParameters['ScriptSaveFolder']
+        Write-DebugLog "Get-ScriptSaveFolder: Using provided parameter value: '$determinedSaveFolder'"
+    } 
+    # 2. If not provided, determine from InvocationInfo
+    else {
+        try {
+            $scriptDir = Split-Path -Parent $InvocationInfo.MyCommand.Definition -ErrorAction Stop
+            if (-not ([string]::IsNullOrWhiteSpace($scriptDir))) {
+                $determinedSaveFolder = $scriptDir
+                Write-DebugLog "Get-ScriptSaveFolder: Determined from script path: '$determinedSaveFolder'"
+            } else {
+                 Write-DebugLog "Get-ScriptSaveFolder: Split-Path returned empty/whitespace."
+            }
+        } catch {
+            Write-LogMessage "Get-ScriptSaveFolder: Error splitting path from InvocationInfo: $($_.Exception.Message)" -Level WARN
+            # Continue to fallback
+        }
+    }
+
+    # 3. Fallback if still not determined (e.g., empty path from Split-Path, or parameter was provided but empty)
+    if ([string]::IsNullOrWhiteSpace($determinedSaveFolder)) {
+        Write-LogMessage "Get-ScriptSaveFolder: Could not determine path from parameter or invocation. Falling back to UserProfile path." -Level WARN
+        $determinedSaveFolder = Join-Path -Path $UserProfilePath -ChildPath "UpdateLoxone"
+        Write-DebugLog "Get-ScriptSaveFolder: Using fallback path: '$determinedSaveFolder'"
+    }
+
+    Write-LogMessage "Get-ScriptSaveFolder: Final determined path: '$determinedSaveFolder'" -Level INFO
+    return $determinedSaveFolder
+}
+#endregion
+
+
 #region Logging Functions
 function Write-DebugLog {
     param(
