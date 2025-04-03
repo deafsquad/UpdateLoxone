@@ -3,6 +3,7 @@
 
 # But keep PowerShell script files
 !*.ps1
+!*.psm1
 !README.md
 !*.example
 

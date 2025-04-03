@@ -19,20 +19,32 @@ param(
     [Parameter(DontShow=$true)][switch]$Elevated = $false # Internal switch for self-elevation
 )
 
-# $PSScriptRoot is the default for $ScriptSaveFolder parameter.
-# Check if $PSScriptRoot is empty (can happen in some interactive sessions)
-# and if the parameter wasn't explicitly provided with a different value.
-if ([string]::IsNullOrEmpty($ScriptSaveFolder) -and -not $PSBoundParameters.ContainsKey('ScriptSaveFolder')) {
-   Write-Warning "PSScriptRoot is empty and ScriptSaveFolder not provided. Falling back to user profile + '\UpdateLoxone' for interactive debugging."
-   $ScriptSaveFolder = Join-Path -Path $env:USERPROFILE -ChildPath "UpdateLoxone" # Fallback using UserProfile
+# -----------------------------------------------------------
+# Force the script’s own folder as the base.
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$ScriptSaveFolder = $scriptDir
+# Write-DebugLog requires the module, use Write-Host for this very early message
+Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Script directory determined as: '$scriptDir'. Set as ScriptSaveFolder."
+# -----------------------------------------------------------
+
+# Ensure ScriptSaveFolder is defined (fallback if $scriptDir was somehow empty).
+if ([string]::IsNullOrWhiteSpace($ScriptSaveFolder)) {
+    Write-Warning "Script directory could not be determined. Falling back to '$env:USERPROFILE\UpdateLoxone' for ScriptSaveFolder."
+    $ScriptSaveFolder = Join-Path -Path $env:USERPROFILE -ChildPath "UpdateLoxone"
 }
-Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Determined ScriptSaveFolder: '$ScriptSaveFolder'"
+Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Final ScriptSaveFolder set to: '$ScriptSaveFolder'"
+
+# Initialize the global log file path early, using the determined ScriptSaveFolder.
+$global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
+Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Global LogFile path set to: '$global:LogFile'"
 # Immediately convert parameters to proper Boolean types.
 # Immediately convert parameters to proper Boolean types.
 $DebugMode = [bool]$DebugMode
 $EnableCRC = [bool]$EnableCRC
 $CloseApplications = [bool]$CloseApplications
 $SkipUpdateIfAnyProcessIsRunning = [bool]$SkipUpdateIfAnyProcessIsRunning
+# Make elevation status globally accessible for logging functions
+$global:IsElevatedInstance = $Elevated
 
 # Define download directory
 $downloadDir = Join-Path -Path $ScriptSaveFolder -ChildPath "Downloads" # Define download dir relative to script save folder
@@ -50,6 +62,56 @@ if ($DebugMode) {
 ###############################################################################
 #                            INITIALIZATION & IMPORTS                         #
 ###############################################################################
+
+
+#region CRC32 Class Definition and Loading
+$crc32Code = @"
+using System;
+public class CRC32
+{
+    private static readonly uint[] Table;
+    static CRC32()
+    {
+        uint polynomial = 0xedb88320;
+        Table = new uint[256];
+        uint crc;
+        for (uint i = 0; i < Table.Length; ++i)
+        {
+            crc = i;
+            for (int j = 0; j < 8; ++j)
+            {
+                if ((crc & 1) == 1)
+                    crc = (crc >> 1) ^ polynomial;
+                else
+                    crc >>= 1;
+            }
+        }
+    }
+    public static uint Compute(byte[] bytes)
+    {
+        uint crc = 0xffffffff;
+        foreach (byte b in bytes)
+        {
+            byte index = (byte)((crc & 0xff) ^ b);
+            crc = (crc >> 8) ^ Table[index];
+        }
+        return ~crc;
+    }
+}
+"@
+if (-not ([System.Management.Automation.PSTypeName]"CRC32").Type) {
+    try {
+        Add-Type -TypeDefinition $crc32Code -Language CSharp -ErrorAction Stop
+        Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] Successfully loaded CRC32 class (in main script)."
+    }
+    catch {
+        Write-Warning "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [ERROR] Failed to load CRC32 class: $($_.Exception.Message)"
+        throw $_ # Fail fast if CRC class can't be loaded
+    }
+} else {
+     Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [DEBUG] CRC32 class already loaded. Skipping Add-Type (in main script)."
+}
+#endregion
 
 
 try {
@@ -75,17 +137,24 @@ try {
 }
 # Cleaned up placeholders after moving functions to module
 
- # Initialize the global log file path and status flags AFTER module import (so Write-DebugLog is available)
- # Use the $ScriptSaveFolder parameter value (which defaults to $PSScriptRoot)
- $global:LogFile = Join-Path -Path $ScriptSaveFolder -ChildPath "UpdateLoxone.log"
+ # Initialize remaining global status flags AFTER module import (so Write-DebugLog is available)
+ # $global:LogFile is already set above.
  $global:ErrorOccurred = $false
  $global:LastErrorLine = "N/A"
  $global:UacCancelled = $false
  $global:ScriptInterrupted = $false
- Write-DebugLog "Global variables initialized. LogFile: $($global:LogFile)" # Now uses Write-DebugLog
+ Write-DebugLog "Remaining global variables initialized. LogFile was set earlier to: $($global:LogFile)" # Now uses Write-DebugLog
  
-#region Main Script Execution
-Invoke-LogFileRotation -LogPath $global:LogFile
+ #region Main Script Execution
+ Write-LogMessage "Script starting execution. PID: $PID. IsElevatedInstance: $Elevated" -Level "INFO"
+ 
+ # Only rotate logs if this is the initial (non-elevated) instance.
+ if (-not $Elevated) {
+     Write-LogMessage "Running as initial instance (PID: $PID). Invoking log rotation." -Level "INFO"
+     Invoke-LogFileRotation -LogPath $global:LogFile
+ } else {
+     Write-LogMessage "Running as elevated instance (PID: $PID). Skipping log rotation." -Level "INFO"
+ }
 
     # --- Setup System Monitor Mode --- 
     if ($SetupSystemMonitor) {
