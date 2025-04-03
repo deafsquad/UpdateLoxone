@@ -464,6 +464,84 @@ function Invoke-TestSuite {
 
             } catch {
                 Write-Warning "Invoke-ZipFileExtraction test failed during setup or execution: $($_.Exception.Message)"
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Start-LoxoneUpdateInstaller") {
+        Invoke-Test -Name "Start-LoxoneUpdateInstaller (Mock Process)" -TestBlock {
+            $results = @{
+                CalledCorrectly = $false
+                ThrowsOnError = $false
+            }
+            $dummyInstallerPath = "C:\Temp\DummyInstaller.exe"
+            $testInstallMode = "verysilent"
+            $expectedArgs = "/$testInstallMode"
+            
+            # Store original Start-Process if it exists
+            $originalStartProcess = Get-Command Start-Process -ErrorAction SilentlyContinue
+            $startProcessCalled = $false
+            $startProcessArgs = $null
+            $startProcessPath = $null
+
+            # --- Test 1: Called Correctly --- 
+            try {
+                # Mock Start-Process to capture arguments
+                function Start-Process {
+                    param($FilePath, $ArgumentList, [switch]$Wait)
+                    Write-Host "  DEBUG MOCK: Start-Process called. Path='$FilePath', Args='$ArgumentList', Wait='$Wait'"
+                    $script:startProcessCalled = $true
+                    $script:startProcessPath = $FilePath
+                    $script:startProcessArgs = $ArgumentList
+                    # Simulate success
+                }
+                
+                Start-LoxoneUpdateInstaller -InstallerPath $dummyInstallerPath -InstallMode $testInstallMode
+                
+                if ($startProcessCalled -and $startProcessPath -eq $dummyInstallerPath -and $startProcessArgs -eq $expectedArgs) {
+                    $results.CalledCorrectly = $true
+                } else {
+                    Write-Warning "CalledCorrectly test failed. Called=$startProcessCalled, Path='$startProcessPath' (Expected '$dummyInstallerPath'), Args='$startProcessArgs' (Expected '$expectedArgs')"
+                }
+            } catch {
+                Write-Warning "CalledCorrectly test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Start-Process -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Test 2: Throws on Error --- 
+            $startProcessCalled = $false # Reset flag
+            try {
+                # Mock Start-Process to throw an error
+                function Start-Process {
+                    param($FilePath, $ArgumentList, [switch]$Wait)
+                    Write-Host "  DEBUG MOCK (Error): Start-Process called. Path='$FilePath', Args='$ArgumentList', Wait='$Wait'"
+                    $script:startProcessCalled = $true
+                    throw "Simulated Start-Process error"
+                }
+                
+                Start-LoxoneUpdateInstaller -InstallerPath $dummyInstallerPath -InstallMode $testInstallMode
+                
+                # If it reaches here, it didn't throw
+                Write-Warning "ThrowsOnError test failed. Expected exception but none was thrown."
+            } catch {
+                # Exception expected
+                if ($startProcessCalled) {
+                    $results.ThrowsOnError = $true
+                    Write-Host "  DEBUG TEST: ThrowsOnError passed (Exception caught as expected)."
+                } else {
+                    Write-Warning "ThrowsOnError test failed. Exception caught, but mock Start-Process wasn't called."
+                }
+            } finally {
+                Remove-Item function:\Start-Process -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Start-LoxoneUpdateInstaller."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
     if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Find-File") {
         Invoke-Test -Name "Find-File (Temp Files)" -TestBlock {
             $results = @{
