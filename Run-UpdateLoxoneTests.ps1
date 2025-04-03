@@ -182,44 +182,7 @@ function Invoke-TestSuite {
              return ($result1 -and $result2 -and $result3 -and $result4 -and $result5 -and $result6)
          }
     }
-    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Save-ScriptToUserLocation") {
-        Invoke-Test -Name "Save-ScriptToUserLocation" -TestBlock { 
-            # Setup: Create a dummy source script file to copy
-            $dummySourceName = "DummySourceForSaveTest.ps1"
-            $dummySourcePath = Join-Path -Path $script:TestScriptSaveFolder -ChildPath $dummySourceName
-            Set-Content -Path $dummySourcePath -Value "# Test Source Content $(Get-Random)" -Force
-            
-            $tempDestDir = Join-Path -Path $script:TestScriptSaveFolder -ChildPath "TempTestSaveFolder"
-            $tempDestFile = Join-Path -Path $tempDestDir -ChildPath $dummySourceName # Expecting dummy file name
-            if (Test-Path $tempDestDir) { Remove-Item -Path $tempDestDir -Recurse -Force }
-
-            # Execute: Call the function to copy the dummy script using the -SourcePath parameter
-            $resultPath = $null
-            try {
-                 $resultPath = Save-ScriptToUserLocation -DestinationDir $tempDestDir -ScriptName $dummySourceName -SourcePath $dummySourcePath -ErrorAction Stop
-            } catch {
-                 Write-Warning "Save-ScriptToUserLocation test failed during execution: $($_.Exception.Message)"
-                 # Let validation fail below
-            }
-            
-            # Validate: Check if function returned correct path, file exists, and is not empty
-            $fileExists = Test-Path -Path $tempDestFile
-            $fileNotEmpty = $false
-            if ($fileExists) {
-                 $fileSize = (Get-Item -Path $tempDestFile).Length
-                 if ($fileSize -gt 0) { $fileNotEmpty = $true } else { Write-Warning "Copied file '$tempDestFile' is empty." }
-            } else { Write-Warning "Copied file '$tempDestFile' not found." }
-            $pathMatches = ($resultPath -eq $tempDestFile)
-            if (-not $pathMatches) { Write-Warning "Save-ScriptToUserLocation returned incorrect path. Expected: '$tempDestFile', Got: '$resultPath'" }
-
-            # Cleanup
-            if (Test-Path $tempDestDir) { Remove-Item -Path $tempDestDir -Recurse -Force }
-            Remove-Item -Path $dummySourcePath -Force -ErrorAction SilentlyContinue # Cleanup dummy source
-
-            # Return result
-            return ($fileExists -and $fileNotEmpty -and $pathMatches)
-        }
-    }
+    # Test case for Save-ScriptToUserLocation removed as the function was removed.
     if (Test-ShouldRun -CategoryName "Process" -IndividualTestName "Get-ProcessStatus") {
         Invoke-Test -Name "Get-ProcessStatus (Notepad Running/Stopped)" -TestBlock { $proc = Start-Process notepad -PassThru -ErrorAction SilentlyContinue; if (-not $proc) { throw "Failed to start notepad for test." }; Start-Sleep -Seconds 1; $isRunning = Get-ProcessStatus -ProcessName "notepad"; $stopResult = Get-ProcessStatus -ProcessName "notepad" -StopProcess; Start-Sleep -Seconds 3; $isStopped = Get-ProcessStatus -ProcessName "notepad"; if (-not $isRunning) { Write-Warning "Get-ProcessStatus failed to detect running process."; return $false }; if (-not $stopResult) { Write-Warning "Get-ProcessStatus failed to report stop success."; return $false }; if ($isStopped) { Write-Warning "Get-ProcessStatus failed to detect stopped process after stopping."; return $false }; return $true }
     }
@@ -240,6 +203,7 @@ function Invoke-TestSuite {
             return ($triedDirect -and $didNotTryTask) 
         }
     }
+    # Test case for Get-ExecutableSignature removed as Mock requires Pester structure.
     # Add tests that require Elevation (will fail if not elevated)
     if (Test-ShouldRun -CategoryName "Admin" -IndividualTestName "Register-ScheduledTaskForScript") {
         Invoke-Test -Name "Register-ScheduledTaskForScript (Requires Admin)" -TestBlock { $testTaskName = "TestLoxoneUpdateTask_$(Get-Random)"; $dummyScriptPath = Join-Path $script:TestScriptSaveFolder "dummy.ps1"; Set-Content -Path $dummyScriptPath -Value "# Dummy" -Force; $success = $true; try { Register-ScheduledTaskForScript -ScriptPath $dummyScriptPath -TaskName $testTaskName -ScheduledTaskIntervalMinutes $script:ScheduledTaskIntervalMinutes -Channel "Test" -DebugMode $script:DebugMode -EnableCRC $true -InstallMode "verysilent" -CloseApplications $false -ScriptSaveFolder $script:ScriptSaveFolder -MaxLogFileSizeMB 1 -SkipUpdateIfAnyProcessIsRunning $false; if ($script:IsAdminRun -and -not (Get-ScheduledTask -TaskName $testTaskName -ErrorAction SilentlyContinue)) { $success = $false; Write-Warning "Scheduled task '$testTaskName' was not created even when running as Admin." } elseif (-not $script:IsAdminRun -and (Get-ScheduledTask -TaskName $testTaskName -ErrorAction SilentlyContinue)) { $success = $false; Write-Warning "Scheduled task '$testTaskName' was created unexpectedly without Admin rights." } elseif (-not $script:IsAdminRun) { Write-Host "  INFO: Task registration correctly failed (not Admin)." -ForegroundColor Gray; $success = $true } } catch { if (-not $script:IsAdminRun) { Write-Host "  INFO: Task registration correctly failed with error (not Admin): $($_.Exception.Message)" -ForegroundColor Gray; $success = $true } else { $success = $false; Write-Warning "Error during Register-ScheduledTaskForScript test (Admin): $($_.Exception.Message)" } } finally { Unregister-ScheduledTask -TaskName $testTaskName -Confirm:$false -ErrorAction SilentlyContinue; if (Test-Path $dummyScriptPath) { Remove-Item -Path $dummyScriptPath -Force -ErrorAction SilentlyContinue } }; return $success }
@@ -321,7 +285,26 @@ if (-not $IsElevatedInstance) {
 
     # --- Display FINAL Combined Summary ---
     Write-Host "`n=== Combined Test Summary ===" -ForegroundColor Cyan
-    
+
+    # Helper Function to print details for a context
+    function Print-ContextDetails {
+        param($ContextRun)
+        $contextResults = $ContextRun.Details
+        if ($null -ne $contextResults) {
+            # Sort test names for consistent order
+            $sortedTestNames = $contextResults.Keys | Sort-Object
+            foreach ($testName in $sortedTestNames) {
+                $status = $contextResults[$testName]
+                $statusColor = if ($status -eq "PASS") { "Green" } else { "Red" }
+                Write-Host ("  - {0}: {1}" -f $testName.PadRight(50), $status) -ForegroundColor $statusColor
+            }
+            return $true # Indicate results were printed
+        } else {
+            Write-Host "  No results recorded for this context." -ForegroundColor Yellow
+            return $false # Indicate no results
+        }
+    }
+
     # Display Non-Admin / Initial Admin Results
     $initialContext = if ($isAdmin) { "Admin (Started Elevated)" } else { "Non-Admin" }
     Write-Host "--- Results from Initial ($initialContext) Run ---" -ForegroundColor Cyan
@@ -329,17 +312,14 @@ if (-not $IsElevatedInstance) {
     foreach ($contextKey in $allNonElevatedResults.Keys) {
         $contextRun = $allNonElevatedResults[$contextKey]
         Write-Host "Context: $contextKey" -ForegroundColor White
-        $contextResults = $contextRun.Details
-        if ($null -ne $contextResults) {
-            $contextPass = ($contextResults.Values | Where-Object { $_ -eq "PASS" }).Count
-            $contextFail = ($contextResults.Values | Where-Object { $_ -eq "FAIL" }).Count
+        if (Print-ContextDetails -ContextRun $contextRun) {
+            $contextPass = ($contextRun.Details.Values | Where-Object { $_ -eq "PASS" }).Count
+            $contextFail = ($contextRun.Details.Values | Where-Object { $_ -eq "FAIL" }).Count
             $totalInitialPass += $contextPass; $totalInitialFail += $contextFail
-            Write-Host "  Passed: $contextPass"
-            Write-Host "  Failed: $contextFail"
             $contextResultText = if (-not $contextRun.Result) { "FAIL" } else { "PASS" }
             $fgColor = if ($contextRun.Result) { "Green" } else { "Red" }
             Write-Host "  Context Result: $contextResultText" -ForegroundColor $fgColor
-        } else { Write-Host "  No results recorded for this context." -ForegroundColor Yellow }
+        }
     }
     Write-Host "--------------------------"
     Write-Host "Total Initial Passed: $totalInitialPass"
@@ -349,22 +329,23 @@ if (-not $IsElevatedInstance) {
     Write-Host "Overall Initial ($initialContext) Result: $overallInitialResultText" -ForegroundColor $overallInitialColor
 
     # Display Elevated Results (if available)
-    if ($elevatedSummary) { 
+    if ($elevatedSummary) {
         Write-Host "`n--- Results from Elevated Run ---" -ForegroundColor Magenta
-        if ($elevatedExitCode -lt 0) { 
+        if ($elevatedExitCode -lt 0) {
              Write-Host "Elevated Run FAILED (Code: $elevatedExitCode)" -ForegroundColor Red
-        } elseif ($elevatedExitCode -ne 0) { 
+        } elseif ($elevatedExitCode -ne 0) {
              Write-Host "Elevated Run Completed with Script Errors (Code: $elevatedExitCode)" -ForegroundColor Yellow
-        } else { 
+        } else {
              Write-Host "Elevated Run Completed Successfully (Code: 0)" -ForegroundColor Green
         }
-        Write-Host $elevatedSummary 
+        # The $elevatedSummary now contains the formatted list from the elevated instance
+        Write-Host $elevatedSummary
         Write-Host "--- End Elevated Run Results ---" -ForegroundColor Magenta
-    } elseif (-not $SkipElevation -and -not $isAdmin) { 
+    } elseif (-not $SkipElevation -and -not $isAdmin) {
          Write-Host "`n--- Elevated Run Skipped ---" -ForegroundColor Yellow
          Write-Host "(Requires UAC confirmation)" -ForegroundColor Yellow
          Write-Host "--- End Elevated Run Results ---" -ForegroundColor Magenta
-    } 
+    }
     
     # Determine final overall exit code 
     $finalOverallPass = $nonAdminPass # Start with initial run result
@@ -398,40 +379,44 @@ else {
     # --- Prepare summary output for the ElevatedOutputFile ---
     $summaryOutput = @"
 `n--- Test Summary (Admin Context - Elevated Instance) ---
-"@ 
+"@
     $totalPass = 0; $totalFail = 0
-    foreach ($contextKey in $adminContextResults.Keys) { 
+    foreach ($contextKey in $adminContextResults.Keys) {
         $contextRun = $adminContextResults[$contextKey]
-        $summaryOutput += "`nContext: $contextKey" 
+        $summaryOutput += "`nContext: $contextKey"
         $contextResults = $contextRun.Details
         if ($null -ne $contextResults) {
+            # Sort test names for consistent order
+            $sortedTestNames = $contextResults.Keys | Sort-Object
+            foreach ($testName in $sortedTestNames) {
+                $status = $contextResults[$testName]
+                $summaryOutput += "`n  - $($testName.PadRight(50)): $status" # Add PASS/FAIL here
+            }
             $contextPass = ($contextResults.Values | Where-Object { $_ -eq "PASS" }).Count
             $contextFail = ($contextResults.Values | Where-Object { $_ -eq "FAIL" }).Count
             $totalPass += $contextPass; $totalFail += $contextFail
-            $summaryOutput += "`n  Passed: $contextPass" 
-            $summaryOutput += "`n  Failed: $contextFail" 
             $contextResultText = if (-not $contextRun.Result) { "FAIL" } else { "PASS" }
-            $summaryOutput += "`n  Context Result: $contextResultText" 
-        } else { $summaryOutput += "`n  No results recorded for this context." } 
+            $summaryOutput += "`n  Context Result: $contextResultText"
+        } else { $summaryOutput += "`n  No results recorded for this context." }
     }
-    $summaryOutput += "`n--------------------------" 
-    $summaryOutput += "`nTotal Tests Run (Admin): $($totalPass + $totalFail)" 
-    $summaryOutput += "`nTotal Passed (Admin): $totalPass" 
-    $summaryOutput += "`nTotal Failed (Admin): $totalFail" 
-    $overallAdminResultText = if ($adminContextPass) { 'PASS' } else { 'FAIL' } 
-    $summaryOutput += "`nOverall Result for Admin Context: $overallAdminResultText`n" 
+    $summaryOutput += "`n--------------------------"
+    $summaryOutput += "`nTotal Tests Run (Admin): $($totalPass + $totalFail)"
+    $summaryOutput += "`nTotal Passed (Admin): $totalPass"
+    $summaryOutput += "`nTotal Failed (Admin): $totalFail"
+    $overallAdminResultText = if ($adminContextPass) { 'PASS' } else { 'FAIL' }
+    $summaryOutput += "`nOverall Result for Admin Context: $overallAdminResultText`n"
 
     # Write combined summary to the output file specified by the initial instance
     if ($ElevatedOutputFile) {
-        try { 
-            Write-Host $summaryOutput; 
-            Write-Host "Writing combined summary to elevated output file: $ElevatedOutputFile" -ForegroundColor Gray; 
-            Set-Content -Path $ElevatedOutputFile -Value $summaryOutput -Encoding UTF8 -Force -ErrorAction Stop 
-        } catch { 
-            Write-Warning "Failed to write summary to elevated output file '$ElevatedOutputFile': $($_.Exception.Message)" 
+        try {
+            Write-Host $summaryOutput; # Also write to elevated console for visibility
+            Write-Host "Writing combined summary to elevated output file: $ElevatedOutputFile" -ForegroundColor Gray;
+            Set-Content -Path $ElevatedOutputFile -Value $summaryOutput -Encoding UTF8 -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "Failed to write summary to elevated output file '$ElevatedOutputFile': $($_.Exception.Message)"
         }
-    } else { 
-        Write-Warning "ElevatedOutputFile parameter not provided to elevated instance." 
+    } else {
+        Write-Warning "ElevatedOutputFile parameter not provided to elevated instance."
     }
     
     Write-Host "`nElevated test run complete. Summary written to output file." -ForegroundColor Yellow 
