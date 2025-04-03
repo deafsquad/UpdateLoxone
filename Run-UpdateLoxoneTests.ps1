@@ -370,6 +370,120 @@ if (-not $IsElevatedInstance) {
     # This is the first run
     if ($isAdmin) {
         # Started as Admin: Run Admin tests directly
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Get-CRC32") {
+        Invoke-Test -Name "Get-CRC32 (Simulated File)" -TestBlock {
+            $results = @{
+                CorrectCRC = $false
+                NonExistentFileThrows = $false
+            }
+            $testString = "Roo test string 123"
+            $expectedCRC = "A1F5A2BE" # Pre-calculated CRC32 for the test string (UTF8)
+            $tempFilePath = Join-Path $script:TestScriptSaveFolder "temp_crc_test.txt"
+            $nonExistentFilePath = Join-Path $script:TestScriptSaveFolder "non_existent_crc_test.txt"
+
+            # --- Test 1: Correct CRC Calculation --- 
+            try {
+                # Create temp file with known content (UTF8)
+                Set-Content -Path $tempFilePath -Value $testString -Encoding UTF8 -Force -ErrorAction Stop
+                
+                $calculatedCRC = Get-CRC32 -InputFile $tempFilePath
+                
+                if ($calculatedCRC -eq $expectedCRC) {
+                    $results.CorrectCRC = $true
+                } else {
+                    Write-Warning "CorrectCRC test failed. Expected '$expectedCRC', Got '$calculatedCRC'"
+                }
+            } catch {
+                Write-Warning "CorrectCRC test failed with exception: $($_.Exception.Message)"
+            } finally {
+                if (Test-Path $tempFilePath) { Remove-Item $tempFilePath -Force -ErrorAction SilentlyContinue }
+            }
+
+            # --- Test 2: Non-Existent File Throws Exception --- 
+            try {
+                # Ensure file does not exist
+                if (Test-Path $nonExistentFilePath) { Remove-Item $nonExistentFilePath -Force -ErrorAction SilentlyContinue }
+                
+                # Call the function, expecting it to throw because ReadAllBytes will fail
+                Get-CRC32 -InputFile $nonExistentFilePath
+                
+                # If it reaches here, it didn't throw - test fails
+                Write-Warning "NonExistentFileThrows test failed. Expected an exception, but none was thrown."
+            } catch {
+                # Exception was expected
+                $results.NonExistentFileThrows = $true
+                Write-Host "  DEBUG TEST: NonExistentFileThrows passed (Exception caught as expected)."
+            } finally {
+                 # No cleanup needed as file shouldn't exist
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Get-CRC32."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Get-CRC32") {
+        Invoke-Test -Name "Get-CRC32 (Simulated File)" -TestBlock {
+            $results = @{
+                CorrectCRC = $false
+                NonExistentFileThrows = $false
+            }
+            $testString = "Roo test string 123"
+            $expectedCRC = "A1F5A2BE"
+            $tempFilePath = Join-Path $script:TestScriptSaveFolder "temp_crc_test.txt"
+            $nonExistentFilePath = Join-Path $script:TestScriptSaveFolder "non_existent_crc_test.txt"
+
+            # --- Test 1: Correct CRC Calculation --- 
+            try {
+                # Create temp file with known content (UTF8)
+                Set-Content -Path $tempFilePath -Value $testString -Encoding UTF8 -Force -ErrorAction Stop
+                
+                $calculatedCRC = Get-CRC32 -InputFile $tempFilePath
+                
+                if ($calculatedCRC -eq $expectedCRC) {
+                    $results.CorrectCRC = $true
+                } else {
+                    Write-Warning "CorrectCRC test failed. Expected '$expectedCRC', Got '$calculatedCRC'"
+                }
+            } catch {
+                Write-Warning "CorrectCRC test failed with exception: $($_.Exception.Message)"
+            } finally {
+                if (Test-Path $tempFilePath) { Remove-Item $tempFilePath -Force -ErrorAction SilentlyContinue }
+            }
+
+            # --- Test 2: Non-Existent File Throws Exception --- 
+            try {
+                # Ensure file does not exist
+                if (Test-Path $nonExistentFilePath) { Remove-Item $nonExistentFilePath -Force -ErrorAction SilentlyContinue }
+                
+                # Call the function, expecting it to throw because ReadAllBytes will fail
+                Get-CRC32 -InputFile $nonExistentFilePath
+                
+                # If it reaches here, it didn't throw - test fails
+                Write-Warning "NonExistentFileThrows test failed. Expected an exception, but none was thrown."
+            } catch {
+                # Exception was expected
+                $results.NonExistentFileThrows = $true
+                Write-Host "  DEBUG TEST: NonExistentFileThrows passed (Exception caught as expected)."
+            } finally {
+                 # No cleanup needed as file shouldn't exist
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Get-CRC32."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
         Write-Host "`n=== Running Admin Tests (Started Elevated) ===" -ForegroundColor Yellow
         $adminRun = Invoke-TestSuite -IsCurrentlyAdmin $true
         $allNonElevatedResults["Admin Context (Started Elevated)"] = $adminRun
