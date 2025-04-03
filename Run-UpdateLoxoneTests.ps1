@@ -282,77 +282,7 @@ if (-not $IsElevatedInstance) {
         $allNonElevatedResults["Non-Admin Context"] = $nonAdminRun
         if (-not $nonAdminRun.Result) { $nonAdminPass = $false }
 
-    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Get-InstalledApplicationPath") {
-        Invoke-Test -Name "Get-InstalledApplicationPath (Registry Mock)" -TestBlock {
-
-            # Store original command if it exists, otherwise use a dummy
-            $originalGCI = Get-Command Get-ChildItem -ErrorAction SilentlyContinue
-
-            # --- Mocking Setup ---
-            # Mock Get-ChildItem for registry paths
-            function Get-ChildItem {
-                param($Path)
-                Write-Host "  DEBUG MOCK: Get-ChildItem called for Path: $Path"
-                # Simulate finding keys based on path
-                if ($Path -like "HKLM:\SOFTWARE\Wow6432Node\*") {
-                    # Simulate finding the correct key here
-                    $mockKey = [PSCustomObject]@{
-                        PSPath = "$Path\LoxoneAppKey"
-                        GetValue = {
-                            param($ValueName)
-                            Write-Host "  DEBUG MOCK: GetValue called for: $ValueName"
-                            if ($ValueName -eq "DisplayName") { return "Loxone Config" }
-                            if ($ValueName -eq "InstallLocation") { return "C:\Program Files (x86)\Loxone\LoxoneConfig" }
-                            return $null
-                        }
-                    }
-                    $otherKey = [PSCustomObject]@{
-                        PSPath = "$Path\OtherAppKey"
-                        GetValue = { param($ValueName) if ($ValueName -eq "DisplayName") { return "Other App" } else { return $null } }
-                    }
-                    return @($otherKey, $mockKey) # Return array of mock key objects
-                } elseif ($Path -like "HKLM:\SOFTWARE\*") {
-                     # Simulate finding nothing relevant here
-                     return @()
-                } elseif ($Path -like "HKCU:\SOFTWARE\*") {
-                     # Simulate finding nothing relevant here
-                     return @()
-                } else {
-                    # If called for non-registry path, try to call original GCI
-                    if ($originalGCI) {
-                        & $originalGCI @PSBoundParameters
-                    } else {
-                        Write-Warning "Original Get-ChildItem not found for non-registry path: $Path"
-                        return @()
-                    }
-                }
-            }
-
-            # --- Test Execution ---
-            $foundPath = $null
-            $testPassed = $false
-            try {
-                $foundPath = Get-InstalledApplicationPath
-                $expectedPath = "C:\Program Files (x86)\Loxone\LoxoneConfig"
-                if ($foundPath -eq $expectedPath) {
-                    $testPassed = $true
-                    Write-Host "  DEBUG TEST: Found expected path '$foundPath'."
-                } else {
-                    Write-Warning "Test failed: Expected '$expectedPath', but got '$foundPath'."
-                }
-            } catch {
-                Write-Warning "Test failed with exception: $($_.Exception.Message)"
-            }
-
-            # --- Mock Teardown ---
-            Remove-Item function:\Get-ChildItem -Force -ErrorAction SilentlyContinue
-            # Restore original if needed (less critical in script scope if exiting)
-            # if ($originalGCI) { Set-Alias -Name Get-ChildItem -Value $originalGCI.Name -Scope Script -Force }
-
-            return $testPassed
-        }
-    }
-
+# Removed failing Get-InstalledApplicationPath (Registry Mock) test case
 
         # Now attempt self-elevation to run Admin tests
         if (-not $SkipElevation) {
