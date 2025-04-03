@@ -62,11 +62,11 @@ This PowerShell script automates the process of checking for, downloading, and i
 
 ## Usage
 
-1.  Place the `UpdateLoxone.ps1` and `UpdateLoxoneUtils.psm1` scripts together in a desired location (e.g., `C:\Scripts\UpdateLoxone`). Ensure this location is stable as the scheduled task will reference it.
+1.  **Manually place** both the `UpdateLoxone.ps1` and `UpdateLoxoneUtils.psm1` scripts together in your desired final location (e.g., `C:\Scripts\UpdateLoxone`). This location must contain both files and should be stable, as the scheduled task will reference the `.ps1` file here.
 2.  (Optional) Create `UpdateLoxoneMSList.txt` in the same directory with your Miniserver details, or wait for the script to prompt you on the first interactive run.
-3.  Run the script **once** from an **Administrator PowerShell prompt** to set up the scheduled task:
+3.  Run the `UpdateLoxone.ps1` script **once** from an **Administrator PowerShell prompt** *from its final location* to set up the scheduled task:
     ```powershell
-    # Example: Set up task using Release channel, closing apps
+    # Example (run from C:\Scripts\UpdateLoxone):
     .\UpdateLoxone.ps1 -Channel Release -CloseApplications $true
     ```
 4.  During this first interactive run, the script will attempt self-elevation if needed (to gain Administrator privileges) and then create/update a scheduled task named `LoxoneUpdateTask` pointing to the script's location (determined by `-ScriptSaveFolder`, which defaults to the script's own directory).

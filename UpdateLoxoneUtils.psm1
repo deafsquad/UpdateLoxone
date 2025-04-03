@@ -777,41 +777,7 @@ function Invoke-MiniserverUpdate {
 }
 #endregion
 
-#region Save-ScriptToUserLocation Function (Added Logging)
-function Save-ScriptToUserLocation {
-    param(
-        [string]$DestinationDir,
-        [string]$ScriptName,
-        [string]$SourcePath # Remove default value, must be provided by caller
-    )
-    Write-DebugLog "Save-ScriptToUserLocation: SourcePath=`'$SourcePath`', DestinationDir=`'$DestinationDir`', ScriptName=`'$ScriptName`'" 
-    if (-not (Test-Path $DestinationDir)) {
-        Write-DebugLog "Save-ScriptToUserLocation: Destination directory does not exist. Attempting to create."
-        try {
-            New-Item -Path $DestinationDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
-            Write-LogMessage "Custom script directory created at ${DestinationDir}." -Level "INFO"
-        }
-        catch {
-            Write-LogMessage "Error creating script directory '${DestinationDir}': ${($_.Exception.Message)}" -Level "ERROR"
-            throw $_
-        }
-    }
-    Write-DebugLog "Save-ScriptToUserLocation: Destination directory '$DestinationDir' exists: $(Test-Path $DestinationDir)" # Added Check
-    $destinationPath = Join-Path -Path $DestinationDir -ChildPath $ScriptName
-    Write-DebugLog "Save-ScriptToUserLocation: Attempting copy from `'$SourcePath`' to `'$destinationPath`'" 
-    try {
-        Copy-Item -Path $SourcePath -Destination $destinationPath -Force -ErrorAction Stop
-        Write-LogMessage "Script copied from '${SourcePath}' to '${destinationPath}'." -Level "INFO"
-        return $destinationPath
-    }
-    catch {
-        $fullError = $_.Exception | Format-List * -Force | Out-String
-        Write-LogMessage "Error copying script to '${destinationPath}': $($_.Exception.Message)" -Level "ERROR"
-        Write-LogMessage "Full Copy-Item Exception Details:`n$fullError" -Level "ERROR" # Log full details
-        throw $_
-    }
-}
-#endregion
+# Save-ScriptToUserLocation function removed as it's no longer suitable with the module dependency.
 
 #region Invoke-AdminAndCorrectPathCheck Function
 function Invoke-AdminAndCorrectPathCheck {
