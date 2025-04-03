@@ -533,6 +533,89 @@ function Invoke-TestSuite {
     }
 
 
+    if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Stop-LoxoneMonitor") {
+        Invoke-Test -Name "Stop-LoxoneMonitor (Mocked Process)" -TestBlock {
+            $results = @{
+                StopsRunning = $false
+                SkipsNotRunning = $false
+                HandlesStopError = $false
+            }
+            $mockProcessId = 9999
+            $mockProcess = [PSCustomObject]@{ Id = $mockProcessId; Name = 'loxonemonitor' }
+            
+            # Store original commands
+            $originalGetProcess = Get-Command Get-Process -ErrorAction SilentlyContinue
+            $originalStopProcess = Get-Command Stop-Process -ErrorAction SilentlyContinue
+            $stopProcessCalled = $false
+
+            # --- Test 1: Stops Running Process --- 
+            try {
+                $stopProcessCalled = $false # Reset flag
+                function Get-Process { param($Name) Write-Host "  DEBUG MOCK (StopsRunning): Get-Process Name='$Name'"; if ($Name -eq 'loxonemonitor') { return $mockProcess } else { return $null } }
+                function Stop-Process { param($Id, [switch]$Force) Write-Host "  DEBUG MOCK (StopsRunning): Stop-Process Id='$Id', Force='$Force'"; if ($Id -eq $mockProcessId) { $script:stopProcessCalled = $true } else { throw "Stop-Process called with unexpected ID" } }
+                
+                Stop-LoxoneMonitor
+                
+                if ($stopProcessCalled) { $results.StopsRunning = $true } else { Write-Warning "StopsRunning test failed: Stop-Process was not called." }
+            } catch {
+                Write-Warning "StopsRunning test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-Process -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Test 2: Skips When Not Running --- 
+            try {
+                $stopProcessCalled = $false # Reset flag
+                function Get-Process { param($Name) Write-Host "  DEBUG MOCK (SkipsNotRunning): Get-Process Name='$Name'"; return $null }
+                # Stop-Process mock shouldn't be needed here, but define defensively
+                function Stop-Process { param($Id, [switch]$Force) Write-Host "  DEBUG MOCK (SkipsNotRunning): Stop-Process Id='$Id', Force='$Force'"; $script:stopProcessCalled = $true; throw "Stop-Process should not have been called" }
+
+                Stop-LoxoneMonitor
+                
+                if (-not $stopProcessCalled) { $results.SkipsNotRunning = $true } else { Write-Warning "SkipsNotRunning test failed: Stop-Process was called unexpectedly." }
+            } catch {
+                Write-Warning "SkipsNotRunning test failed with exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-Process -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+            
+            # --- Test 3: Handles Stop-Process Error (Logs but doesn't throw) --- 
+            try {
+                $stopProcessCalled = $false # Reset flag
+                function Get-Process { param($Name) Write-Host "  DEBUG MOCK (HandlesStopError): Get-Process Name='$Name'"; if ($Name -eq 'loxonemonitor') { return $mockProcess } else { return $null } }
+                function Stop-Process { param($Id, [switch]$Force) Write-Host "  DEBUG MOCK (HandlesStopError): Stop-Process Id='$Id', Force='$Force'"; $script:stopProcessCalled = $true; throw "Simulated Stop-Process error" }
+                
+                # Expect function to complete without throwing, and log the error
+                Stop-LoxoneMonitor 
+                
+                Start-Sleep -Milliseconds 100 # Give log time
+                if ($stopProcessCalled -and (Select-String -Path $global:LogFile -Pattern "Error stopping loxonemonitor.exe.*Simulated Stop-Process error" -Quiet)) {
+                    $results.HandlesStopError = $true
+                } elseif (-not $stopProcessCalled) {
+                    Write-Warning "HandlesStopError test failed: Stop-Process was not called."
+                } else {
+                    Write-Warning "HandlesStopError test failed: Expected error log message not found."
+                }
+            } catch {
+                # Function should NOT throw in this case
+                Write-Warning "HandlesStopError test failed. Function threw unexpected exception: $($_.Exception.Message)"
+            } finally {
+                Remove-Item function:\Get-Process -Force -ErrorAction SilentlyContinue
+                Remove-Item function:\Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Final Check --- 
+            $failedCount = ($results.Values | Where-Object { $_ -eq $false }).Count
+            if ($failedCount -gt 0) {
+                Write-Warning "$failedCount sub-tests failed for Stop-LoxoneMonitor."
+            }
+            return $failedCount -eq 0
+        }
+    }
+
+
     if (Test-ShouldRun -CategoryName "Utils" -IndividualTestName "Test-ScheduledTask") {
         Invoke-Test -Name "Test-ScheduledTask (Simulated Parent)" -TestBlock {
             $results = @{
