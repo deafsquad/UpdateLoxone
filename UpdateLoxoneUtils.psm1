@@ -1,26 +1,54 @@
-# Module: UpdateLoxoneUtils.psm1
-# Contains helper functions for the UpdateLoxone.ps1 script
+<#
+.SYNOPSIS
+Provides helper functions for the UpdateLoxone.ps1 script, handling tasks like logging, version checking, installation, Miniserver updates, notifications, and utility operations.
 
-#region Get-ScriptSaveFolder Function
-function Get-ScriptSaveFolder {
+.DESCRIPTION
+This module encapsulates reusable logic used by the main Loxone update script. Functions cover:
+- Logging with call stack tracing and mutex protection.
+- Log file rotation.
+- Retrieving installed application versions and paths.
+- Downloading files with progress, verification (CRC32, size), and retries.
+- Calculating CRC32 checksums.
+- Executing installers.
+- Updating Loxone Miniservers based on a list.
+- Sending user notifications via BurntToast (handling interactive vs. scheduled task context).
+- Checking process status and scheduled task context.
+- Validating executable signatures.
+- Waiting for network connectivity.
+- Parsing and handling credentials securely.
+
+.NOTES
+- Requires PowerShell 5.1 or later.
+- Uses a mutex ('Global\UpdateLoxoneLogMutex') for log file access synchronization.
+- Depends on the BurntToast module for notifications (will attempt install if missing).
+- Exports numerous functions for use by the main script.
+#>
+
+# Global Mutex for Log File Access (using a unique name)
+$script:LogMutex = New-Object System.Threading.Mutex($false, 'Global\UpdateLoxoneLogMutex')
+$script:CallStack = [System.Collections.Generic.Stack[object]]::new() # Corrected type to hold objects
+#region Utility Helpers
+function GetScriptSaveFolder {
     [CmdletBinding()]
     param(
-        # Simulate the automatic $MyInvocation variable - using [object] for easier testing/mocking
+        # The $MyInvocation automatic variable (contains info about the caller). Use [object] for easier testing/mocking.
         [Parameter(Mandatory=$true)]
         [object]$InvocationInfo,
         
-        # Simulate the automatic $PSBoundParameters dictionary
+        # The $PSBoundParameters automatic variable (a dictionary of parameters passed to the caller).
         [Parameter(Mandatory=$true)]
         [hashtable]$BoundParameters,
 
-        # Allow passing a specific value for testing USERPROFILE
+        # The path to the user's profile directory (defaults to $env:USERPROFILE). Used as a fallback.
         [string]$UserProfilePath = $env:USERPROFILE
     )
 
-    Write-DebugLog "Get-ScriptSaveFolder: Invocation Command Definition = '$($InvocationInfo.MyCommand.Definition)'"
-    Write-DebugLog "Get-ScriptSaveFolder: BoundParameters contains ScriptSaveFolder = $($BoundParameters.ContainsKey('ScriptSaveFolder'))"
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    WriteLog -Message "Get-ScriptSaveFolder: Invocation Command Definition = '$($InvocationInfo.MyCommand.Definition)'" -Level DEBUG
+    try {
+    WriteLog -Message "Get-ScriptSaveFolder: BoundParameters contains ScriptSaveFolder = $($BoundParameters.ContainsKey('ScriptSaveFolder'))" -Level DEBUG
     if ($BoundParameters.ContainsKey('ScriptSaveFolder')) {
-        Write-DebugLog "Get-ScriptSaveFolder: ScriptSaveFolder Parameter Value = '$($BoundParameters['ScriptSaveFolder'])'"
+        WriteLog -Message "Get-ScriptSaveFolder: ScriptSaveFolder Parameter Value = '$($BoundParameters['ScriptSaveFolder'])'" -Level DEBUG
     }
 
     $determinedSaveFolder = $null
@@ -28,7 +56,7 @@ function Get-ScriptSaveFolder {
     # 1. Check if ScriptSaveFolder parameter was explicitly provided
     if ($BoundParameters.ContainsKey('ScriptSaveFolder')) {
         $determinedSaveFolder = $BoundParameters['ScriptSaveFolder']
-        Write-DebugLog "Get-ScriptSaveFolder: Using provided parameter value: '$determinedSaveFolder'"
+        WriteLog -Message "Get-ScriptSaveFolder: Using provided parameter value: '$determinedSaveFolder'" -Level DEBUG
     } 
     # 2. If not provided, determine from InvocationInfo
     else {
@@ -36,155 +64,387 @@ function Get-ScriptSaveFolder {
             $scriptDir = Split-Path -Parent $InvocationInfo.MyCommand.Definition -ErrorAction Stop
             if (-not ([string]::IsNullOrWhiteSpace($scriptDir))) {
                 $determinedSaveFolder = $scriptDir
-                Write-DebugLog "Get-ScriptSaveFolder: Determined from script path: '$determinedSaveFolder'"
+                WriteLog -Message "Get-ScriptSaveFolder: Determined from script path: '$determinedSaveFolder'" -Level DEBUG
             } else {
-                 Write-DebugLog "Get-ScriptSaveFolder: Split-Path returned empty/whitespace."
+                 WriteLog -Message "Get-ScriptSaveFolder: Split-Path returned empty/whitespace." -Level DEBUG
             }
         } catch {
-            Write-LogMessage "Get-ScriptSaveFolder: Error splitting path from InvocationInfo: $($_.Exception.Message)" -Level WARN
+            WriteLog -Message "Get-ScriptSaveFolder: Error splitting path from InvocationInfo: $($_.Exception.Message)" -Level WARN
             # Continue to fallback
         }
     }
 
     # 3. Fallback if still not determined (e.g., empty path from Split-Path, or parameter was provided but empty)
     if ([string]::IsNullOrWhiteSpace($determinedSaveFolder)) {
-        Write-LogMessage "Get-ScriptSaveFolder: Could not determine path from parameter or invocation. Falling back to UserProfile path." -Level WARN
-        $determinedSaveFolder = Join-Path -Path $UserProfilePath -ChildPath "UpdateLoxone"
-        Write-DebugLog "Get-ScriptSaveFolder: Using fallback path: '$determinedSaveFolder'"
+        WriteLog -Message "Get-ScriptSaveFolder: Could not determine path from parameter or invocation. Falling back to UserProfile path." -Level WARN
+        $determinedSaveFolder = Join-Path -Path $UserProfilePath -ChildPath "UpdateLoxone" # Use parameter for fallback
+        WriteLog -Message "Get-ScriptSaveFolder: Using fallback path: '$determinedSaveFolder'" -Level DEBUG
     }
 
-    Write-LogMessage "Get-ScriptSaveFolder: Final determined path: '$determinedSaveFolder'" -Level INFO
+    WriteLog -Message "Get-ScriptSaveFolder: Final determined path: '$determinedSaveFolder'" -Level INFO
     return $determinedSaveFolder
+    }
+    finally {
+        ExitFunction # No change needed here, function name is correct
+    }
 }
+
 #endregion
 
-
 #region Logging Functions
-function Write-DebugLog {
-    param(
-        [string]$Message,
-        [switch]$ErrorMessage
-    )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $prefix = "DEBUG"
-    if ($ErrorMessage) { $prefix = "ERROR" }
-    $elevationStatus = if ($global:IsElevatedInstance) { $true } else { $false } # Ensure boolean
-    $logEntry = "$timestamp [$prefix] [PID:$PID|Elevated:$elevationStatus] $Message"
 
-    # Console Output controlled by $script:DebugMode
-    if ($script:DebugMode) {
-        if ($ErrorMessage) {
-            Write-Host "ERROR: $Message" -ForegroundColor Red
+#region Breadcrumb Helpers
+function EnterFunction {
+    param(
+        # The name of the function being entered.
+        [Parameter(Mandatory = $true)]
+        [string]$FunctionName,
+        # The path to the script file containing the function.
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        # The line number where the function is defined or called from.
+        [Parameter(Mandatory = $true)]
+        [int]$LineNumber
+    )
+    # Store a custom object with more details
+    $callInfo = [PSCustomObject]@{ Name = $FunctionName; Path = $FilePath; Line = $LineNumber }
+    $script:CallStack.Push($callInfo)
+    # Optional: Log entry with breadcrumb
+    # WriteLog -Message "Entering $($callInfo.Name) ($($callInfo.Path):$($callInfo.Line))" -Level DEBUG
+}
+
+function ExitFunction {
+    if ($script:CallStack.Count -gt 0) {
+        $exitingFunction = $script:CallStack.Pop()
+        # Optional: Log exit with breadcrumb (before popping)
+        # WriteLog -Message "Exiting $exitingFunction" -Level DEBUG
+    } else {
+        WriteLog -Message "ExitFunction called but CallStack is empty!" -Level WARN
+    }
+}
+#endregion Breadcrumb Helpers
+
+
+# NEW WriteLog Function
+# Re-entry guard flag for WriteLog
+$script:InsideWriteLog = $false
+
+function WriteLog {
+    [CmdletBinding()]
+    param(
+        # The log message content.
+        [Parameter(Mandatory=$true)]
+        [string]$Message,
+
+        # The severity level of the log message.
+        [Parameter()]
+        [ValidateSet('INFO', 'DEBUG', 'WARN', 'ERROR')]
+        [string]$Level = 'INFO',
+
+        # Optional hashtable of parameters to include in DEBUG level messages.
+        [Parameter()]
+        [hashtable]$Parameters
+        # Removed CallingScriptPath and CallingLineNumber parameters
+    )
+        # Suppress DEBUG messages if ScriptDebugMode is not active
+        if ($Level -eq 'DEBUG' -and (-not $script:ScriptDebugMode)) {
+            return # Do not log DEBUG messages when not in debug mode
         }
-        else {
-            Write-Host "DEBUG: $Message"
+
+    # --- Re-entry Guard Start ---
+    if ($script:InsideWriteLog) { return } # Prevent recursion
+    $script:InsideWriteLog = $true
+
+
+    try {
+    # --- New Logic Start ---
+
+    # --- Derive Full Call Stack Trace from Native Stack ---
+    $nativeStack = Get-PSCallStack
+    $fullTraceParts = [System.Collections.Generic.List[string]]::new()
+
+    # Iterate from the top of the stack down to the immediate caller (index 1)
+    # Optionally skip the very top frame (index Count - 1) if it's just the script entry point
+    $startIndex = $nativeStack.Count - 1
+    if ($startIndex -ge 1) { # Ensure there's more than just WriteLog itself
+        $topFrame = $nativeStack[$startIndex]
+        # Skip if it's the top-level script with no specific function (often line 0 or 1)
+        if (($topFrame.FunctionName -eq '<ScriptBlock>' -or [string]::IsNullOrWhiteSpace($topFrame.FunctionName)) -and $topFrame.ScriptLineNumber -le 1) {
+             $startIndex-- # Start from the next frame down
         }
     }
-    
-    # File Output controlled by $global:LogFile existence
-    # File Output controlled by $global:LogFile existence AND $script:DebugMode
+
+    for ($i = $startIndex; $i -ge 1; $i--) {
+        $frame = $nativeStack[$i]
+        # Extract components for the desired format: ScriptName:LineNumber FunctionName
+        $scriptLeaf = if (-not ([string]::IsNullOrWhiteSpace($frame.ScriptName))) {
+            Split-Path -Path $frame.ScriptName -Leaf
+        } else {
+            "<NoScript>" # Placeholder if ScriptName is missing
+        }
+        $frameLine = $frame.ScriptLineNumber
+        $funcName = if (-not ([string]::IsNullOrWhiteSpace($frame.FunctionName)) -and $frame.FunctionName -ne '<ScriptBlock>') {
+            $frame.FunctionName # Use FunctionName if valid and not just <ScriptBlock>
+        } else {
+            "" # Use empty string if FunctionName is not useful
+        }
+
+        # Determine the function name part (with leading space if it exists)
+        $funcNamePart = if ($funcName) { " $funcName" } else { "" }
+
+        # Format the string
+        $frameString = "{0}:{1}{2}" -f $scriptLeaf, $frameLine, $funcNamePart
+        $fullTraceParts.Add($frameString)
+    }
+
+    # Join the parts with ' -> ' (Oldest Caller -> ... -> Immediate Caller)
+    $fullTraceString = $fullTraceParts -join ' -> '
+
+    # --- Get Process/User Info ---
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $elevationStatus = if ($isAdmin) { "ADMIN" } else { "USER" }
+    $currentUsername = $env:USERNAME
+    $currentPID = $PID
+
+    # --- Construct Final Log Prefix (New Format) ---
+    $timestamp = Get-Date -Format "yyMMdd HH:mm:ss.fff" # Changed format to include milliseconds
+    $logPrefix = "[$timestamp] [$currentPID`:$elevationStatus`:$currentUsername] [$($Level.ToUpper())]" # New base format
+
+    # --- Get Immediate Caller Info ---
+    $callerInfoString = "<UnknownCaller>" # Default
+    if ($nativeStack.Count -ge 2) {
+        $callerFrame = $nativeStack[1]
+        $callerScriptLeaf = if (-not ([string]::IsNullOrWhiteSpace($callerFrame.ScriptName))) { Split-Path -Path $callerFrame.ScriptName -Leaf } else { "<NoScript>" }
+        $callerFrameLine = $callerFrame.ScriptLineNumber
+        $callerFuncName = if (-not ([string]::IsNullOrWhiteSpace($callerFrame.FunctionName)) -and $callerFrame.FunctionName -ne '<ScriptBlock>') { $callerFrame.FunctionName } else { "" }
+        $callerFuncNamePart = if ($callerFuncName) { " $callerFuncName" } else { "" }
+        $callerInfoString = "{0}:{1}{2}" -f $callerScriptLeaf, $callerFrameLine, $callerFuncNamePart
+    } else {
+        # Handle cases where stack is too shallow (e.g., direct call from console)
+        $callerInfoString = "<DirectCall>"
+        # Log this as DEBUG instead of writing directly to host
+        # Use try-catch to prevent infinite loop if WriteLog calls itself here
+        try { WriteLog -Message "Call stack depth insufficient for caller info in WriteLog." -Level DEBUG -ErrorAction SilentlyContinue } catch {}
+    }
+
+    # --- Construct Final Log Prefix (Modified) ---
+    # $timestamp and base $logPrefix are constructed just before this block (lines 181-182)
+    # Now, append the caller info string unconditionally
+    $logPrefix += " [$callerInfoString]" # ALWAYS include immediate caller
+
+    # Conditionally add FULL trace if in DebugMode AND trace is available
+    if ($script:DebugMode -and $fullTraceString) {
+        $logPrefix += " (Full Trace: $fullTraceString)" # Add full trace separately for debug
+    }
+# --- New Logic End ---
+
+    # Base log entry
+    $logEntry = "$logPrefix $Message"
+
+    # Add parameter details if Level is DEBUG and Parameters are provided
+    if ($Level -eq 'DEBUG' -and $Parameters -ne $null -and $Parameters.Count -gt 0) {
+        $paramDetails = $Parameters.GetEnumerator() | ForEach-Object { "$($_.Name) = '$($_.Value)'" } | Join-String -Separator '; '
+        $logEntry += " | Parameters: { $paramDetails }"
+    }
+
+    # --- Console Output ---
+    # Always output ERROR and WARN
+    # Output INFO unless $VerbosePreference is SilentlyContinue
+    # Output DEBUG only if $DebugPreference is Continue
+    # Use Write-Host with color coding based on level
+    switch ($Level.ToUpper()) {
+        'ERROR'   { Write-Host $logEntry -ForegroundColor Red }
+        'WARN' { Write-Host $logEntry -ForegroundColor Yellow }
+        'DEBUG'   {
+            # Only write DEBUG if $DebugPreference is 'Continue'
+            if ($DebugPreference -eq 'Continue') {
+                Write-Host $logEntry -ForegroundColor Cyan
+            }
+        }
+        'INFO'    { Write-Host $logEntry -ForegroundColor Green } # Use Green for INFO
+        default   { Write-Host $logEntry } # Fallback for safety or unknown levels
+    }
+
+    # --- File Output ---
+    # Write all levels to the log file if $global:LogFile is defined
     if ($global:LogFile) {
-        # Only write DEBUG level to file if DebugMode is enabled
-        if ($script:DebugMode) {
-            try {
-                # Ensure log directory exists (important when run as SYSTEM maybe?)
+        $lockAcquired = $false
+        try {
+            # Attempt to acquire the mutex with a timeout (e.g., 5000ms)
+            if ($script:LogMutex.WaitOne(5000)) {
+                $lockAcquired = $true
+                # Ensure log directory exists
                 $logDir = Split-Path -Path $global:LogFile -Parent
                 if (-not (Test-Path $logDir)) {
                     New-Item -Path $logDir -ItemType Directory -Force | Out-Null
                 }
-                $logEntry | Out-File -FilePath $global:LogFile -Append -Encoding UTF8
-            }
-            catch {
-                Write-Host "ERROR: Could not write DEBUG entry to log file '${global:LogFile}'. Exception: ${($_.Exception.Message)}" -ForegroundColor Red
-            }
-        }
-    }
-}
-
-function Write-LogMessage {
-    param(
-        [string]$Message,
-        [string]$Level = "INFO",
-        [int]$ErrorCode = $null
-    )
-    if ([string]::IsNullOrWhiteSpace($Message)) { $Message = "<Empty Message>" }
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $elevationStatus = if ($global:IsElevatedInstance) { $true } else { $false } # Ensure boolean
-    $logEntry = "[$timestamp] [$Level] [PID:$PID|Elevated:$elevationStatus] $Message"
-    
-    # File Output controlled by $global:LogFile existence
-    if ($global:LogFile) {
-        try {
-             # Ensure log directory exists
-            $logDir = Split-Path -Path $global:LogFile -Parent
-            if (-not (Test-Path $logDir)) {
-                New-Item -Path $logDir -ItemType Directory -Force | Out-Null
-            }
-            if (-not (Test-Path $global:LogFile)) {
-                $logEntry | Out-File -FilePath $global:LogFile -Encoding UTF8 -Force
-            }
-            else {
-                $logEntry | Out-File -FilePath $global:LogFile -Append -Encoding UTF8
+                # Append to log file using StreamWriter for better handle management
+                $stream = $null
+                try {
+                    # Open in append mode, specify UTF8 encoding, default buffer size
+                    $stream = [System.IO.StreamWriter]::new($global:LogFile, $true, [System.Text.Encoding]::UTF8)
+                    $stream.WriteLine($logEntry)
+                }
+                catch {
+                    # Handle stream write error specifically
+                    Write-Error "WriteLog: StreamWriter failed for log file '$($global:LogFile)': $($_.Exception.Message)" -ErrorAction Continue
+                    # Re-throw or handle more gracefully if needed, but continue for now
+                }
+                finally {
+                    # Ensure stream is closed/disposed even if error occurs during write
+                    if ($stream -ne $null) {
+                        $stream.Dispose()
+                    }
+                }
+            } else {
+                # Failed to acquire lock within timeout - Write directly to error stream to avoid recursion
+                Write-Error "WriteLog: Timed out waiting for log file mutex for message: $Message" -ErrorAction Continue
             }
         }
         catch {
-            Write-Host "ERROR: Failed to write to log file '${global:LogFile}': $($_.Exception.Message)}" -ForegroundColor Red
+            # Write error to console if file logging fails (even with lock)
+            Write-Error "WriteLog: Failed to write to log file '$($global:LogFile)' (lock acquired: $lockAcquired): $($_.Exception.Message)" -ErrorAction Continue
         }
+        finally {
+            # Release the mutex ONLY if it was acquired
+            if ($lockAcquired) {
+                $script:LogMutex.ReleaseMutex()
+            }
+        }
+    } # End if ($global:LogFile)
+    } # End outer try block for re-entry guard
+    finally {
+        # Ensure the guard flag is reset even if errors occur
+        $script:InsideWriteLog = $false
     }
-
-    # Console Output controlled by Level and $script:DebugMode for DEBUG level
-    switch ($Level.ToUpper()) {
-        "DEBUG" { if ($script:DebugMode) { Write-Verbose $logEntry } } 
-        "INFO"  { Write-Host $logEntry -ForegroundColor Green }
-        "WARN"  { Write-Warning $logEntry }
-        "ERROR" { Write-Warning "ERROR: $Message" } 
-    }
+    # --- Re-entry Guard End ---
 }
-#endregion
+# END NEW WriteLog Function
+
+
+#endregion Logging Functions
 
 #region Log Rotation
-function Invoke-LogFileRotation {
+function InvokeLogFileRotation {
     param(
+        # The full path to the log file to rotate.
         [string]$LogPath,
-        [int]$MaxArchives = 24
+        # The maximum number of archive files to keep.
+        [int]$MaxArchives = 24,
+        # Switch to enable detailed debug logging for the rotation process.
+        [Parameter(Mandatory=$false)][switch]$DebugMode
     )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    if ($DebugMode) { WriteLog -Message "Starting log rotation check for '$(Split-Path -Leaf $LogPath)'." -Level INFO } # Already correct
+    WriteLog -Message "Checking if log path '$(Split-Path -Leaf $LogPath)' exists." -Level DEBUG # Already correct
     if (Test-Path $LogPath) {
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         $logDir = Split-Path -Path $LogPath -Parent
         $archiveFileName = [System.IO.Path]::GetFileNameWithoutExtension($LogPath) + "_${timestamp}.log"
         $archivePath = Join-Path -Path $logDir -ChildPath $archiveFileName
+        WriteLog -Message "Generating archive filename: '$archiveFileName'." -Level DEBUG # Already correct
         
-        Write-DebugLog "Attempting to rotate '$LogPath' to '$archivePath'"
+        # Note: The size check happens *before* calling this function. Rotation is attempted if size exceeds limit.
+        if ($DebugMode) { WriteLog -Message "Log file meets rotation criteria (size or forced). Proceeding with rotation attempt for '$(Split-Path -Leaf $LogPath)'." -Level INFO } # Already correct
+        # Removed the old DEBUG message here as the INFO one above is more comprehensive for the start of the attempt.
+        
+        $lockAcquired = $false
+        $renameSuccess = $false
+        $maxRenameAttempts = 3
+        $renameAttemptDelayMs = 500 # Wait 0.5 seconds between attempts
+        $archivedFilePath = $null # Variable to store the successful archive path
+
         try {
-            # Try renaming first, might release lock faster than copy/delete
-            Rename-Item -Path $LogPath -NewName $archivePath -Force -ErrorAction Stop
-            Write-DebugLog -Message "Log file renamed to archive '${archivePath}'."
+            WriteLog -Message "Attempting to acquire log mutex..." -Level DEBUG # Already correct
+            # Attempt to acquire the mutex with a timeout (e.g., 10000ms)
+            if ($script:LogMutex.WaitOne(10000)) {
+                $lockAcquired = $true
+                WriteLog -Message "Acquired log mutex." -Level DEBUG # Already correct
+
+                for ($attempt = 1; $attempt -le $maxRenameAttempts; $attempt++) {
+                    try {
+                        WriteLog -Message "$(Split-Path -Leaf $LogPath) > $(Split-Path -Leaf $archivePath) (${attempt}/${maxRenameAttempts})" -Level INFO # Already correct
+                        # Try renaming the log file
+                        Rename-Item -Path $LogPath -NewName $archivePath -Force -ErrorAction Stop
+                        if ($DebugMode) { WriteLog -Message "Successfully renamed log file to '$(Split-Path -Leaf $archivePath)' on attempt $attempt." -Level INFO } # Already correct
+                        $renameSuccess = $true
+                        $archivedFilePath = $archivePath # Store the successful path
+                        break # Exit loop on success
+                    }
+                    catch {
+                        WriteLog -Message "Attempt ${attempt}/${maxRenameAttempts}: Failed to rename $(Split-Path -Leaf $LogPath) > $(Split-Path -Leaf $archivePath). Error: $($_.Exception.Message)." -Level WARN # Already correct
+                        if ($attempt -lt $maxRenameAttempts) {
+                            Start-Sleep -Milliseconds $renameAttemptDelayMs
+                        }
+                    }
+                } # End for loop
+            } else {
+                WriteLog -Message "Timed out waiting for log mutex after 10 seconds. Rotation skipped for '$(Split-Path -Leaf $LogPath)'." -Level WARN # Already correct
+            }
+        } catch {
+             # Catch unexpected errors during mutex handling or loop
+             WriteLog -Message "InvokeLogFileRotation: Unexpected error during rotation attempt: $($_.Exception.Message)" -Level ERROR
+        } finally {
+            # Release the mutex ONLY if it was acquired
+            if ($lockAcquired) {
+                $script:LogMutex.ReleaseMutex()
+                WriteLog -Message "Released log mutex." -Level DEBUG # Already correct
+            }
         }
-        catch {
-            Write-LogMessage -Message "Error rotating log file '$LogPath' to '$archivePath' using Rename-Item: ${($_.Exception.Message)}. Will attempt cleanup anyway." -Level "WARN"
-            # Continue to cleanup logic even if rename fails
+        # Continue to cleanup logic regardless of rename success/failure
+        if (-not $renameSuccess) {
+             WriteLog -Message "Failed to rename log file '$(Split-Path -Leaf $LogPath)' after $maxRenameAttempts attempts. Proceeding with cleanup." -Level WARN # Already correct
         }
-    }
-    $logDir = Split-Path -Path $LogPath
-    $pattern = [System.IO.Path]::GetFileNameWithoutExtension($LogPath) + "_*.log"
+   }
+   $deletedFilesList = $null # Variable to store the list of files marked for deletion
+   if ($DebugMode) { WriteLog -Message "Starting cleanup of old archives in '$logDir' (Max: $MaxArchives)." -Level INFO } # Already correct
+   $logDir = Split-Path -Path $LogPath
+   $pattern = [System.IO.Path]::GetFileNameWithoutExtension($LogPath) + "_*.log"
     $archives = Get-ChildItem -Path $logDir -Filter $pattern | Sort-Object LastWriteTime
+    WriteLog -Message "Found $($archives.Count) archive files matching pattern '$pattern'." -Level DEBUG # Already correct
     if ($archives.Count -gt $MaxArchives) {
         $toDelete = $archives | Select-Object -First ($archives.Count - $MaxArchives)
+        $deletedFilesList = $toDelete # Store the list before deletion attempts
+        WriteLog -Message "Will delete $($toDelete.Count) oldest archive(s)." -Level DEBUG # Already correct
         foreach ($file in $toDelete) {
             try {
+                WriteLog -Message "Deleting $($file.Name)." -Level DEBUG # Already correct
                 Remove-Item -Path $file.FullName -Force
             }
             catch {
-                Write-DebugLog -Message "Failed to remove old archive '${file.FullName}': ${($_.Exception.Message)}" -ErrorMessage
+                WriteLog -Message "Failed to delete old archive '$($file.Name)': $($_.Exception.Message)." -Level ERROR # Already correct
             }
         }
     }
-}
-#endregion
+    if ($DebugMode) { WriteLog -Message "Log rotation and cleanup finished for '$(Split-Path -Leaf $LogPath)'." -Level INFO } # Already correct
 
-#region Get-InstalledVersion Function
-function Get-InstalledVersion {
-    param([string]$ExePath)
+    # Construct and log the summary message
+    $summaryMessage = ""
+    if ($archivedFilePath) {
+    } else {
+        $originalLogName = Split-Path -Leaf $LogPath
+        $summaryMessage += "Archiving failed for $originalLogName. "
+    }
+
+    if ($deletedFilesList -and $deletedFilesList.Count -gt 0) {
+        $deletedNames = ($deletedFilesList | ForEach-Object { $_.Name }) -join ', '
+        $summaryMessage += "$($deletedFilesList.Count) deleted [$deletedNames]"
+    } else {
+        $summaryMessage += "No old archives deleted."
+    }
+    WriteLog -Level INFO -Message $summaryMessage # Already correct
+
+    ExitFunction # Already correct
+}
+#endregion Log Rotation
+
+#region Installation Helpers
+function GetInstalledVersion {
+    param(
+        # The path to the executable file or its installation directory.
+        [string]$ExePath
+    )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     if (-not $ExePath.EndsWith(".exe")) {
         $ExePath = Join-Path -Path $ExePath -ChildPath "LoxoneConfig.exe"
     }
@@ -192,122 +452,123 @@ function Get-InstalledVersion {
         try {
             $version = (Get-Item $ExePath).VersionInfo.FileVersion
             $version = $version.Trim()
-            Write-LogMessage "Found version of ${ExePath}: ${version}" -Level "INFO"
+            WriteLog -Message "Found version of '${ExePath}': ${version}" -Level INFO # Already correct
             return $version
         }
         catch {
-            Write-LogMessage "Error retrieving version from ${ExePath}: ${($_.Exception.Message)}" -Level "WARN"
+            WriteLog -Message "Error retrieving version from '${ExePath}': ${($_.Exception.Message)}" -Level WARN # Already correct
 		   Return $null
         }
     }
     else {
-        Write-LogMessage "Installed application not found at ${ExePath}." -Level "WARN"
+        WriteLog -Message "Installed application not found at '${ExePath}'." -Level WARN # Already correct
 		Return $null
     }
+    finally {
+        ExitFunction # Already correct
+    }
 }
-#endregion
 
-#region Start-LoxoneUpdateInstaller Function
-function Start-LoxoneUpdateInstaller {
+function StartLoxoneUpdateInstaller {
     param(
+        # The full path to the Loxone installer executable.
         [string]$InstallerPath,
-        [string]$InstallMode
+        # The installation mode ('silent' or 'verysilent').
+        [string]$InstallMode,
+        # The script's save folder (used for potential logging by the installer, though not directly used here).
+        [string]$ScriptSaveFolder
     )
-    Write-LogMessage "Starting update installer: ${InstallerPath} with install mode ${InstallMode}." -Level "INFO"
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    WriteLog -Message "Starting update installer: ${InstallerPath} with install mode ${InstallMode}." -Level INFO
+    try {
     try {
         Start-Process -FilePath $InstallerPath -ArgumentList "/${InstallMode}" -Wait
-        Write-LogMessage "Update installer executed successfully." -Level "INFO"
+        WriteLog -Message "Update installer executed successfully." -Level INFO
     }
     catch {
-        Write-LogMessage "Error executing update installer: ${($_.Exception.Message)}" -Level "ERROR"
+        WriteLog -Message "Error executing update installer: ${($_.Exception.Message)}" -Level ERROR
         throw $_
     }
-}
-#endregion
-
-#region CRC32 Class and Get-CRC32 Function
-# Note: Add-Type should ideally be run once, perhaps in the main script or module loading.
-# Keeping it here for now, but be aware it might log "already loaded" messages.
-# CRC32 Add-Type logic moved to main UpdateLoxone.ps1 script's initialization block.
-
-function Get-CRC32 {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InputFile
-    )
-    try {
-        $fileBytes = [System.IO.File]::ReadAllBytes($InputFile)
-        Write-DebugLog -Message "Read $($fileBytes.Length) bytes from file '${InputFile}'."
-        $crc = [CRC32]::Compute($fileBytes)
-        $crcString = $crc.ToString("X8")
-        Write-DebugLog -Message "Calculated CRC32 for '${InputFile}': ${crcString}"
-        return $crcString
     }
-    catch {
-        Write-LogMessage "Error calculating CRC32 for ${InputFile}: ${($_.Exception.Message)}" -Level "ERROR" -ErrorCode 2
-        throw $_
+    finally {
+        ExitFunction # Already correct
     }
 }
-#endregion
+  
 
-#region Show-NotificationToLoggedInUsers Function
-function Show-NotificationToLoggedInUsers {
+#endregion Installation Helpers
+
+#region Notification Helper
+function ShowNotificationToLoggedInUsers {
     param(
+        # The title of the toast notification.
         [string]$Title,
+        # The main message body of the toast notification.
         [string]$Message,
+        # Duration in seconds the toast should be displayed (0 for default). Not directly used by BurntToast.
         [int]$Timeout = 0,
+        # The Application ID to associate with the notification (defaults to PowerShell).
         [string]$AppId = 'WindowsPowerShell'
     )
 
-    Write-DebugLog "Entering Show-NotificationToLoggedInUsers" 
-    $isRunningAsTask = Test-ScheduledTask # This will call the function available in the current scope (module or mocked)
-    Write-DebugLog "Result of Test-ScheduledTask: $isRunningAsTask" 
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+
+    # Capture caller context for breadcrumbs to pass to WriteLog
+    $callerStackInfo = (Get-PSCallStack)[1] # Get info about the function/script that CALLED Show-NotificationToLoggedInUsers
+    $callerPathForLog = $callerStackInfo.ScriptName
+    $callerLineForLog = $callerStackInfo.ScriptLineNumber
+
+    # $callerFrame is no longer needed as WriteLog determines the stack automatically
+    WriteLog -Message "Entering ShowNotificationToLoggedInUsers" -Level DEBUG # Removed invalid -CallingScriptPath and -CallingLineNumber parameters
+    try {
+    $isRunningAsTask = TestScheduledTask # This will call the function available in the current scope (module or mocked)
+    WriteLog -Message "Result of TestScheduledTask: $isRunningAsTask" -Level DEBUG
 
     if (-not $isRunningAsTask) {
-        Write-LogMessage "Running interactively. Attempting direct notification." -Level "INFO"
+        WriteLog -Message "Running interactively. Attempting direct notification." -Level INFO
         try {
              if (-not (Get-Module -ListAvailable -Name BurntToast)) {
-                 Write-LogMessage "BurntToast module not found. Attempting to install for current user." -Level "WARN"
+                 WriteLog -Message "BurntToast module not found. Attempting to install for current user." -Level WARN
                  Install-Module -Name BurntToast -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction SilentlyContinue
              }
              Import-Module BurntToast -ErrorAction SilentlyContinue
              $appLogoPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
              New-BurntToastNotification -AppLogo $appLogoPath -Text $Title, $Message -ErrorAction Stop
-             Write-LogMessage "Direct notification sent successfully." -Level "INFO"
+             WriteLog -Message "Direct notification sent successfully." -Level INFO
              return
         } catch {
-            Write-LogMessage "Direct notification failed: $($_.Exception.Message). Falling back to scheduled task method." -Level "WARN"
+            WriteLog -Message "Direct notification failed: $($_.Exception.Message). Falling back to scheduled task method." -Level WARN
         }
     }
 
-    Write-LogMessage "Attempting notification via scheduled task method." -Level "INFO"
+    WriteLog -Message "Attempting notification via scheduled task method." -Level INFO
     $activeSessions = @()
     try {
-        Write-DebugLog "Querying Win32_LogonSession for LogonType = 2..."
+        WriteLog -Message "Querying Win32_LogonSession for LogonType = 2..." -Level DEBUG
         $sessions = Get-CimInstance -ClassName Win32_LogonSession -Filter "LogonType = 2"
-        Write-DebugLog "Found $($sessions.Count) sessions with LogonType 2."
+        WriteLog -Message "Found $($sessions.Count) sessions with LogonType 2." -Level DEBUG
         
         # Log details of all found sessions before filtering
         if ($sessions) {
-            Write-DebugLog "Details of all LogonType=2 sessions found:"
+            WriteLog -Message "Details of all LogonType=2 sessions found:" -Level DEBUG
             foreach ($s in $sessions) {
                 $assocAcc = Get-CimAssociatedInstance -InputObject $s -ResultClassName Win32_Account -ErrorAction SilentlyContinue
                 $userName = if ($assocAcc) { "$($assocAcc[0].Domain)\$($assocAcc[0].Name)" } else { "<Account N/A>" }
-                Write-DebugLog "- Session ID: $($s.LogonId), StartTime: $($s.StartTime), User: $userName"
+                WriteLog -Message "- Session ID: $($s.LogonId), StartTime: $($s.StartTime), User: $userName" -Level DEBUG
             }
         } else {
-            Write-DebugLog "No LogonType=2 sessions returned by Get-CimInstance."
+            WriteLog -Message "No LogonType=2 sessions returned by Get-CimInstance." -Level DEBUG
         }
 
         foreach ($session in $sessions) {
             $assocAccounts = Get-CimAssociatedInstance -InputObject $session -ResultClassName Win32_Account -ErrorAction SilentlyContinue
             if ($assocAccounts) {
-                Write-DebugLog "Found associated account: $($assocAccounts[0].Domain)\$($assocAccounts[0].Name) for session $($session.LogonId)."
+                WriteLog -Message "Found associated account: $($assocAccounts[0].Domain)\$($assocAccounts[0].Name) for session $($session.LogonId)." -Level DEBUG
                 $quserOutput = quser.exe $session.LogonId 2>$null | Out-String
-                Write-DebugLog "quser output for session $($session.LogonId):`n$quserOutput"
+                WriteLog -Message "quser output for session $($session.LogonId):`n$quserOutput" -Level DEBUG
                 # Check if quser output contains the session ID, indicating it's likely an interactive session
                 if ($quserOutput -match "\b$($session.LogonId)\b") {
-                    Write-DebugLog "Session $($session.LogonId) found in quser output, assuming interactive."
+                    WriteLog -Message "Session $($session.LogonId) found in quser output, assuming interactive." -Level DEBUG
                     $userPrincipal = New-Object System.Security.Principal.NTAccount($assocAccounts[0].Domain, $assocAccounts[0].Name)
                     $activeSessions += [PSCustomObject]@{
                         SessionId = $session.LogonId
@@ -316,23 +577,23 @@ function Show-NotificationToLoggedInUsers {
                         UserSID = $userPrincipal.Translate([System.Security.Principal.SecurityIdentifier]).Value
                         Principal = "$($assocAccounts[0].Domain)\$($assocAccounts[0].Name)"
                     }
-                    Write-DebugLog "Added active interactive session: $($assocAccounts[0].Domain)\$($assocAccounts[0].Name) (Session ID: $($session.LogonId))"
+                    WriteLog -Message "Added active interactive session: $($assocAccounts[0].Domain)\$($assocAccounts[0].Name) (Session ID: $($session.LogonId))" -Level DEBUG
                 } else {
-                    Write-DebugLog "Session $($session.LogonId) NOT found in quser output or output is empty."
+                    WriteLog -Message "Session $($session.LogonId) NOT found in quser output or output is empty." -Level DEBUG
                 }
             } else {
-                 Write-DebugLog "Could not find associated account for session ID: $($session.LogonId)."
+                 WriteLog -Message "Could not find associated account for session ID: $($session.LogonId)." -Level DEBUG
             }
         }
     } catch {
-        Write-LogMessage "Error querying user sessions: $($_.Exception.Message)" -Level "WARN"
-        Write-DebugLog "Stack trace for session query error: $($_.ScriptStackTrace)" -ErrorMessage
+        WriteLog -Message "Error querying user sessions: $($_.Exception.Message)" -Level WARN
+        WriteLog -Message "Stack trace for session query error: $($_.ScriptStackTrace)" -Level DEBUG # Changed level to DEBUG as per convention
     }
 
-    Write-DebugLog "Total active sessions identified for notification: $($activeSessions.Count)"
+    WriteLog -Message "Total active sessions identified for notification: $($activeSessions.Count)" -Level DEBUG
     if ($activeSessions.Count -gt 0) {
         if (-not (Get-Module -ListAvailable -Name BurntToast)) {
-             Write-LogMessage "BurntToast module not found. Notifications may fail if not installed for target users." -Level "WARN"
+             WriteLog -Message "BurntToast module not found. Notifications may fail if not installed for target users." -Level WARN
         }
 
         $appLogoPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -340,7 +601,7 @@ function Show-NotificationToLoggedInUsers {
         foreach ($userSession in $activeSessions) {
             $taskName = "TempLoxoneToastNotification_$($userSession.UserName)_$(Get-Date -Format 'yyyyMMddHHmmssfff')"
             $principal = $userSession.Principal
-            Write-LogMessage "Attempting to send notification to user '$principal' via temporary scheduled task '$taskName'." -Level "INFO"
+            WriteLog -Message "Attempting to send notification to user '$principal' via temporary scheduled task '$taskName'." -Level INFO
 
             $escapedTitle = $Title -replace "'", "''"
             $escapedMessage = $Message -replace "'", "''"
@@ -360,35 +621,42 @@ function Show-NotificationToLoggedInUsers {
 
             try {
                 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -RunLevel Limited -Force -ErrorAction Stop
-                Write-DebugLog "Registered temporary task '$taskName' for user '$principal'."
+                WriteLog -Message "Registered temporary task '$taskName' for user '$principal'." -Level DEBUG
                 Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-                Write-LogMessage "Triggered temporary notification task '$taskName' for user '$principal'." -Level "INFO"
+                WriteLog -Message "Triggered temporary notification task '$taskName' for user '$principal'." -Level INFO
             } catch {
-                Write-LogMessage "Failed to register or start temporary notification task '$taskName' for user '$principal': $($_.Exception.Message)" -Level "ERROR"
-                Write-DebugLog "Stack trace for temporary task registration/start error: $($_.ScriptStackTrace)" -ErrorMessage
+                WriteLog -Message "Failed to register or start temporary notification task '$taskName' for user '$principal': $($_.Exception.Message)" -Level ERROR
+                WriteLog -Message "Stack trace for temporary task registration/start error: $($_.ScriptStackTrace)" -Level DEBUG # Changed level to DEBUG
             } finally {
                 Start-Sleep -Seconds 1
                 try {
                     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-                    Write-DebugLog "Unregistered temporary task '$taskName'."
+                    WriteLog -Message "Unregistered temporary task '$taskName'." -Level DEBUG
                 } catch {
-                    Write-LogMessage "Failed to unregister temporary task '$taskName': $($_.Exception.Message)" -Level "WARN"
+                    WriteLog -Message "Failed to unregister temporary task '$taskName': $($_.Exception.Message)" -Level WARN
                 }
             }
         }
     }
     else {
-         Write-LogMessage "No active interactive user sessions found to display the notification." -Level "WARN"
+         WriteLog -Message "No active interactive user sessions found to display the notification." -Level WARN
+    }
+    }
+    finally {
+        ExitFunction # Already correct
     }
 }
-#endregion
+#endregion Notification Helper
 
-#region Invoke-ScriptErrorHandling Function
-function Invoke-ScriptErrorHandling {
+#region Error Handling
+function InvokeScriptErrorHandling {
     param(
-        [System.Management.Automation.ErrorRecord] $ErrorRecord
+        # The PowerShell ErrorRecord object to handle.
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     if (-not $ErrorRecord) { $ErrorRecord = $Error[0] }
+    try {
     $invInfo = $ErrorRecord.InvocationInfo
     $command = if ($invInfo -and $invInfo.MyCommand) { $invInfo.MyCommand.ToString() } else { "N/A" }
     $scriptName = if ($invInfo -and $invInfo.ScriptName) { $invInfo.ScriptName } else { "N/A" }
@@ -398,204 +666,211 @@ function Invoke-ScriptErrorHandling {
     $fullCommandLine = if ($line) { $line.Trim() } else { "N/A" }
     $localVars = Get-Variable -Scope 1 | ForEach-Object { "$($_.Name) = $($_.Value)" } | Out-String
 
-    Write-DebugLog -Message "ERROR in command: ${command}" -ErrorMessage
-    Write-DebugLog -Message "Script: ${scriptName}" -ErrorMessage
-    Write-DebugLog -Message "Line number: ${lineNumber}" -ErrorMessage
-    Write-DebugLog -Message "Offending line: ${line}" -ErrorMessage
-    Write-DebugLog -Message "Position details: ${position}" -ErrorMessage
-    Write-DebugLog -Message "Full command line: ${fullCommandLine}" -ErrorMessage
-    Write-DebugLog -Message "Local variables in scope:`n${localVars}" -ErrorMessage
+    WriteLog -Message "ERROR in command: ${command}" -Level ERROR # Already correct
+    WriteLog -Message "Script: ${scriptName}" -Level ERROR # Already correct
+    WriteLog -Message "Line number: ${lineNumber}" -Level ERROR # Already correct
+    WriteLog -Message "Offending line: ${line}" -Level ERROR # Already correct
+    WriteLog -Message "Position details: ${position}" -Level ERROR # Already correct
+    WriteLog -Message "Full command line: ${fullCommandLine}" -Level ERROR # Already correct
+    WriteLog -Message "Local variables in scope:`n${localVars}" -Level ERROR # Already correct
 
-    Show-NotificationToLoggedInUsers -Title "Loxone AutoUpdate Failed!" -Message "Error: ${($ErrorRecord.Exception.Message)}`nCommand: ${command}`nLine: ${lineNumber}`nCommandLine: ${fullCommandLine}`nLocal Variables:`n${localVars}" -Timeout 0
+    ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate Failed!" -Message "Error: ${($ErrorRecord.Exception.Message)}`nCommand: ${command}`nLine: ${lineNumber}`nCommandLine: ${fullCommandLine}`nLocal Variables:`n${localVars}" -Timeout 0
 
-    Write-LogMessage "SCRIPT ERROR: ${($ErrorRecord.Exception.Message)}" -Level "ERROR"
+    # Log comprehensive error details
+    WriteLog -Message "-------------------- SCRIPT ERROR DETAILS --------------------" -Level ERROR # Already correct
+    WriteLog -Message "Full Error Record: $($ErrorRecord.ToString())" -Level ERROR # Already correct
+    WriteLog -Message "Exception Message: ${($ErrorRecord.Exception.Message)}" -Level ERROR # Already correct
+    
     if ($invInfo) {
-        Write-LogMessage "Error occurred in command: ${command} at ${scriptName} : line ${lineNumber}" -Level "ERROR"
-        Write-LogMessage "Offending line: ${line}" -Level "ERROR"
-        Write-LogMessage "Position: ${position}" -Level "ERROR"
-        Write-LogMessage "Full command line: ${fullCommandLine}" -Level "ERROR"
-        Write-LogMessage "Local variables in scope:`n${localVars}" -Level "ERROR"
+        WriteLog -Message "Occurred in Command: ${command}" -Level ERROR # Already correct
+        WriteLog -Message "Script: ${scriptName}" -Level ERROR # Already correct
+        WriteLog -Message "Line Number: ${lineNumber}" -Level ERROR # Already correct
+        WriteLog -Message "Offending Line Content: ${line}" -Level ERROR # Already correct
+        WriteLog -Message "Position Details: ${position}" -Level ERROR # Already correct
+        WriteLog -Message "Full Command Line Parsed: ${fullCommandLine}" -Level ERROR # Already correct
+    } else {
+        WriteLog -Message "InvocationInfo not available." -Level ERROR # Already correct
     }
-    if ($ErrorRecord.Exception.StackTrace) {
-        Write-LogMessage "Stack Trace:`n${($ErrorRecord.Exception.StackTrace)}" -Level "ERROR"
+    
+    WriteLog -Message "Local Variables in Caller Scope:`n${localVars}" -Level ERROR # Already correct
+    
+    # Log PowerShell Script Stack Trace
+    if ($ErrorRecord.ScriptStackTrace) {
+        WriteLog -Message "PowerShell Script Stack Trace:`n${($ErrorRecord.ScriptStackTrace)}" -Level ERROR # Already correct
+    } else {
+        WriteLog -Message "No PowerShell Script Stack Trace available." -Level ERROR # Already correct
     }
-    else {
-        Write-LogMessage "No .NET stack trace available." -Level "ERROR"
+
+    # Log .NET Exception Stack Trace (if available)
+    if ($ErrorRecord.Exception -and $ErrorRecord.Exception.StackTrace) {
+        WriteLog -Message ".NET Exception Stack Trace:`n${($ErrorRecord.Exception.StackTrace)}" -Level ERROR # Already correct
+    } else {
+        WriteLog -Message "No .NET Exception Stack Trace available." -Level ERROR # Already correct
     }
+    WriteLog -Message "------------------ END SCRIPT ERROR DETAILS ------------------" -Level ERROR # Already correct
     
 	$global:ErrorOccurred = $true
     $global:LastErrorLine = $lineNumber
     
-    Write-LogMessage "Script execution terminated = $global:ErrorOccurred due to the above error on line $global:LastErrorLine." -Level "ERROR"
-    exit 1
+    WriteLog -Message "Script error occurred on line $global:LastErrorLine. Error flag set." -Level ERROR # Already correct
+    # Removed exit 1 - Let the caller handle termination/pausing
+    }
+    finally {
+        ExitFunction # Already correct
+    }
 }
-#endregion
+#endregion Error Handling
 
-#region Get-ProcessStatus, Test-ScheduledTask, Start-ProcessInteractive
-function Get-ProcessStatus {
+#region Process and Task Helpers
+function GetProcessStatus {
     param(
+        # The name of the process to check (without .exe).
         [Parameter(Mandatory = $true)] [string]$ProcessName,
+        # If specified, attempt to stop the process if found.
         [switch]$StopProcess
     )
-    try {
-        $processes = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
-        if ($processes) {
-            Write-LogMessage "Process '${ProcessName}' is running." -Level "INFO"
-            if ($StopProcess) {
-                foreach ($proc in $processes) {
-                    try {
-                        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-                        Write-LogMessage "Process '${ProcessName}' (PID: $($proc.Id)) stopped." -Level "INFO"
-                    }
-                    catch {
-                        Write-LogMessage "Failed to stop process '${ProcessName}' (PID: $($proc.Id)): ${($_.Exception.Message)}" -Level "ERROR"
-                        throw $_
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    try { # Outer try
+        try { # Inner try (Original logic)
+            $processes = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
+            if ($processes) {
+                WriteLog -Message "Process '${ProcessName}' is running." -Level INFO
+                if ($StopProcess) {
+                    foreach ($proc in $processes) {
+                        try { # Innermost try (Original logic)
+                            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                            WriteLog -Message "Process '${ProcessName}' (PID: $($proc.Id)) stopped." -Level INFO
+                        }
+                        catch { # Innermost catch (Original logic)
+                            WriteLog -Message "Failed to stop process '${ProcessName}' (PID: $($proc.Id)): ${($_.Exception.Message)}" -Level ERROR
+                            throw $_
+                        }
                     }
                 }
+                return $true
             }
-            return $true
-        }
-        else {
-            Write-LogMessage "Process '${ProcessName}' is not running." -Level "INFO"
-            return $false
-        }
-    }
-    catch {
-        Write-LogMessage "Error checking process '${ProcessName}': ${($_.Exception.Message)}" -Level "ERROR"
-        throw $_
-    }
+            else {
+                WriteLog -Message "Process '${ProcessName}' is not running." -Level INFO
+                return $false
+            }
+        } # End of Inner try
+        catch { # Catch for Inner try (Original logic)
+            WriteLog -Message "Error checking process '${ProcessName}': ${($_.Exception.Message)}" -Level ERROR
+            throw $_
+        } # End of Inner catch
+    } # End of Outer try
+    finally { # Finally for Outer try
+        ExitFunction # Already correct
+    } # End of Outer finally
 }
 
-function Test-ScheduledTask {
-    Write-DebugLog "Executing ORIGINAL Test-ScheduledTask function from module." # Added log
+function TestScheduledTask {
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    WriteLog -Message "Executing TestScheduledTask function from module." -Level DEBUG # Adjusted log message
+    # Removed outer try/catch, inner try/catch removed to allow errors to propagate
     try {
         $parentProcessId = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").ParentProcessId
         $parentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $parentProcessId"
         $parentProcessName = $parentProcess.Name
-        Write-DebugLog -Message "Parent process for PID $PID is ${parentProcessName} (PID: ${parentProcessId})"
-        if ($parentProcessName -ieq "taskeng.exe" -or $parentProcessName -ieq "svchost.exe") { return $true } else { return $false }
+        WriteLog -Message "Parent process for PID $PID is ${parentProcessName} (PID: ${parentProcessId})" -Level DEBUG
+        if ($parentProcessName.Trim() -ieq "taskeng.exe" -or $parentProcessName.Trim() -ieq "svchost.exe") { return $true } else { return $false } # Added .Trim() for robustness
     }
-    catch { return $false }
+    finally {
+        ExitFunction # Already correct
+    }
 }
 
-function Start-ProcessInteractive {
+function Get-ExecutableSignature { # Renamed from TestExecutableSignature
+    [CmdletBinding()]
     param(
+        # The path to the executable file to validate.
+        [string]$ExePath
+    )
+
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    WriteLog -Message "Validating signature for '$ExePath'..." -Level INFO # Removed expected signature from log
+    try {
+
+    if (-not (Test-Path -Path $ExePath -PathType Leaf)) {
+        WriteLog -Message "Executable file not found at '$ExePath'. Cannot validate signature." -Level WARN
+        return $false
+    }
+
+    try {
+        $signatureInfo = Get-AuthenticodeSignature -FilePath $ExePath -ErrorAction Stop
+        if ($signatureInfo.Status -eq 'Valid') {
+            WriteLog -Message "Signature VALID: Authenticode status for '$ExePath' is 'Valid'." -Level INFO
+            return $true
+        } else {
+            WriteLog -Message "Signature INVALID: Authenticode status for '$ExePath' is '$($signatureInfo.Status)'." -Level WARN
+            return $false
+        }
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        WriteLog -Message "Signature check failed: File not found at '$ExePath'." -Level WARN
+        return $false
+    } catch {
+        $errorMessage = $_.Exception.Message
+        WriteLog -Message "Signature check failed for '$ExePath': $errorMessage" -Level WARN
+        if ($errorMessage -like '*file is not digitally signed*') {
+             WriteLog -Message "(File '$ExePath' is not digitally signed.)" -Level INFO
+        }
+        return $false
+    }
+    }
+    finally {
+        ExitFunction # Already correct
+    }
+}
+
+function StartProcessInteractive {
+    param(
+        # The path to the executable to start.
         [Parameter(Mandatory = $true)][string]$FilePath,
+        # Optional arguments to pass to the executable.
         [string]$Arguments = ""
     )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    try {
     try {
         $shell = New-Object -ComObject "Shell.Application"
-        $shell.ShellExecute($FilePath, $Arguments, "", "open", 1)
+        $process = $shell.ShellExecute($FilePath, $Arguments, "", "open", 1)
+        Wait-Process -Id $process.Id
     }
     catch {
         throw "Failed to launch process interactively: ${($_.Exception.Message)}"
     }
+    }
+    finally {
+        ExitFunction # Already correct
+    }
 }
-#endregion
+#endregion Process and Task Helpers
 
-#region Stub Functions for Missing External Calls
-function Invoke-ZipFileExtraction {
+#region Network Helpers
+function WaitForPingTimeout {
     param(
-        [string]$ZipPath,
-        [string]$DestinationPath
-    )
-    try {
-        Expand-Archive -Path $ZipPath -DestinationPath $DestinationPath -Force
-        Write-LogMessage "Extraction of ZIP file '${ZipPath}' completed successfully." -Level "INFO"
-    }
-    catch {
-        throw "Error extracting ZIP file '${ZipPath}': ${($_.Exception.Message)}"
-    }
-}
-
-function Get-ExecutableSignature {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$ExePath, # Path to the executable to check (e.g., downloaded installer)
-        [Parameter()]
-        [string]$ReferenceExePath, # Optional: Path to an existing executable for thumbprint comparison (e.g., installed LoxoneConfig.exe)
-        [string]$TrustedThumbprintFile # Currently unused parameter, kept for potential future use
-    )
-    Write-DebugLog "Get-ExecutableSignature called. ExePath='$ExePath', ReferenceExePath='$ReferenceExePath'"
-    try {
-        # 1. Check the signature of the primary executable ($ExePath)
-        Write-DebugLog "Getting signature for primary executable: '$ExePath'"
-        $signature = Get-AuthenticodeSignature -FilePath $ExePath -ErrorAction Stop
-        
-        if ($signature.Status -ne "Valid") {
-            Write-LogMessage "Signature status for '${ExePath}' is NOT Valid: $($signature.Status). Halting installation." -Level "ERROR"
-            throw "Signature check failed for '$ExePath'. Status: $($signature.Status)"
-        }
-        
-        Write-LogMessage "Signature for '${ExePath}' is Valid." -Level "INFO"
-        $downloadedThumbprint = $signature.SignerCertificate.Thumbprint
-        Write-LogMessage "Thumbprint for '${ExePath}': $downloadedThumbprint" -Level "INFO"
-
-        # 2. Compare with reference executable if provided
-        if (-not ([string]::IsNullOrEmpty($ReferenceExePath))) {
-            Write-DebugLog "ReferenceExePath provided: '$ReferenceExePath'. Attempting comparison."
-            if (Test-Path $ReferenceExePath) {
-                try {
-                    Write-DebugLog "Getting signature for reference executable: '$ReferenceExePath'"
-                    $referenceSignature = Get-AuthenticodeSignature -FilePath $ReferenceExePath -ErrorAction Stop
-                    
-                    if ($referenceSignature.Status -eq "Valid") {
-                        $referenceThumbprint = $referenceSignature.SignerCertificate.Thumbprint
-                        Write-LogMessage "Thumbprint for reference '${ReferenceExePath}': $referenceThumbprint" -Level "INFO"
-                        
-                        if ($downloadedThumbprint -eq $referenceThumbprint) {
-                            Write-LogMessage "Thumbprint MATCHES reference executable. OK." -Level "INFO"
-                        } else {
-                            Write-LogMessage "Thumbprint MISMATCH! Downloaded='${downloadedThumbprint}', Reference='${referenceThumbprint}'. Proceeding with caution." -Level "WARN"
-                            # Consider if this should be an error or configurable behavior
-                        }
-                    } else {
-                        Write-LogMessage "Could not get a valid signature from reference executable '${ReferenceExePath}'. Status: $($referenceSignature.Status). Skipping thumbprint comparison." -Level "WARN"
-                    }
-                } catch {
-                    Write-LogMessage "Error getting signature from reference executable '${ReferenceExePath}': $($_.Exception.Message). Skipping thumbprint comparison." -Level "WARN"
-                }
-            } else {
-                Write-LogMessage "Reference executable path '${ReferenceExePath}' not found. Skipping thumbprint comparison." -Level "WARN"
-            }
-        } else {
-            Write-DebugLog "No ReferenceExePath provided. Skipping thumbprint comparison."
-        }
-        
-        # If we got here, the primary signature was at least valid.
-        return $true # Indicate success (basic validity passed)
-        
-    } catch {
-        Write-LogMessage "Error during signature verification for '${ExePath}': ${($_.Exception.Message)}" -Level "ERROR"
-        throw $_ # Re-throw the exception to halt the process
-    }
-}
-
-#region UPDATED Convert-VersionString Function
-function Convert-VersionString {
-    param([string]$VersionString)
-    if ($VersionString -and $VersionString -match "\.") {
-        $parts = $VersionString -split "\."
-        $normalizedParts = foreach ($part in $parts) { [int]$part }
-        return ($normalizedParts -join ".")
-    }
-    return $VersionString
-}
-#endregion
-
-#region UPDATED Wait-For-Ping Functions
-function Wait-For-PingTimeout {
-    param(
-        [string]$IPAddress,
+        # The IP address, hostname, or URL containing the host to ping.
+        [string]$InputAddress,
+        # Maximum time in seconds to wait for the host to become unreachable.
         [int]$TimeoutSeconds = 300,
+        # Interval in seconds between ping attempts.
         [int]$IntervalSeconds = 5
     )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     $timeout = New-TimeSpan -Seconds $TimeoutSeconds
+    try {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    
+    # Extract IP/Hostname from potential URL
+    $TargetHost = $InputAddress
+    if ($InputAddress -match '(?<=:\/\/)[^\/:]+') {
+        $TargetHost = $matches[0]
+        WriteLog -Message "Wait-For-PingTimeout: Extracted host '$TargetHost' from '$InputAddress'" -Level DEBUG
+    }
 
     while ($stopwatch.Elapsed -lt $timeout) {
-        if (-not (Test-NetConnection -ComputerName $IPAddress -Port 80 -InformationLevel Quiet)) {
-            Write-LogMessage "Ping timeout: $IPAddress became unreachable." -Level "DEBUG"
+        if (-not (Test-NetConnection -ComputerName $TargetHost -Port 80 -InformationLevel Quiet)) { # Use extracted host
+            WriteLog -Message "Ping timeout: $TargetHost became unreachable." -Level DEBUG
             $stopwatch.Stop()
             return $true
         }
@@ -603,22 +878,38 @@ function Wait-For-PingTimeout {
     }
 
     $stopwatch.Stop()
-    Write-LogMessage "Ping timeout: $IPAddress remained reachable for $($TimeoutSeconds) seconds." -Level "DEBUG"
+    WriteLog -Message "Ping timeout: $TargetHost remained reachable for $($TimeoutSeconds) seconds." -Level DEBUG
     return $false
+    }
+    finally {
+        ExitFunction # Already correct
+    }
 }
 
-function Wait-For-PingSuccess {
+function WaitForPingSuccess {
     param(
-        [string]$IPAddress,
+        # The IP address, hostname, or URL containing the host to ping.
+        [string]$InputAddress,
+        # Maximum time in seconds to wait for the host to become reachable.
         [int]$TimeoutSeconds = 300,
+        # Interval in seconds between ping attempts.
         [int]$IntervalSeconds = 5
     )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     $timeout = New-TimeSpan -Seconds $TimeoutSeconds
+    try {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+    # Extract IP/Hostname from potential URL
+    $TargetHost = $InputAddress
+    if ($InputAddress -match '(?<=:\/\/)[^\/:]+') {
+        $TargetHost = $matches[0]
+        WriteLog -Message "Wait-For-Ping-Success: Extracted host '$TargetHost' from '$InputAddress'" -Level DEBUG
+    }
+
     while ($stopwatch.Elapsed -lt $timeout) {
-        if (Test-NetConnection -ComputerName $IPAddress -Port 80 -InformationLevel Quiet) {
-            Write-LogMessage "Ping success: $IPAddress is reachable." -Level "DEBUG"
+        if (Test-NetConnection -ComputerName $TargetHost -Port 80 -InformationLevel Quiet) { # Use extracted host
+            WriteLog -Message "Ping success: $TargetHost is reachable." -Level DEBUG
             $stopwatch.Stop()
             return $true
         }
@@ -626,70 +917,19 @@ function Wait-For-PingSuccess {
     }
 
     $stopwatch.Stop()
-    Write-LogMessage "Ping success: $IPAddress did not become reachable within $($TimeoutSeconds) seconds." -Level "DEBUG"
+    WriteLog -Message "Ping success: $TargetHost did not become reachable within $($TimeoutSeconds) seconds." -Level DEBUG
     return $false
+    }
+    finally {
+        ExitFunction # Already correct
+    }
 }
-#endregion
+#endregion Network Helpers
 
-#region Get-FileRecursive Function
-function Get-FileRecursive {
-    param(
-        [string]$BasePath,
-        [string]$FileName
-    )
+#region Installation Helpers (Continued)
+function GetInstalledApplicationPath {
     try {
-        $found = Get-ChildItem -Path $BasePath -Filter $FileName -Recurse -ErrorAction Stop | Select-Object -First 1
-        if ($found) {
-            return $found.FullName
-        }
-        else {
-            return $null
-        }
-    }
-    catch {
-        Write-LogMessage "Error searching for file '${FileName}' under '${BasePath}': ${($_.Exception.Message)}" -Level "WARN"
-        return $null
-    }
-}
-#endregion
-
-#region Format-DoubleCharacter Function
-function Format-DoubleCharacter {
-    param([int]$Number)
-    return "{0:D2}" -f $Number
-}
-#endregion
-
-#region Get-RedactedPassword Function (Reverted to original simpler regex)
-function Get-RedactedPassword {
-    param([string]$Url)
-    # Write-DebugLog "Get-RedactedPassword - Input URL: $Url" # Removed to avoid logging potentially sensitive input
-    # Reverted Regex: Lookbehind for ://, capture user, :, capture password, lookahead for @
-    if ($Url -match "(?<=://)([^:]+):([^@]+)(?=@)") {
-        Write-DebugLog "Get-RedactedPassword - Regex matched. User: $($Matches[1]), Password Length: $($Matches[2].Length)" 
-        $redactedPassword = "*" * $Matches[2].Length
-        $redactedUrl = $Url -replace "(?<=://)([^:]+):([^@]+)(?=@)", ('$1:{0}' -f $redactedPassword)
-        Write-DebugLog "Get-RedactedPassword - Redacted URL: $redactedUrl"
-        return $redactedUrl
-    }
-    Write-DebugLog "Get-RedactedPassword - Regex did not match." 
-    return $Url # Return original URL if no match
-}
-#endregion
-
-#region Set-ConstantVariable Function
-function Set-ConstantVariable {
-    param(
-        [string]$Name,
-        [object]$Value
-    )
-    Set-Variable -Name $Name -Value $Value -Option Constant -Scope Global
-}
-#endregion
-
-#region Get-InstalledApplicationPath Function
-function Get-InstalledApplicationPath {
-    $registryPaths = @(
+        $registryPaths = @(
         "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -704,188 +944,43 @@ function Get-InstalledApplicationPath {
                 if ($displayName -eq $appName) {
                     $installLocation = $key.GetValue("InstallLocation") -as [string]
                     if ($installLocation -and (Test-Path $installLocation)) {
-                        Write-LogMessage "Found Loxone Config installation at: ${installLocation}" -Level "INFO"
+                        WriteLog -Message "Found Loxone Config installation at: ${installLocation}" -Level DEBUG # Already correct
                         return $installLocation
                     }
                 }
             }
         }
     }
-    Write-LogMessage "Loxone Config installation path not found in registry." -Level "INFO"
+    WriteLog -Message "Loxone Config installation path not found in registry." -Level INFO # Already correct
     return $null
+    } # Closing brace for the try block
+    finally {
+        ExitFunction # Already correct
+    } # Closing brace for the finally block
+# Removed potentially extra closing brace for GetInstalledApplicationPath based on persistent error
 }
-#endregion
 
-#region Update-MS Function (Corrected URI Logic + Redaction before logging)
-function Update-MS {
+function GetLoxoneConfigExePath {
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)] [string]$DesiredVersion,
-        [Parameter(Mandatory = $true)] [string]$MSListPath,
-        [Parameter(Mandatory = $true)] [string]$LogFile,
-        [Parameter(Mandatory = $true)] [int]$MaxLogFileSizeMB,
-        [Parameter(Mandatory = $true)] [bool]$DebugMode,
-        [Parameter(Mandatory = $true)] [string]$InstalledExePath,
-        [Parameter(Mandatory = $true)] [string]$ScriptSaveFolder
-    )
+    param() # No parameters needed
 
-    Write-LogMessage "Starting Update-MS function..." -Level "INFO"
-
-    if (-not (Test-Path $MSListPath)) {
-        Write-LogMessage "Miniserver list file not found at '${MSListPath}'. Skipping Miniserver updates." -Level "WARN"
-        return
-    }
-
-    $miniservers = Get-Content $MSListPath | Where-Object { $_ -match '\S' } # Read non-empty lines
-    Write-LogMessage "Loaded Miniserver list with $($miniservers.Count) entries." -Level "INFO"
-
-    if ($miniservers.Count -eq 0) {
-        Write-LogMessage "Miniserver list is empty. Skipping Miniserver updates." -Level "INFO"
-        return
-    }
-
-    # Find LoxoneConfig.exe path (needed for update command)
-    $loxoneConfigExe = Join-Path -Path $InstalledExePath -ChildPath "LoxoneConfig.exe"
-    if (-not (Test-Path $loxoneConfigExe)) {
-        Write-LogMessage "LoxoneConfig.exe not found at '${loxoneConfigExe}'. Cannot perform Miniserver updates." -Level "ERROR"
-        return # Cannot proceed without the executable
-    }
-
-    $normalizedDesiredVersion = Convert-VersionString $DesiredVersion
-
-    foreach ($msEntry in $miniservers) {
-        $redactedEntry = Get-RedactedPassword $msEntry # Redact the entry first for logging
-        Write-DebugLog -Message "Processing Miniserver entry: ${redactedEntry}"
-        
-        $msIP = $null
-        $versionUri = $null
-        $updateArg = $null # Argument for LoxoneConfig.exe /update:
-        $baseUriBuilder = $null
-
-        $credential = $null # Store credentials if present
-        try {
-            # Attempt to parse the entry as a URI to extract components
-            $entryToParse = $msEntry
-            if ($entryToParse -notmatch '^[a-zA-Z]+://') {
-        $redactedMsIP = "[Could not determine IP]" # Default for logging if IP extraction fails
-                $entryToParse = "http://" + $entryToParse # Assume http if no scheme
-            }
-            $baseUriBuilder = [System.UriBuilder]$entryToParse
-            $msIP = $baseUriBuilder.Host # Get Host/IP
-            
-            $redactedMsIP = $msIP # Start with host, redact later if needed
-
-            # Extract credentials if present
-            if (-not [string]::IsNullOrEmpty($baseUriBuilder.UserName)) {
-                $credential = New-Object System.Management.Automation.PSCredential($baseUriBuilder.UserName, ($baseUriBuilder.Password | ConvertTo-SecureString -AsPlainText -Force))
-            }
-            # Construct the version check URI correctly
-            $versionUriBuilder = [System.UriBuilder]$baseUriBuilder # Copy base info
-            $versionUriBuilder.Path = "/dev/cfg/version" # Set the correct path
-            $versionUri = $versionUriBuilder.Uri.AbsoluteUri # Use AbsoluteUri to get final string
-
-            # Construct the argument for the update command
-            $updateArg = if (-not [string]::IsNullOrEmpty($baseUriBuilder.UserName)) {
-                             $baseUriBuilder.UserName + ":" + $baseUriBuilder.Password + "@" + $baseUriBuilder.Host
-                         } else {
-                             $msIP # Just host/IP if no credentials
-                         }
-
-        } catch {
-            Write-LogMessage "Failed to parse Miniserver entry '$redactedEntry' as URI: $($_.Exception.Message). Assuming it's just an IP/hostname." -Level "WARN"
-            $credential = $null # No credentials if parsing failed
-            # Assume the entry is just the IP/hostname if parsing fails
-            $msIP = $msEntry.Split('@')[-1].Split('/')[0] # Basic attempt to extract host/IP
-            $redactedMsIP = $msIP # No credentials to redact if parsing failed
-            $versionUri = "http://${msIP}/dev/cfg/version" # Construct basic URI
-            $updateArg = $msIP # Use just host/IP for update arg
-        }
-
-        if (-not $msIP) {
-             Write-LogMessage "Could not determine IP/Host from entry '$redactedEntry'. Skipping." -Level "ERROR"
-             continue # Skip to next entry
-        }
-
-        # Log the URI *after* redaction
-        $redactedVersionUri = Get-RedactedPassword $versionUri
-        Write-LogMessage "Checking current Miniserver version via URI: ${redactedVersionUri}" -Level "INFO"
-        
-        try {
-            # Use the *unredacted* URI for the web request
-            # Use the *unredacted* URI for the web request
-            $webRequestParams = @{
-                Uri = $versionUri
-                UseBasicParsing = $true
-                TimeoutSec = 10
-                ErrorAction = 'Stop'
-            }
-            if ($credential) { $webRequestParams.Credential = $credential }
-            $response = Invoke-WebRequest @webRequestParams
-            # Parse XML response to extract version from <LL value="...">
-            $xmlResponse = [xml]$response.Content
-            $currentVersion = $xmlResponse.LL.value
-            if ([string]::IsNullOrEmpty($currentVersion)) {
-                throw "Could not find version value in Miniserver XML response: $($response.Content)"
-            }
-            
-            Write-LogMessage "Current Miniserver Version: ${currentVersion}" -Level "INFO"
-            $normalizedCurrentVersion = Convert-VersionString $currentVersion
-
-            # Compare versions
-            Write-DebugLog -Message "Comparing current version (${normalizedCurrentVersion}) with desired version (${normalizedDesiredVersion})."
-            if ($normalizedCurrentVersion -ne $normalizedDesiredVersion) {
-                Write-LogMessage "Miniserver at ${redactedMsIP} requires update (Current: ${normalizedCurrentVersion}, Desired: ${normalizedDesiredVersion})." -Level "INFO"
-                # Use the potentially credentialed base URI for the update command argument
-                Invoke-MiniserverUpdate -LoxoneConfigPath $loxoneConfigExe -MiniserverIP $updateArg 
-            }
-            else {
-                Write-LogMessage "Mininiserver at ${redactedMsIP} is already up-to-date (Version: ${normalizedCurrentVersion}). Skipping update." -Level "INFO"
-            }
-        }
-        catch {
-            # Log the error using the redacted VERSION URI
-            Write-LogMessage "Failed to check or update Miniserver (URI: ${redactedVersionUri}). ErrorRecord: $_" -Level "ERROR"
-            # Continue to the next Miniserver
-        }
-    } # End foreach Miniserver
-
-    Write-LogMessage "Update-MS function completed. All Miniservers have been processed." -Level "INFO"
-}
-#endregion
-
-#region Invoke-MiniserverUpdate Function
-function Invoke-MiniserverUpdate {
-    param(
-        [string]$LoxoneConfigPath,
-        [string]$MiniserverIP # This might now contain user:pass@host
-    )
-    $redactedIP = Get-RedactedPassword $MiniserverIP
-    Write-LogMessage "Attempting to update Miniserver ${redactedIP} using ${LoxoneConfigPath}..." -Level "INFO"
-    # LoxoneConfig.exe likely expects the argument format /update:user:pass@host or /update:host
-    $arguments = "/update:${MiniserverIP}" # Pass the potentially credentialed string directly
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
     try {
-        $process = Start-Process -FilePath $LoxoneConfigPath -ArgumentList $arguments -Wait -PassThru -ErrorAction Stop
-        Write-LogMessage "LoxoneConfig update process for ${redactedIP} finished with Exit Code: $($process.ExitCode)." -Level "INFO"
-        if ($process.ExitCode -ne 0) {
-            Write-LogMessage "LoxoneConfig update process for ${redactedIP} reported a non-zero exit code: $($process.ExitCode)." -Level "WARN"
-            # Consider this a warning, not necessarily a fatal error for the whole script
+        $installDir = GetInstalledApplicationPath # Corrected function call (removed hyphen)
+        if ($installDir) {
+            $exePath = Join-Path -Path $installDir -ChildPath "LoxoneConfig.exe"
+            WriteLog -Message "Determined LoxoneConfig.exe path: '$exePath'" -Level DEBUG # Corrected function call
+            return $exePath
+        } else {
+            WriteLog -Message "Loxone Config installation directory not found. Cannot determine .exe path." -Level INFO # Corrected function call
+            return $null
         }
     }
-    catch {
-        Write-LogMessage "Error starting LoxoneConfig update process for ${redactedIP}: ${($_.Exception.Message)}" -Level "ERROR"
-        # Continue to next Miniserver if possible
+    finally {
+        ExitFunction # Corrected function call
     }
 }
-#endregion
-
-# Save-ScriptToUserLocation function removed as it's no longer suitable with the module dependency.
-
-#region Invoke-AdminAndCorrectPathCheck Function
-function Invoke-AdminAndCorrectPathCheck {
-    # Placeholder - Actual logic might involve checking admin status and script path
-    Write-DebugLog -Message "Invoke-AdminAndCorrectPathCheck called (currently a placeholder)."
-}
-#endregion
+#endregion Installation Helpers (Continued)
 
 #region Register-ScheduledTaskForScript Function
 function Register-ScheduledTaskForScript {
@@ -903,42 +998,39 @@ function Register-ScheduledTaskForScript {
         [Parameter()] [int]$MaxLogFileSizeMB = 1,
         [Parameter()] [bool]$SkipUpdateIfAnyProcessIsRunning = $false
     )
-    Write-DebugLog "Register-ScheduledTaskForScript called. Received -DebugMode parameter value: $DebugMode"
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    WriteLog -Message "Register-ScheduledTaskForScript called. Received -DebugMode parameter value: $DebugMode" -Level DEBUG
 
-    Write-LogMessage "Checking if the scheduled task '${TaskName}' exists." -Level "INFO"
+    # Check if task exists
     $taskExists = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 
     # Always attempt to register/update. If it exists, unregister first to ensure arguments are clean.
     if ($taskExists) {
-        Write-LogMessage "Scheduled task '${TaskName}' already exists. Unregistering before re-registering to ensure arguments are updated." -Level "INFO"
+        WriteLog -Message "Scheduled task '${TaskName}' already exists. Unregistering before re-registering to ensure arguments are updated." -Level INFO
         try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop }
-        catch { Write-LogMessage "Failed to unregister existing task '$TaskName': $($_.Exception.Message). Re-registration might fail or use old settings." -Level "WARN" }
+        catch { WriteLog -Message "Failed to unregister existing task '$TaskName': $($_.Exception.Message). Re-registration might fail or use old settings." -Level WARN }
     }
-    # If task didn't exist or was successfully unregistered, proceed to register.
-    # Note: If unregister failed, Register-ScheduledTask below might also fail or update incorrectly.
     
-    Write-LogMessage "Attempting to register task '${TaskName}'." -Level "INFO"
-    $actionArgs = @(
-        "-NoProfile",
-        "-ExecutionPolicy Bypass",
-        "-File `"$ScriptPath`"",
-        "-Channel `"$Channel`"",
-        # "-DebugMode `$($DebugMode)", # Removed unconditional inclusion
-        "-EnableCRC `$($EnableCRC)",
-        "-InstallMode `"$InstallMode`"",
-        "-CloseApplications `$($CloseApplications)",
-        "-ScriptSaveFolder `"$ScriptSaveFolder`"",
-        "-MaxLogFileSizeMB $MaxLogFileSizeMB",
-        "-ScheduledTaskIntervalMinutes $ScheduledTaskIntervalMinutes",
-        "-SkipUpdateIfAnyProcessIsRunning `$($SkipUpdateIfAnyProcessIsRunning)"
-    )
-     # Conditionally add DebugMode switch only if it was true during registration
-     if ($DebugMode) {
-         $actionArgs += "-DebugMode" # Add the switch without a value
-        Write-DebugLog "Final actionArgs array before join: $($actionArgs | Out-String)"
-     }
+    WriteLog -Message "Attempting to register task '${TaskName}'." -Level INFO
+    # Build action arguments, conditionally adding -DebugMode
+    $actionArgs = [System.Collections.Generic.List[string]]::new()
+    $actionArgs.Add("-NoProfile")
+    $actionArgs.Add("-ExecutionPolicy Bypass")
+    $actionArgs.Add("-File `"$ScriptPath`"")
+    $actionArgs.Add("-Channel `"$Channel`"")
+    if ($DebugMode) {
+        $actionArgs.Add("-DebugMode")
+        WriteLog -Message "Adding -DebugMode to scheduled task arguments." -Level DEBUG
+    }
+    $actionArgs.Add("-EnableCRC `$($EnableCRC)")
+    $actionArgs.Add("-InstallMode `"$InstallMode`"")
+    $actionArgs.Add("-CloseApplications `$($CloseApplications)")
+    $actionArgs.Add("-ScriptSaveFolder `"$ScriptSaveFolder`"")
+    $actionArgs.Add("-MaxLogFileSizeMB $MaxLogFileSizeMB")
+    $actionArgs.Add("-ScheduledTaskIntervalMinutes $ScheduledTaskIntervalMinutes")
+    $actionArgs.Add("-SkipUpdateIfAnyProcessIsRunning `$($SkipUpdateIfAnyProcessIsRunning)")
+    
     $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument ($actionArgs -join " ")
-    # Corrected Trigger: Removed RepetitionDuration for indefinite interval
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes $ScheduledTaskIntervalMinutes)
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest # Run as SYSTEM
     
@@ -950,107 +1042,954 @@ function Register-ScheduledTaskForScript {
         ExecutionTimeLimit = ([System.TimeSpan]::Zero) # No time limit
         # Add other basic, known compatible parameters if needed
     }
-    Write-DebugLog "Attempting to create task settings with parameters: $($settingsParams | Out-String)" # Added Log
+    WriteLog -Message "Attempting to create task settings with parameters: $($settingsParams | Out-String)" -Level DEBUG
     $settings = New-ScheduledTaskSettingsSet @settingsParams -ErrorAction SilentlyContinue
 
     if (-not $settings) {
-         Write-LogMessage "Failed to create ScheduledTaskSettingsSet object. Task registration cannot proceed." -Level "ERROR"
+         WriteLog -Message "Failed to create ScheduledTaskSettingsSet object. Task registration cannot proceed." -Level ERROR
          throw "Failed to create ScheduledTaskSettingsSet."
     }
-    Write-DebugLog "Successfully created basic ScheduledTaskSettingsSet object." # Added Log
+    WriteLog -Message "Successfully created basic ScheduledTaskSettingsSet object." -Level DEBUG
 
     try {
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Automatic Loxone Config Update" -ErrorAction Stop # Removed -Force as we unregister first
-            Write-LogMessage "Scheduled task '${TaskName}' created successfully." -Level "INFO"
-            
-            # Attempt to set other settings separately (might fail on older systems)
-            try {
-                $task = Get-ScheduledTask -TaskName $TaskName
-                $task.Settings.DisallowStartIfOnBatteries = $false
-                $task.Settings.StopIfGoingOnBatteries = $false
-                $task.Settings.AllowHardTerminate = $true
-                $task.Settings.RunOnlyIfNetworkAvailable = $false
-                $task.Settings.Enabled = $true
-                Set-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue
-                Write-DebugLog "Attempted to apply additional settings to task '$TaskName'."
-            } catch {
-                Write-DebugLog "Could not apply additional settings to task '$TaskName' using Set-ScheduledTask: $($_.Exception.Message)"
-            }
+        WriteLog -Message "Scheduled task '${TaskName}' created successfully." -Level INFO
+        
+        # Attempt to set other settings separately (might fail on older systems)
+        try {
+            $task = Get-ScheduledTask -TaskName $TaskName
+            $task.Settings.DisallowStartIfOnBatteries = $false
+            $task.Settings.StopIfGoingOnBatteries = $false
+            $task.Settings.AllowHardTerminate = $true
+            $task.Settings.RunOnlyIfNetworkAvailable = $false
+            $task.Settings.Enabled = $true
+            Set-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue
+            WriteLog -Message "Attempted to apply additional settings to task '$TaskName'." -Level DEBUG
+        } catch {
+            WriteLog -Message "Could not apply additional settings to task '$TaskName' using Set-ScheduledTask: $($_.Exception.Message)" -Level WARN
+        }
 
+    }
+    catch {
+        WriteLog -Message "Error creating the scheduled task: ${($_.Exception.Message)}" -Level ERROR
+        # If running non-elevated, this is expected. If elevated, it's a real error.
+        if (-not $script:IsAdminRun) {
+             Write-Host "  INFO: Task registration correctly failed with error (not Admin): $($_.Exception.Message)" -ForegroundColor Gray
+        } else {
+             throw $_ # Re-throw if running as admin, as it shouldn't fail
+        }
+    }
+    finally {
+        ExitFunction # Already correct
+    }
+}
+#endregion Register-ScheduledTaskForScript Function
+
+# Helper function to format seconds into HH:mm:ss
+#region Utility Helpers (Continued)
+function FormatTimeSpanFromSeconds {
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
+    param(
+        # The total number of seconds to format.
+        [double]$TotalSeconds
+    )
+    try {
+    # More robust check: Handle double Infinity, NaN, negative, AND the string "Infinity"
+    if (($TotalSeconds -is [double] -and ([double]::IsInfinity($TotalSeconds) -or [double]::IsNaN($TotalSeconds) -or $TotalSeconds -lt 0)) `
+        -or ($TotalSeconds -is [string] -and $TotalSeconds -eq 'Infinity')) {
+        WriteLog -Message "FormatTimeSpanFromSeconds received invalid input: $TotalSeconds. Returning '--:--:--'." -Level DEBUG # Corrected function call
+        return "--:--:--"
+    }
+    $ts = [System.TimeSpan]::FromSeconds($TotalSeconds)
+    return "{0:00}:{1:00}:{2:00}" -f $ts.Hours, $ts.Minutes, $ts.Seconds
+    }
+    finally {
+        ExitFunction # Corrected function call
+    }
+}
+
+#endregion Utility Helpers (Continued)
+
+#region Version Helpers
+function ConvertVersionString {
+    param(
+        # The version string to normalize (e.g., "14.0.3.28").
+        [string]$VersionString
+    )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
+    try {
+    if ($VersionString -and $VersionString -match "\.") {
+        $parts = $VersionString -split "\."
+        $normalizedParts = foreach ($part in $parts) { [int]$part }
+        return ($normalizedParts -join ".")
+    }
+    return $VersionString # Return original if no dots found or empty
+    }
+    finally {
+        ExitFunction # Corrected function call
+    }
+} # Closing brace for ConvertVersionString
+#endregion Version Helpers
+
+#region Miniserver Update Logic
+    function UpdateMS {
+        [CmdletBinding()]
+        param(
+            # The target Loxone Config version string (normalized).
+            [Parameter(Mandatory = $true)] [string]$DesiredVersion,
+            # Path to the text file containing Miniserver connection strings.
+            [Parameter(Mandatory = $true)] [string]$MSListPath,
+            # Path to the main log file.
+            [Parameter(Mandatory = $true)] [string]$LogFile,
+            # Maximum log file size in MB (passed for potential future use).
+            [Parameter(Mandatory = $true)] [int]$MaxLogFileSizeMB,
+            # Switch to enable debug logging.
+            [Parameter()][switch]$DebugMode,
+            # Path to the *directory* containing the installed LoxoneConfig.exe.
+            [Parameter(Mandatory = $true)] [string]$InstalledExePath,
+            # Path to the script's save folder (used for context).
+            [Parameter(Mandatory = $true)] [string]$ScriptSaveFolder
+        )
+        
+        EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    
+        $anyMSUpdated = $false # Initialize flag
+    
+        try {
+            # --- Start of Logic ---
+            $global:LogFile = $LogFile
+            $script:DebugMode = $DebugMode.IsPresent
+            WriteLog -Message "Starting Miniserver update check process..." -Level "INFO"
+    
+            if (-not (Test-Path $MSListPath)) {
+                WriteLog -Message "Miniserver list file not found at '${MSListPath}'. Skipping Miniserver updates." -Level "WARN"
+                # Return immediately if list not found
+                # Note: Returning inside try, finally will still execute
+                return $false
+            }
+    
+            $miniservers = Get-Content $MSListPath | Where-Object { $_ -match '\S' }
+            WriteLog -Message "Loaded Miniserver list with $($miniservers.Count) entries." -Level "INFO"
+    
+            if ($miniservers.Count -eq 0) {
+                WriteLog -Message "Miniserver list is empty. Skipping Miniserver updates." -Level "INFO"
+                # Return immediately if list is empty
+                return $false
+            }
+    
+            $loxoneConfigExe = Join-Path -Path $InstalledExePath -ChildPath "LoxoneConfig.exe"
+            if (-not (Test-Path $loxoneConfigExe)) {
+                WriteLog -Message "LoxoneConfig.exe not found (checked based on directory path '${InstalledExePath}'). Cannot perform Miniserver updates." -Level "ERROR"
+                # Return immediately if Config not found
+                return $false
+            }
+    
+            foreach ($msEntry in $miniservers) {
+                $redactedEntryForLog = GetRedactedPassword $msEntry # Corrected call
+                WriteLog -Message "Processing Miniserver entry: ${redactedEntryForLog}" -Level INFO
+    
+                $msIP = $null
+                $versionUri = $null
+                $updateArg = $null
+                $credential = $null
+    
+                try { # Inner try for parsing entry
+                    $entryToParse = $msEntry
+                    if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
+                    $uriBuilder = [System.UriBuilder]$entryToParse
+                    $msIP = $uriBuilder.Host # Corrected line number
+    
+                    if (-not ([string]::IsNullOrWhiteSpace($uriBuilder.UserName))) {
+                        $securePassword = $uriBuilder.Password | ConvertTo-SecureString -AsPlainText -Force
+                        $credential = New-Object System.Management.Automation.PSCredential($uriBuilder.UserName, $securePassword)
+                        $updateArg = $uriBuilder.UserName + ":" + $uriBuilder.Password + "@" + $uriBuilder.Host
+                        WriteLog -Message "Parsed credentials for $msIP. User: $($uriBuilder.UserName)" -Level DEBUG
+                    } else {
+                        $updateArg = $msIP
+                        WriteLog -Message "No credentials found for $msIP." -Level DEBUG
+                    }
+    
+                    $uriBuilder.Path = "/dev/cfg/version"
+                    $uriBuilder.Port = 80
+                    $uriBuilder.Password = $null
+                    $uriBuilder.UserName = $null
+                    $versionUri = $uriBuilder.Uri.AbsoluteUri
+    
+                } catch { # Inner catch for parsing entry
+                    WriteLog -Message "Failed to parse Miniserver entry '$redactedEntryForLog' as URI: $($_.Exception.Message). Assuming it's just an IP/hostname." -Level "WARN"
+                    $credential = $null
+                    $msIP = $msEntry.Split('@')[-1].Split('/')[0]
+                    $updateArg = $msIP
+                    if ($msIP) {
+                        $versionUri = "http://${msIP}/dev/cfg/version"
+                    } else {
+                        WriteLog -Message "Could not determine IP/Host from entry '$redactedEntryForLog'. Skipping." -Level "ERROR"
+                        continue # Skip to next entry in foreach
+                    }
+                } # End inner try/catch for parsing
+    
+                $redactedVersionUri = GetRedactedPassword $versionUri # Corrected call
+                WriteLog -Message "Checking current Miniserver version for '$msIP' via URI: ${redactedVersionUri}" -Level "INFO"
+    
+                $responseObject = $null
+                $msVersionCheckSuccess = $false
+                $originalScheme = $null
+                $iwrParamsBase = @{ TimeoutSec = 15; ErrorAction = 'Stop'; Method = 'Get' } # Base params without URI/Credential
+
+                try { # Outer try for the whole version check + update process for this MS
+                    $originalScheme = ([uri]$versionUri).Scheme # Get scheme reliably
+
+                    # Add credential if present (applies to both HTTPS and HTTP attempts)
+                    if ($credential) {
+                        $iwrParamsBase.Credential = $credential
+                        WriteLog -Message "Using credentials for Invoke-WebRequest to $msIP" -Level DEBUG
+                        # Note: AllowUnencryptedAuthentication is not directly used with IWR.
+                        # Basic Auth over HTTP will happen if credentials are provided. PS 5.1 might show a warning.
+                    }
+
+                    if ($originalScheme -eq 'http') {
+                        # Attempt HTTPS first
+                        $httpsUri = $versionUri -replace '^http:', 'https:'
+                        WriteLog -Message "Original URI is HTTP. Attempting secure connection first: $httpsUri" -Level INFO
+                        $httpsParams = $iwrParamsBase.Clone() # Clone base params
+                        $httpsParams.Uri = $httpsUri
+
+                        try {
+                            WriteLog -Message "Attempting Invoke-WebRequest with HTTPS..." -Level DEBUG
+                            $responseObject = Invoke-WebRequest @httpsParams
+                            WriteLog -Message "HTTPS connection successful." -Level INFO
+                            $msVersionCheckSuccess = $true
+                        } catch [System.Net.WebException] {
+                            # Catch specific web exceptions (connection refused, SSL/TLS errors, timeout, etc.)
+                            WriteLog -Message "HTTPS failed: $($_.Exception.Message). Falling back to HTTP." -Level WARN
+                            # $msVersionCheckSuccess remains false, will proceed to HTTP fallback
+                        } catch {
+                            # Catch other potential errors during HTTPS attempt
+                            WriteLog -Message "Unexpected error during HTTPS connection attempt: $($_.Exception.Message). Falling back to HTTP." -Level WARN
+                            # $msVersionCheckSuccess remains false, will proceed to HTTP fallback
+                        }
+                    }
+
+                    # Proceed with original protocol if HTTPS wasn't attempted or failed
+                    if (-not $msVersionCheckSuccess) {
+                        $originalParams = $iwrParamsBase.Clone() # Clone base params
+                        $originalParams.Uri = $versionUri # Set original URI
+
+                        try {
+                             $responseObject = Invoke-WebRequest @originalParams
+                             WriteLog -Message "Connection successful using $($originalScheme.ToUpper()) URI: $versionUri" -Level INFO
+                             $msVersionCheckSuccess = $true
+                        } catch [System.Net.WebException] {
+                             WriteLog -Message "Failed to connect using $($originalScheme.ToUpper()) URI: $($_.Exception.Message)" -Level WARN
+                             # $msVersionCheckSuccess remains false
+                        } catch {
+                             WriteLog -Message "Unexpected error during $($originalScheme.ToUpper()) connection attempt: $($_.Exception.Message)" -Level ERROR
+                             # $msVersionCheckSuccess remains false
+                        }
+                    }
+
+                    # --- Process response ONLY if a connection succeeded ---
+                    if ($msVersionCheckSuccess -and $responseObject) {
+                        # --- Log raw response object in Debug Mode ---
+                        if ($DebugMode) { # Check custom DebugMode parameter
+                            $rawResponseContent = $responseObject.RawContent
+                            $debugMsg = "DEBUG: Raw response content from $msIP`: $rawResponseContent"
+                            WriteLog -Message $debugMsg -Level DEBUG
+                        }
+                        # --- END Log raw response ---
+
+                        # Explicitly parse the XML content from Invoke-WebRequest response
+                        $xmlResponse = [xml]$responseObject.Content
+                        $currentVersion = $xmlResponse.LL.value
+                        if ($null -eq $xmlResponse -or $null -eq $xmlResponse.LL -or $null -eq $xmlResponse.LL.value) { throw "Could not find version value in parsed Miniserver response XML (Expected structure: LL.value)." }
+
+                        WriteLog -Message "Miniserver '$msIP' current version: ${currentVersion}" -Level "INFO"
+                        $normalizedCurrentVersion = ConvertVersionString $currentVersion
+
+                        WriteLog -Message "Comparing current version (${normalizedCurrentVersion}) with desired version (${DesiredVersion})." -Level DEBUG
+                        if ($normalizedCurrentVersion -ne $DesiredVersion) {
+                            WriteLog -Message "Update required for Miniserver at '$msIP' (Current: ${normalizedCurrentVersion}, Desired: ${DesiredVersion}). Triggering update..." -Level "INFO"
+                            ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate" -Message "Starting update for Miniserver ${msIP}..."
+
+                            $invokeParams = @{
+                                LoxoneConfigPath = $loxoneConfigExe
+                                MiniserverArg = $updateArg
+                                NormalizedDesiredVersion = $DesiredVersion
+                                VerificationUri = $versionUri # Use original URI for post-update verification
+                                VerificationCredential = $credential
+                            }
+                            $updateSuccess = InvokeMiniserverUpdate @invokeParams
+                            if ($updateSuccess) {
+                                $anyMSUpdated = $true # Set flag if update was successful
+                                WriteLog -Message "Update successful for Miniserver '$msIP'." -Level INFO
+                            } else {
+                                WriteLog -Message "Update attempt failed or verification failed for Miniserver '$msIP'." -Level WARN
+                            }
+                        } else {
+                            WriteLog -Message "Miniserver at '$msIP' is already up-to-date (Version: ${normalizedCurrentVersion}). Skipping update." -Level "INFO"
+                        }
+
+                    } elseif (-not $msVersionCheckSuccess) {
+                        # Log failure if both HTTPS (if attempted) and HTTP/S failed
+                        WriteLog -Message "Failed to check Miniserver version for '$msIP' (URI: ${redactedVersionUri}) after attempting relevant protocols. Skipping." -Level "ERROR"
+                        # Loop will continue to the next Miniserver
+                    }
+
+                } catch { # Outer catch for the whole MS processing (parsing response, comparing versions, invoking update)
+                    WriteLog -Message "Failed processing Miniserver '$msIP' (URI: ${redactedVersionUri}). Error: $($_.Exception.Message)" -Level "ERROR"
+                    # Loop will continue to the next Miniserver
+                } # End outer try/catch for this MS
+            } # End foreach loop
+    
+            WriteLog -Message "Finished processing all Miniservers." -Level "INFO"
+            # --- End of Logic ---
         }
         catch {
-            Write-LogMessage "Error creating the scheduled task: ${($_.Exception.Message)}" -Level "ERROR"
-            # If running non-elevated, this is expected. If elevated, it's a real error.
-            if (-not $script:IsAdminRun) {
-                 Write-Host "  INFO: Task registration correctly failed with error (not Admin): $($_.Exception.Message)" -ForegroundColor Gray
+            # Catch unexpected errors in the main block
+            WriteLog -Message "Unexpected error caught in main UpdateMS try block: $($_.Exception.Message)" -Level ERROR
+            # Log details if needed, but don't prevent finally block
+        }
+        finally {
+            # Ensure Exit-Function is always called
+            ExitFunction # Corrected call
+        }
+        
+        # Return the final status after try/catch/finally
+        return $anyMSUpdated
+    }
+
+    function InvokeMiniserverUpdate {
+        param(
+            # Full path to LoxoneConfig.exe.
+            [Parameter(Mandatory=$true)][string]$LoxoneConfigPath,
+            # The argument for LoxoneConfig /update (e.g., "user:pass@host" or "host").
+            [Parameter(Mandatory=$true)][string]$MiniserverArg,
+            # The target version string (normalized) for verification after update.
+            [Parameter(Mandatory=$true)][string]$NormalizedDesiredVersion,
+            # The full URI to query the Miniserver version post-update (e.g., "http://host/dev/cfg/version").
+            [Parameter(Mandatory=$true)][string]$VerificationUri,
+            # Optional PSCredential object for authenticating the post-update version check.
+            [Parameter()][System.Management.Automation.PSCredential]$VerificationCredential = $null
+        )
+        EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    
+        try {
+        # Derive values needed for logging and pinging from MiniserverArg
+        $redactedArg = GetRedactedPassword $MiniserverArg
+        $hostForPing = $MiniserverArg.Split('@')[-1] # Extract host part after potential user:pass@
+    
+        WriteLog -Message "Attempting to update Miniserver: ${redactedArg}" -Level INFO
+    
+        # Use the original $MiniserverArg (potentially with password) for the actual command
+        $arguments = "/update:${MiniserverArg}" # CORRECTED/VERIFIED Argument format
+        WriteLog -Message "Executing: '$LoxoneConfigPath' $arguments" -Level DEBUG
+    
+        try {
+            # Execute LoxoneConfig.exe with the /update argument
+            $process = Start-Process -FilePath $LoxoneConfigPath -ArgumentList $arguments -PassThru -Wait -ErrorAction Stop
+            WriteLog -Message "LoxoneConfig.exe update command executed for '${redactedArg}'. Exit Code: $($process.ExitCode)" -Level INFO
+    
+            # Check Exit Code (Optional but recommended)
+            if ($process.ExitCode -ne 0) {
+                 WriteLog -Message "LoxoneConfig.exe returned non-zero exit code ($($process.ExitCode)) for update on '${redactedArg}'. Update may have failed to initiate." -Level WARN
+                 # Decide whether to continue with verification or stop here
+                 # For now, we continue to verification, as the command might still trigger the update
+            }
+    
+            # --- Wait for Miniserver Reboot and Verify Update ---
+            WriteLog -Message "Waiting for Miniserver ${hostForPing} to start rebooting (ping timeout)..." -Level INFO
+            if (WaitForPingTimeout -InputAddress $hostForPing -TimeoutSeconds 180) {
+                WriteLog -Message "Miniserver ${hostForPing} started rebooting." -Level INFO
+                # Wait for Miniserver to come back online (ping success)
+                WriteLog -Message "Waiting for Miniserver ${hostForPing} to come back online (ping success)..." -Level INFO
+                if (WaitForPingSuccess -InputAddress $hostForPing -TimeoutSeconds 600) {
+                    WriteLog -Message "Miniserver ${hostForPing} is back online." -Level INFO
+                    Start-Sleep -Seconds 15 # Allow services to fully start
+                    WriteLog -Message "Re-checking Miniserver version after update..." -Level INFO
+                    try {
+                        # Use the parameters passed directly to this function for verification
+                        $verifyParams = @{
+                            Uri = $VerificationUri # Use the passed verification URI (/dev/cfg/version)
+                            UseBasicParsing = $true
+                            TimeoutSec = 15
+                            ErrorAction = 'Stop'
+                        }
+                        if ($VerificationCredential) { # Use the passed Credential object
+                            $verifyParams.Credential = $VerificationCredential
+                        }
+    
+                        $responseAfterUpdate = Invoke-WebRequest @verifyParams
+                        $xmlAfterUpdate = [xml]$responseAfterUpdate.Content
+                        $versionAfterUpdate = $xmlAfterUpdate.LL.value # CORRECTED/VERIFIED XML Path
+                        if ([string]::IsNullOrEmpty($versionAfterUpdate)) {
+                            throw "Could not find version value in Miniserver XML response after update."
+                        }
+    
+                        $normalizedVersionAfterUpdate = ConvertVersionString $versionAfterUpdate
+    
+                        if ($normalizedVersionAfterUpdate) {
+                            WriteLog -Message "Version after update: ${normalizedVersionAfterUpdate}" -Level INFO
+                            if ($normalizedVersionAfterUpdate -eq $NormalizedDesiredVersion) {
+                                WriteLog -Message "SUCCESS: Miniserver ${redactedArg} successfully updated and verified to version ${NormalizedDesiredVersion}." -Level INFO
+                                ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate" -Message "SUCCESS: Miniserver ${redactedArg} updated to ${NormalizedDesiredVersion}."
+                                return $true # Indicate success
+                            } else {
+                                WriteLog -Message "FAILURE: Miniserver ${redactedArg} update verification failed. Version after update (${normalizedVersionAfterUpdate}) does not match desired (${NormalizedDesiredVersion})." -Level ERROR
+                                ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate FAILED" -Message "FAILURE: Miniserver ${redactedArg} update verification failed. Found ${normalizedVersionAfterUpdate}, expected ${NormalizedDesiredVersion}."
+                                return $false # Indicate failure
+                            }
+                        } else {
+                             WriteLog -Message "FAILURE: Could not determine a valid version for Miniserver ${redactedArg} after update attempt. Found raw value: '$versionAfterUpdate'." -Level ERROR
+                             ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate FAILED" -Message "FAILURE: Could not verify Miniserver ${redactedArg} version after update."
+                             return $false # Indicate failure
+                        }
+                    } catch {
+                        WriteLog -Message "FAILURE: Could not verify Miniserver ${redactedArg} version after update. Error during verification request: $($_.Exception.Message)" -Level ERROR
+                        ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate FAILED" -Message "FAILURE: Could not verify Miniserver ${redactedArg} version after update (Error: $($_.Exception.Message))."
+                        return $false # Indicate failure
+                    }
+                } else {
+                    WriteLog -Message "FAILURE: Miniserver ${hostForPing} did not come back online within the timeout period after update attempt." -Level ERROR
+                    ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate FAILED" -Message "FAILURE: Miniserver ${redactedArg} did not come back online after update attempt."
+                    return $false # Indicate failure
+                }
             } else {
-                 throw $_ # Re-throw if running as admin, as it shouldn't fail
+                WriteLog -Message "WARN: Miniserver ${hostForPing} did not seem to reboot within the timeout period after update command. Verification skipped." -Level WARN
+                ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate WARN" -Message "WARN: Miniserver ${redactedArg} did not seem to reboot after update command. Please check manually."
+                return $false # Indicate failure (as verification couldn't happen)
+            }
+            # --- End Wait and Verify ---
+    
+        } catch {
+            WriteLog -Message "Error executing LoxoneConfig.exe for update on '${redactedArg}': $($_.Exception.Message)" -Level ERROR
+            ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate FAILED" -Message "FAILURE: Error executing update command for Miniserver ${redactedArg}: $($_.Exception.Message)."
+            return $false # Indicate failure
+        }
+        }
+        finally {
+            ExitFunction
+        }
+    } # Closing brace for InvokeMiniserverUpdate
+#endregion Miniserver Update Logic
+
+#region Utility Helpers (Continued)
+    function GetRedactedPassword {
+        param(
+            # The input string potentially containing "user:password@host".
+            [Parameter(Mandatory=$true)][string]$InputString
+        )
+        EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+        try {
+            # Updated Regex: Handles optional user:pass@ part, ensures '@' is not in password
+            # Group 1: Optional scheme (http:// or https://)
+            # Group 2: Optional user:pass@ part (user and pass cannot contain '@')
+            # Group 3: User part of user:pass@
+            # Group 4: Password part of user:pass@
+            # Group 5: The rest of the string after the host/port
+            $pattern = "^(?<scheme>http[s]?://)?(?:(?<user>[^:@/]+)(?::(?<pass>[^@/]*))?@)?(?<rest>.*)$"
+            
+            if ($InputString -match $pattern) {
+                $userPart = $matches['user']
+                $passPart = $matches['pass']
+                $schemePart = $matches['scheme']
+                $restPart = $matches['rest']
+                
+                # Only redact if there's a password part AND it's not empty
+                if (-not ([string]::IsNullOrEmpty($passPart))) {
+                    # $redactedPassword = "*" * $passPart.Length # Original logic
+                    $redactedPassword = "****" # Fixed redaction as per test requirement
+                    $redactedUrl = "${schemePart}${userPart}:${redactedPassword}@${restPart}"
+                    WriteLog -Message "GetRedactedPassword - Redacted URL: $redactedUrl" -Level DEBUG # Corrected function name in log
+                    return $redactedUrl
+                } else {
+                    # Return original if no password part found or password part is empty
+                    WriteLog -Message "Get-RedactedPassword - No password part found or password empty, returning original URL: $InputString" -Level DEBUG
+                    return $InputString
+                }
+            } else {
+                # Return original if the regex doesn't match at all
+                WriteLog -Message "Get-RedactedPassword - Regex did not match, returning original URL: $InputString" -Level DEBUG
+                return $InputString
             }
         }
-}
-#endregion
+        finally {
+            ExitFunction
+        }
+    } # Closing brace for GetRedactedPassword
+#endregion Utility Helpers (Continued)
 
-#region Find-File Function (Placeholder/Example)
-function Find-File {
-    param(
-        [string]$BasePath,
-        [string]$FileName = "loxonemonitor.exe" # Default to monitor
-    )
-    # Simple placeholder implementation
-    $potentialPath = Join-Path -Path $BasePath -ChildPath $FileName
-    if (Test-Path $potentialPath) {
-        return $potentialPath
-    }
-    # Add more sophisticated search logic if needed (e.g., recursive)
-    return $null
-}
-#endregion
-
-#region Start/Stop Loxone Monitor (Placeholders)
-function Start-LoxoneMonitor {
-    param([string]$MonitorExePath)
-    Write-DebugLog "Start-LoxoneMonitor called with path: $MonitorExePath (currently placeholder)"
-    # Add logic to start the monitor process if needed
-}
-
-function Stop-LoxoneMonitor {
-    Write-DebugLog "Stop-LoxoneMonitor called (currently placeholder)"
-    # Add logic to stop the monitor process if needed
-    Stop-Process -Name loxonemonitor -Force -ErrorAction SilentlyContinue
-}
-#endregion
-
-#region Watch-And-Move-MonitorLogs (Placeholder)
-function Watch-And-Move-MonitorLogs {
-    param(
-        [string]$SourceLogDir,
-        [string]$DestinationLogDir,
-        [int]$TimeoutMinutes,
-        [switch]$CreateTestFile
-    )
-    Write-DebugLog "Watch-And-Move-MonitorLogs called (currently placeholder)"
-    Write-LogMessage "Source: $SourceLogDir, Dest: $DestinationLogDir, Timeout: $TimeoutMinutes" -Level "DEBUG"
-    if ($CreateTestFile) { Write-LogMessage "CreateTestFile switch was present." -Level "DEBUG" }
-    # Placeholder return value
-    return $true
-}
-#endregion
-
-#region Invoke-ZipDownloadAndVerification Function (Placeholder)
+#region Download and Verification
 function Invoke-ZipDownloadAndVerification {
+    [CmdletBinding()]
     param(
-        [string]$ZipUrl,
-        [string]$DestinationPath,
-        [string]$ExpectedCRC32,
-        [int64]$ExpectedFilesize,
-        [int]$MaxRetries
+        # The URL of the ZIP file to download.
+        [Parameter(Mandatory = $true)][string]$ZipUrl,
+        # The local file path where the ZIP file should be saved.
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        # Optional: The expected CRC32 checksum (hex string) for verification.
+        [Parameter()][string]$ExpectedCRC32 = $null,
+        # Optional: The expected file size in bytes for verification.
+        [Parameter()][int64]$ExpectedFilesize = 0,
+        # The number of times to retry the download if it fails verification (0 means 1 attempt total).
+        [Parameter()][int]$MaxRetries = 1
     )
-     Write-DebugLog "Invoke-ZipDownloadAndVerification called (currently placeholder)"
-     Write-LogMessage "URL: $ZipUrl, Dest: $DestinationPath" -Level "DEBUG"
-     # Placeholder - Assume success for testing flow
-     # In reality, download, check size, check CRC
-     if (-not (Test-Path $DestinationPath)) {
-         Set-Content -Path $DestinationPath -Value "Dummy ZIP content" # Create dummy file if needed
-     }
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
+
+    try {
+    WriteLog -Message "Starting ZIP download and verification for '$DestinationPath'." -Level INFO
+    $DestinationDir = Split-Path -Path $DestinationPath -Parent
+    if (-not (Test-Path -Path $DestinationDir -PathType Container)) {
+        WriteLog -Message "Destination directory '$DestinationDir' not found. Creating..." -Level INFO
+        try {
+            New-Item -Path $DestinationDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            WriteLog -Message "Successfully created directory '$DestinationDir'." -Level INFO
+        } catch {
+            WriteLog -Message "Failed to create destination directory '$DestinationDir': $($_.Exception.Message)" -Level ERROR
+            throw "Failed to create destination directory '$DestinationDir'. Cannot proceed."
+        }
+    }
+
+    # 1. Pre-Download Check (Size & Checksum if provided)
+    $null = (Test-Path $DestinationPath -ErrorAction SilentlyContinue) # Check existence and suppress output
+    $fileExists = $? # Check if the Test-Path command succeeded (meaning path exists)
+    $needsDownload = $true # Assume download is needed unless proven otherwise
+
+    if ($fileExists) {
+        WriteLog -Message "Local file '$DestinationPath' exists. Verifying..." -Level INFO
+        try {
+            $localFileItem = Get-Item $DestinationPath -ErrorAction Stop
+            $localFileSize = $localFileItem.Length
+            $sizeMatch = $true # Assume size matches unless check is enabled and fails
+            $crcMatch = $true # Assume CRC matches unless check is enabled and fails
+
+            # Check Size if ExpectedFilesize > 0
+            if ($ExpectedFilesize -gt 0) {
+                if ($localFileSize -ne $ExpectedFilesize) {
+                    WriteLog -Message "Local file size ($localFileSize bytes) does not match expected size ($ExpectedFilesize bytes). Will re-download." -Level WARN
+                    $sizeMatch = $false
+                } else {
+                    WriteLog -Message "Local file size matches." -Level DEBUG
+                }
+            } else {
+                WriteLog -Message "Expected file size is 0 or not provided. Skipping size check." -Level DEBUG
+            }
+
+            # Check CRC *only if* size matches AND ExpectedCRC32 is provided
+            if ($sizeMatch -and -not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) {
+                WriteLog -Message "Size matches. Checking CRC32..." -Level DEBUG
+                try {
+                    $localCRC32 = Get-CRC32 -InputFile $DestinationPath # Corrected function call
+                    if ($localCRC32 -ne $ExpectedCRC32) {
+                        WriteLog -Message "Local file checksum ($localCRC32) does not match expected checksum ($ExpectedCRC32). Will re-download." -Level WARN
+                        $crcMatch = $false
+                    } else {
+                        WriteLog -Message "Local file checksum matches." -Level DEBUG
+                    }
+                } catch {
+                    # If Get-CRC32 fails (e.g., type not found), treat it as a mismatch
+                    WriteLog -Message "Error calculating CRC32 for existing file: $($_.Exception.Message). Assuming mismatch." -Level WARN
+                    $crcMatch = $false
+                }
+            } elseif ($sizeMatch) {
+                # Size matched, but no CRC provided for check
+                WriteLog -Message "Size matches, but Expected CRC32 not provided. Skipping CRC check." -Level DEBUG
+            } else {
+                # Size did not match, no need to check CRC
+                WriteLog -Message "Size mismatch. Not checking CRC." -Level DEBUG
+            }
+
+            # Determine if download is needed based on checks
+            if ($sizeMatch -and $crcMatch) {
+                # Specific logging for why skip occurred
+                if ($ExpectedFilesize -gt 0 -and -not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) {
+                    WriteLog -Message "Local file is valid (Size and Checksum match). Download skipped." -Level INFO
+                } elseif ($ExpectedFilesize -gt 0) {
+                    WriteLog -Message "Local file is valid (Size match, Checksum not checked). Download skipped." -Level INFO
+                } elseif (-not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) {
+                    WriteLog -Message "Local file is valid (Checksum match, Size not checked). Download skipped." -Level INFO
+                } else {
+                     WriteLog -Message "Local file exists (Size/Checksum not checked). Download skipped." -Level INFO # Fallback if neither check was requested
+                }
+                $needsDownload = $false
+                return $true # Indicate success immediately
+            } else {
+                WriteLog -Message "Local file '$DestinationPath' failed validation (Size Match: $sizeMatch, CRC Match: $crcMatch). Re-downloading." -Level WARN
+                Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue # Remove the invalid file
+            }
+
+        } catch { # Catch errors from Get-Item or Get-CRC32
+            WriteLog -Message "Error verifying existing local file '$DestinationPath': $($_.Exception.Message). Will re-download." -Level WARN
+            if (Test-Path $DestinationPath) {
+                 Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } else {
+        WriteLog -Message "Local file '$DestinationPath' does not exist. Proceeding to download." -Level INFO
+        $needsDownload = $true
+    }
+
+    # 2. Conditional Download & 3. Post-Download Check (with Retries)
+    if ($needsDownload) {
+        $totalAttempts = $MaxRetries + 1
+        for ($attempt = 1; $attempt -le $totalAttempts; $attempt++) {
+            WriteLog -Message "Attempting download ($attempt/$totalAttempts) from '$ZipUrl' to '$DestinationPath'..." -Level INFO
+            Write-Host "Downloading from: $ZipUrl" # Display URL to console
+
+            # --- Remove old file if it exists ---
+            if (Test-Path $DestinationPath) {
+                 WriteLog -Message "Removing existing file '$DestinationPath' before download attempt $attempt." -Level DEBUG
+                 Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue
+            }
+
+            # --- Start Download Job ---
+            $downloadJob = Start-Job -ScriptBlock {
+                param($Url, $Path)
+                try {
+                    # Use System.Net.WebClient for better control and potential progress reporting within the job (though we poll externally)
+                    $webClient = New-Object System.Net.WebClient
+                    # Add event handler for progress (optional, mainly for debugging job internals)
+                    # Register-ObjectEvent -InputObject $webClient -EventName DownloadProgressChanged -Action { Write-Host "Job Progress: $($EventArgs.ProgressPercentage)%" } | Out-Null
+                    $webClient.DownloadFile($Url, $Path)
+                    # Exit with success code if download completes without error
+                    exit 0 
+                } catch {
+                    # Write error details to stderr for capture
+                    Write-Error -Message "Download failed: $($_.Exception.Message)" -ErrorAction Stop
+                    # Exit with a non-zero code to indicate failure
+                    exit 1 
+                }
+            } -ArgumentList $ZipUrl, $DestinationPath
+
+            WriteLog -Message "Download job started with ID: $($downloadJob.Id)" -Level DEBUG
+
+            # --- Polling Loop for Progress ---
+            $startTime = Get-Date
+            $lastBytes = 0
+            $lastTime = $startTime
+
+            while ($downloadJob.State -eq 'Running' -or $downloadJob.State -eq 'NotStarted') {
+                Start-Sleep -Milliseconds 500 # Polling interval
+
+                if (Test-Path $DestinationPath) {
+                    $currentFileItem = Get-Item $DestinationPath -ErrorAction SilentlyContinue
+                    if ($currentFileItem) {
+                        $currentBytes = $currentFileItem.Length
+                        $currentTime = Get-Date
+                        $intervalSeconds = ($currentTime - $lastTime).TotalSeconds
+                        $bytesDownloadedThisInterval = $currentBytes - $lastBytes
+                        $speedFormatted = "0.0 MB/s"
+                        $remainingTimeFormatted = "--:--:--"
+
+                        if ($intervalSeconds -gt 0 -and $bytesDownloadedThisInterval -gt 0) {
+                            $downloadSpeedBytesPerSec = $bytesDownloadedThisInterval / $intervalSeconds
+                            $speedFormatted = "{0:N1} MB/s" -f ($downloadSpeedBytesPerSec / 1MB) # Format speed in MB/s
+
+                            if ($ExpectedFilesize -gt 0 -and $downloadSpeedBytesPerSec -gt 0) {
+                                $remainingBytes = $ExpectedFilesize - $currentBytes
+                                if ($remainingBytes -gt 0) {
+                                    $remainingSeconds = 0 # Initialize to 0
+                                    if ($downloadSpeedBytesPerSec -gt 0) {
+                                        # Perform calculation and explicitly cast to double *immediately*
+                                        $remainingSeconds = [double]($remainingBytes / $downloadSpeedBytesPerSec)
+                                    } else {
+                                        # If download speed is 0, remaining time is effectively infinite or undefined
+                                        $remainingSeconds = [double]::PositiveInfinity
+                                    }
+                                    
+                                    # Check if $remainingSeconds is valid before formatting
+                                    if ($remainingSeconds -is [double] -and -not ([double]::IsInfinity($remainingSeconds)) -and -not ([double]::IsNaN($remainingSeconds)) -and $remainingSeconds -ge 0) {
+                                        $remainingTimeFormatted = Format-TimeSpanFromSeconds $remainingSeconds
+                                    } else {
+                                        $remainingTimeFormatted = "--:--:--" # Handle division by zero, NaN, or other invalid results
+                                    }
+                                } else {
+                                    $remainingTimeFormatted = "00:00:00" # Or indicate completion
+                                }
+                            }
+                        }
+                        
+                        $percent = 0
+                        if ($ExpectedFilesize -gt 0) {
+                            $percent = [math]::Round(($currentBytes / $ExpectedFilesize) * 100)
+                        }
+
+                        $progressParams = @{
+                            Activity        = "Downloading Loxone Update from '$ZipUrl'"
+                            Status          = "{0:N0} MB / {1:N0} MB ({2}%) at {3} - Rem: {4}" -f ($currentBytes / 1MB), ($ExpectedFilesize / 1MB), $percent, $speedFormatted, $remainingTimeFormatted # Shortened "Remaining"
+                            PercentComplete = $percent
+                            CurrentOperation= "Saving to '$DestinationPath'"
+                        }
+                        Write-Progress @progressParams
+
+                        $lastBytes = $currentBytes
+                        $lastTime = $currentTime
+                    }
+                }
+                # Check if job finished while we were polling
+                if ($downloadJob.State -ne 'Running' -and $downloadJob.State -ne 'NotStarted') {
+                    break # Exit polling loop
+                }
+            } # End while polling
+
+            # --- Check Job Result ---
+            WriteLog -Message "Download job finished with state: $($downloadJob.State)" -Level DEBUG
+            $downloadSuccess = $false
+            if ($downloadJob.State -eq 'Completed') {
+                # Check the exit code of the job's script block
+                # Receive job output to check exit code (PowerShell 5.1 compatible)
+                $jobError = $null # Initialize to null
+                try {
+                    # Wait for the job and retrieve output/errors
+                    $downloadJob | Wait-Job | Out-Null
+                    $downloadJob | Receive-Job -ErrorAction SilentlyContinue # Get standard output (jobResult unused)
+                    $jobError = $downloadJob.ChildJobs[0].Error # Get errors directly
+
+                    # In PS 5.1, Receive-Job doesn't directly give exit code. We rely on the try/catch within the job.
+                    # If the job script block threw an error (exit 1), it should appear in $jobError.
+                    if ($jobError -and $jobError.Count -gt 0) {
+                        # Job script block exited non-zero or had an error
+                        $errorMessage = "Download attempt $attempt failed (Job state: Completed, but error received)." # Already correct
+                        $errorMessage += " Error details: $($jobError | Out-String)" # Already correct
+                        WriteLog -Message $errorMessage -Level ERROR
+                        # $downloadSuccess remains false
+                    } else {
+                        # If no errors were captured, assume exit code 0
+                        WriteLog -Message "Download attempt $attempt completed successfully." -Level INFO
+                        $downloadSuccess = $true
+                    }
+                } catch {
+                    # Catch errors during Wait-Job or Receive-Job itself
+                    $errorMessage = "Error waiting for or receiving download job result (Attempt $attempt): $($_.Exception.Message)" # Already correct
+                    WriteLog -Message $errorMessage -Level ERROR
+                    # $downloadSuccess remains false
+                } finally {
+                    # Always try to remove the job
+                    Remove-Job -Job $downloadJob -Force -ErrorAction SilentlyContinue
+                }
+            } else {
+                # Handle other states like Failed, Stopped, Suspended, etc.
+                $errorMessage = "Download attempt $attempt failed (Job State: $($downloadJob.State))."
+                # Try to get error details if the job failed
+                if ($downloadJob.JobStateInfo.Reason) {
+                    $errorMessage += " Reason: $($downloadJob.JobStateInfo.Reason.Message)"
+                }
+                # Clean up the failed job
+                Remove-Job -Job $downloadJob -Force -ErrorAction SilentlyContinue
+                WriteLog -Message $errorMessage -Level ERROR
+                # $downloadSuccess remains false
+            }
+
+            # --- Post-Download Verification (Size & Checksum) ---
+            if ($downloadSuccess) {
+                WriteLog -Message "Verifying downloaded file size and checksum (Attempt $attempt)..." -Level INFO
+                try {
+                    if (-not (Test-Path $DestinationPath)) { # Check if file exists before verification
+                         WriteLog -Message "Downloaded file '$DestinationPath' not found after successful download (Attempt $attempt)." -Level ERROR
+                         throw "Downloaded file missing."
+                    }
+                    $downloadedFileItem = Get-Item $DestinationPath -ErrorAction Stop
+                    $downloadedFileSize = $downloadedFileItem.Length
+                    $sizeVerified = $true # Assume verified unless check enabled and fails
+                    $crcVerified = $true # Assume verified unless check enabled and fails
+
+                    # Verify Size if ExpectedFilesize > 0
+                    if ($ExpectedFilesize -gt 0) {
+                        if ($downloadedFileSize -ne $ExpectedFilesize) {
+                            WriteLog -Message "Downloaded file size ($downloadedFileSize bytes) does not match expected size ($ExpectedFilesize bytes) (Attempt $attempt)." -Level ERROR
+                            $sizeVerified = $false
+                        } else {
+                            WriteLog -Message "Downloaded file size matches (Attempt $attempt)." -Level DEBUG
+                        }
+                    } else {
+                         WriteLog -Message "Expected file size is 0 or not provided. Skipping size check." -Level DEBUG
+                    }
+
+                    # Verify CRC if ExpectedCRC32 is provided AND size verification passed (or was skipped)
+                    if ($sizeVerified -and -not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) {
+                        WriteLog -Message "Checking CRC32..." -Level DEBUG
+                        $localCRC32 = Get-CRC32 -InputFile $DestinationPath # Corrected function call
+                        if ($localCRC32 -ne $ExpectedCRC32) { # Compare CRC32
+                            WriteLog -Message "Local file checksum ($localCRC32) does not match expected checksum ($ExpectedCRC32) (Attempt $attempt)." -Level ERROR
+                            $crcVerified = $false
+                        } else {
+                            WriteLog -Message "Local file checksum matches (Attempt $attempt)." -Level DEBUG
+                        }
+                    } elseif (-not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) {
+                         WriteLog -Message "Size mismatch or CRC check skipped. Not verifying CRC." -Level DEBUG
+                    } else {
+                         WriteLog -Message "Expected CRC32 not provided. Skipping CRC verification." -Level DEBUG
+                    }
+
+                    # Check overall verification status
+                    if ($sizeVerified -and $crcVerified) {
+                        WriteLog -Message "Verification successful (Attempt $attempt)." -Level INFO
+                        # Ensure progress bar is cleared on successful completion
+                        Write-Progress -Activity "Downloading Loxone Update" -Completed
+                        return $true # Download and verification successful, exit function
+                    } else {
+                        # Throw specific error based on what failed
+                        if (-not $sizeVerified) { throw "Incorrect file size." }
+                        if (-not $crcVerified) { throw "Incorrect checksum." }
+                    }
+
+                } catch { # Catch verification errors
+                    $errorMessage = "Verification failed for download attempt {0}: {1}" -f $attempt, $_.Exception.Message
+                    WriteLog -Message $errorMessage -Level ERROR
+                    if (Test-Path $DestinationPath) { # Clean up failed verification file
+                        Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue
+                    }
+                    if ($attempt -eq $totalAttempts) {
+                        WriteLog -Message "Maximum download attempts reached. Verification failed." -Level ERROR
+                        # Ensure progress bar is cleared on final failure
+                        Write-Progress -Activity "Downloading Loxone Update" -Completed
+                        throw $errorMessage # Throw exception on final failure
+                    }
+                    WriteLog -Message "Waiting 5 seconds before retry..." -Level INFO
+                    Start-Sleep -Seconds 5
+                    # Continue to next download attempt
+                } # End Verification Catch
+            } else { # If download failed
+                 if ($attempt -eq $totalAttempts) {
+                     WriteLog -Message "Maximum download attempts reached. Download failed." -Level ERROR
+                     # Ensure progress bar is cleared on final failure
+                     Write-Progress -Activity "Downloading Loxone Update" -Completed
+                     throw "Download failed after $totalAttempts attempts." # Throw exception on final failure
+                 }
+                 WriteLog -Message "Waiting 5 seconds before retry..." -Level INFO
+                 Start-Sleep -Seconds 5
+                 # Continue to next download attempt
+            }
+        } # End For loop (attempts)
+    } # End if ($needsDownload)
+
+    # If loop completes without returning true, it means all attempts failed
+    WriteLog -Message "Download and verification ultimately failed after $totalAttempts attempts." -Level ERROR # Corrected log message
+    # Ensure progress bar is cleared on final failure
+    Write-Progress -Activity "Downloading Loxone Update" -Completed
+    # If loop completes without returning true, it means all attempts failed
+    }
+    finally {
+        ExitFunction # Corrected function call
+    }
 }
-#endregion
+#endregion Download and Verification
+
+#region CRC32 Logic
+# --- Add CRC32 Class ---
+$Source = @"
+using System;
+using System.IO;
+// Removed: using System.IO.Hashing;
+// Removed: using System.Security.Cryptography;
+
+public static class CRC32
+{
+    // Fallback CRC32 implementation (e.g., CRC32-IEEE 802.3)
+    private static readonly uint[] table = GenerateTable();
+    private const uint Poly = 0xEDB88320; // Standard CRC32 polynomial (reversed)
+
+    private static uint[] GenerateTable()
+    {
+        uint[] createTable = new uint[256];
+        for (uint i = 0; i < 256; i++)
+        {
+            uint c = i;
+            for (int j = 0; j < 8; j++)
+            {
+                if ((c & 1) == 1)
+                    c = (c >> 1) ^ Poly;
+                else
+                    c = c >> 1;
+            }
+            createTable[i] = c;
+        }
+        return createTable;
+    }
+
+    public static uint Compute(byte[] bytes)
+    {
+        // Always use the table-based CRC32-IEEE implementation for compatibility
+        uint crc = 0xFFFFFFFF;
+        foreach (byte b in bytes)
+        {
+            crc = (crc >> 8) ^ table[(crc & 0xFF) ^ b];
+        }
+        return ~crc; // Final XOR
+    }
+    
+    // Overload for FileStream if needed, but reading all bytes is often simpler for moderate files
+    // public static uint Compute(Stream stream) { ... }
+}
+"@
+
+try {
+    # Check if type already exists before adding
+    if (-not ([System.Management.Automation.PSTypeName]'CRC32').Type) {
+        Add-Type -TypeDefinition $Source -Language CSharp -ErrorAction Stop
+        WriteLog -Message "Successfully added CRC32 type definition." -Level DEBUG # Already correct
+    } else {
+        WriteLog -Message "CRC32 type already exists." -Level DEBUG # Already correct
+    }
+} catch {
+    WriteLog -Message "Error adding CRC32 type: $($_.Exception.Message)" -Level ERROR # Already correct
+    # Consider throwing here if CRC is essential and Add-Type fails
+    # throw "Failed to add necessary CRC32 type."
+}
+
+function GetCRC32 {
+    param(
+        [Parameter(Mandatory = $true)]
+        # The path to the file for which to calculate the CRC32 checksum.
+        [string]$InputFile
+    )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    try {
+        $fileBytes = [System.IO.File]::ReadAllBytes($InputFile)
+        WriteLog -Message "Read $($fileBytes.Length) bytes from file '$InputFile'." -Level DEBUG # Already correct
+        $crc = [CRC32]::Compute($fileBytes)
+        $crcString = $crc.ToString("X8")
+        WriteLog -Message "Calculated CRC32 for '$InputFile': ${crcString}" -Level DEBUG # Already correct
+        return $crcString
+    }
+    catch {
+        WriteLog -Message "Error calculating CRC32 for ${InputFile}: $($_.Exception.Message)" -Level ERROR # Already correct
+        throw $_ 
+    }
+    finally {
+        ExitFunction # Already correct
+    }
+}
+#endregion CRC32 Logic
+
+#region Zip Extraction
+function Invoke-ZipFileExtraction {
+    [CmdletBinding()]
+    param(
+        # Full path to the ZIP archive.
+        [Parameter(Mandatory=$true)][string]$ZipPath,
+        # Full path to the destination directory where files should be extracted.
+        [Parameter(Mandatory=$true)][string]$DestinationPath
+    )
+    EnterFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    WriteLog -Message "Extracting '$ZipPath' to '$DestinationPath'..." -Level INFO
+    try {
+        if (-not (Test-Path $ZipPath -PathType Leaf)) {
+            throw "Source ZIP file not found: '$ZipPath'"
+        }
+        if (-not (Test-Path $DestinationPath -PathType Container)) {
+            WriteLog -Message "Destination directory '$DestinationPath' does not exist. Creating..." -Level INFO
+            New-Item -Path $DestinationPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
+        Expand-Archive -Path $ZipPath -DestinationPath $DestinationPath -Force -ErrorAction Stop
+        WriteLog -Message "Successfully extracted '$ZipPath' to '$DestinationPath'." -Level INFO
+    } catch {
+        WriteLog -Message "Error during ZIP extraction from '$ZipPath' to '$DestinationPath': $($_.Exception.Message)" -Level ERROR
+        throw $_ # Re-throw the error
+    } finally {
+        ExitFunction
+    }
+}
+#endregion Zip Extraction
+
+# Export functions to make them available
+Export-ModuleMember -Function GetScriptSaveFolder, InvokeLogFileRotation, GetInstalledVersion, StartLoxoneUpdateInstaller, GetCRC32, ShowNotificationToLoggedInUsers, InvokeScriptErrorHandling, GetProcessStatus, TestScheduledTask, Get-ExecutableSignature, StartProcessInteractive, WaitForPingTimeout, WaitForPingSuccess, InvokeZipDownloadAndVerification, GetInstalledApplicationPath, GetLoxoneConfigExePath, FormatTimeSpanFromSeconds, ConvertVersionString, UpdateMS, InvokeMiniserverUpdate, GetRedactedPassword, WriteLog, EnterFunction, ExitFunction, Invoke-ZipFileExtraction # Added Invoke-ZipFileExtraction, Renamed TestExecutableSignature
