@@ -149,6 +149,7 @@ Write-Debug "Running as Admin: $script:IsAdminRun"
 
 # --- Load Helper Module ---
 $UtilsModulePath = Join-Path -Path $PSScriptRoot -ChildPath "UpdateLoxoneUtils.psm1"
+
 if (-not (Test-Path $UtilsModulePath)) {
     Write-Error "Helper module 'UpdateLoxoneUtils.psm1' not found at '$UtilsModulePath'. Script cannot continue."
     exit 1 # Critical dependency missing
@@ -356,6 +357,18 @@ $LatestVersion = ConvertVersionString $LatestVersion # Convert the raw version i
 # --- Find Installed Loxone Config ---
 $InstalledExePath = GetLoxoneConfigExePath # Uses registry via helper function
 $InstalledVersion = if ($InstalledExePath -and (Test-Path $InstalledExePath)) { GetInstalledVersion -ExePath $InstalledExePath } else { "" }
+# Look for LoxoneConfig.ico in the installation directory
+$LoxoneIconPath = $null
+if ($InstalledExePath -and (Test-Path $InstalledExePath)) {
+    $InstallDir = Split-Path -Parent $InstalledExePath
+    $PotentialIconPath = Join-Path -Path $InstallDir -ChildPath "LoxoneConfig.ico"
+    if (Test-Path $PotentialIconPath) {
+        $LoxoneIconPath = $PotentialIconPath
+        Write-Debug "Found Loxone icon at: $LoxoneIconPath"
+    } else {
+        Write-Debug "LoxoneConfig.ico not found in $InstallDir. No icon will be used."
+    }
+}
 
 # --- Convert Installed Version (AFTER fetching) ---
 $normalizedInstalled = ConvertVersionString $InstalledVersion
@@ -366,14 +379,14 @@ Write-Debug "Normalized - Latest: '$LatestVersion', Installed: '$normalizedInsta
 if ($LatestVersion -eq $normalizedInstalled) { # Use the converted $LatestVersion
     WriteLog -Message "Loxone Config is already up-to-date (Version: $InstalledVersion). Config update will be skipped." -Level INFO
     # Optionally notify users even if no update was needed
-    # ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate" -Message "Loxone Config is already up-to-date (Version: $InstalledVersion)."
+    # Send-ToastNotification -Text "Loxone AutoUpdate", "Loxone Config is already up-to-date (Version: $InstalledVersion)."
 } else {
     WriteLog -Message "Loxone Config update required (Installed: '$InstalledVersion', Available: '$LatestVersion'). Update process will proceed." -Level INFO
 }
 # --- END VERSION INFO FETCHING AND COMPARISON LOGGING ---
 
 # --- Check/Install BurntToast ---
-# Moved inside Show-NotificationToLoggedInUsers for interactive vs. task context
+# Moved inside Send-ToastNotification for interactive vs. task context
 
 # --- Find Installed Loxone Config ---
 
@@ -408,7 +421,7 @@ if ($RegisterTask) {
         WriteLog -Message "Task registration process finished. Exiting script as -RegisterTask was specified." -Level INFO
         exit 0 # Exit after registering the task
     }
-} elseif ($script:IsAdminRun -and -not (TestScheduledTask)) {
+} elseif ($script:IsInteractive -and $script:IsAdminRun -and ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name -ne 'NT AUTHORITY\SYSTEM' -and -not (TestScheduledTask)) {
     # If running interactively as Admin, ensure the task is registered for future runs
     WriteLog -Message "Running interactively as Admin. Ensuring scheduled task '$TaskName' is registered/updated." -Level INFO
     Register-ScheduledTaskForScript -ScriptPath $MyInvocation.MyCommand.Definition `
@@ -446,7 +459,9 @@ try {
         # This block now only contains the download/install logic,
         # as the "is update needed?" check and logging happened earlier.
         WriteLog -Message "Update required (Installed: '$InstalledVersion', Available: '$LatestVersion')." -Level INFO
-        ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate" -Message "New version $LatestVersion available. Starting download..."
+        $toastParams = @{ Text = "Loxone AutoUpdate", "New version $LatestVersion available. Starting download..." }
+        if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+        Send-ToastNotification @toastParams
 
         # --- Check Running Processes ---
         $processesToCheck = @("LoxoneConfig", "loxonemonitor", "LoxoneLiveView") # Add other relevant processes if needed
@@ -460,7 +475,9 @@ try {
 
         if ($anyProcessRunning -and $SkipUpdateIfAnyProcessIsRunning) {
             WriteLog -Message "Skipping update because one or more Loxone processes are running and -SkipUpdateIfAnyProcessIsRunning was specified." -Level WARN
-            ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate Skipped" -Message "Update skipped because Loxone application(s) are running."
+            $toastParams = @{ Text = "Loxone AutoUpdate Skipped", "Update skipped because Loxone application(s) are running." }
+            if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+            Send-ToastNotification @toastParams
             # Exit gracefully without error
             exit 0
         }
@@ -580,7 +597,9 @@ try {
         # --- Close Applications (if requested and not skipping) ---
         if ($CloseApplications -and -not $SkipUpdateIfAnyProcessIsRunning) {
             WriteLog -Message "Attempting to close Loxone applications..." -Level INFO
-            ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate" -Message "Closing Loxone applications for update..."
+            $toastParams = @{ Text = "Loxone AutoUpdate", "Closing Loxone applications for update..." }
+            if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+            Send-ToastNotification @toastParams
             foreach ($procName in $processesToCheck) {
                 GetProcessStatus -ProcessName $procName -StopProcess:$true # Now actually stop them
             }
@@ -588,12 +607,16 @@ try {
         } elseif ($anyProcessRunning -and -not $SkipUpdateIfAnyProcessIsRunning) {
             # If processes are running but CloseApplications was not specified
             WriteLog -Message "Loxone application(s) are running, but -CloseApplications was not specified. Update might fail." -Level WARN
-            ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate WARN" -Message "Loxone application(s) are running. Update might fail. Please close them manually if issues occur."
+            $toastParams = @{ Text = "Loxone AutoUpdate WARN", "Loxone application(s) are running. Update might fail. Please close them manually if issues occur." }
+            if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+            Send-ToastNotification @toastParams
         }
 
         # --- Run Installer ---
         WriteLog -Message "Running installer..." -Level INFO
-        ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate" -Message "Installing version $LatestVersion..."
+        $toastParams = @{ Text = "Loxone AutoUpdate", "Installing version $LatestVersion..." }
+        if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+        Send-ToastNotification @toastParams
         StartLoxoneUpdateInstaller -InstallerPath $InstallerPath -InstallMode $InstallMode -ScriptSaveFolder $ScriptSaveFolder
         WriteLog -Message "Installation completed." -Level INFO
 
@@ -604,7 +627,9 @@ try {
 
         if ($normalizedNewInstalled -eq $LatestVersion) { # Use converted $LatestVersion
             WriteLog -Message "Successfully updated Loxone Config to version $NewInstalledVersion." -Level INFO
-            ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate Complete" -Message "Successfully updated Loxone Config to version $NewInstalledVersion."
+            $toastParams = @{ Text = "Loxone AutoUpdate Complete", "Successfully updated Loxone Config to version $NewInstalledVersion." }
+            if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+            Send-ToastNotification @toastParams
             $script:configUpdated = $true # Set flag indicating Config update happened
             # Update the path variable for the MS update section later
             $LoxoneConfigExePathForMSUpdate = $NewInstalledExePath
@@ -613,7 +638,9 @@ try {
             # This block executes if the installed version after update doesn't match the expected latest version
             $errorMessage = "Update verification failed! Expected version '$($LatestVersion)' but found '$($normalizedNewInstalled)' after installation." # Use converted $LatestVersion
             WriteLog -Message $errorMessage -Level ERROR
-            ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate Failed" -Message $errorMessage
+            $toastParams = @{ Text = "Loxone AutoUpdate Failed", $errorMessage }
+            if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+            Send-ToastNotification @toastParams
             # Consider this a script error and throw it to be caught by the trap
             throw $errorMessage
         }
@@ -656,7 +683,9 @@ Line Content: $lineContent
         $exceptionStackTrace = try { $_.ScriptStackTrace -as [string] } catch { "Could not retrieve stack trace." }
         WriteLog -Message "--- StackTrace ---`n$exceptionStackTrace`n--- End StackTrace ---" -Level ERROR
     }
-    ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate FAILED" -Message $errorMessage
+    $toastParams = @{ Text = "Loxone AutoUpdate FAILED", $errorMessage }
+    if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+    Send-ToastNotification @toastParams
 
     # Pause for user input only if running interactively - Logic moved to Finally block
     # if (-not (Test-ScheduledTask)) {
@@ -719,18 +748,43 @@ if (-not ([string]::IsNullOrWhiteSpace($LoxoneConfigExePathForMSUpdate)) -and (T
                                     -DebugMode:$DebugMode `
                                     -ScriptSaveFolder $ScriptSaveFolder `
                                     -InstalledExePath (Split-Path -Parent $LoxoneConfigExePathForMSUpdate) # Pass only the directory path
-    
-    # Determine if any update action was performed
+
+    # --- Check Log File for Errors from UpdateMS ---
+    # Note: This is a basic check. A more robust solution might involve UpdateMS returning a status object.
+    if (Test-Path $global:LogFile) {
+        # Get the content logged *since* the script started (approximate)
+        # We can refine this if needed, e.g., by passing start time to UpdateMS
+        $recentLogContent = Get-Content $global:LogFile -Raw -ErrorAction SilentlyContinue # Read the whole file
+        # Check if any ERROR lines related to UpdateMS or Miniserver processing exist
+        if ($recentLogContent -match '\[ERROR\].*(UpdateMS|Miniserver)') {
+            WriteLog -Message "Detected ERROR in log related to Miniserver update process. Setting error flag." -Level WARN
+            $script:ErrorOccurred = $true # Set the global error flag
+        }
+    }
+
+    # Determine if any update action was performed (for notification purposes)
     $anyUpdatePerformed = $script:configUpdated -or $miniserversUpdated
     WriteLog -Message "Update Status - Config Updated: $($script:configUpdated), Miniservers Updated: $($miniserversUpdated), Any Update Performed: $anyUpdatePerformed" -Level INFO
 
-    # Only show final notification if an update actually happened
-    if ($anyUpdatePerformed) {
-        ShowNotificationToLoggedInUsers -Title "Loxone AutoUpdate Complete" -Message "Loxone update process finished. Check logs for details."
-    } else {
-        WriteLog -Message "No Loxone Config or Miniserver updates were performed. Skipping final notification." -Level INFO
-    }
-}
-else {
+    # Only show final notification if an update action was performed
+    # if ($anyUpdatePerformed) { # Temporarily commented out to force notification for testing
+    #    WriteLog -Message "DEBUG: Calling Send-ToastNotification for final status..." -Level DEBUG # Added Log
+        $toastParams = @{ Text = "Loxone AutoUpdate Complete", "Loxone update process finished. Check logs for details." }
+        if ($LoxoneIconPath) { $toastParams.AppLogo = $LoxoneIconPath }
+        Send-ToastNotification @toastParams
+    # } else {
+    #    WriteLog -Message "No Loxone Config or Miniserver updates were performed. Skipping final notification." -Level INFO # Reverted Level Change
+    # }
+} # End of the 'if' block starting on line 705
+else { # This 'else' corresponds to the 'if' on line 705
     WriteLog -Message "Skipping Miniserver update because a valid Loxone Config path could not be determined (Path: '$LoxoneConfigExePathForMSUpdate')." -Level WARN
+} # End of the 'else' block starting on line 735
+
+# --- Final Exit Code Handling ---
+if ($script:ErrorOccurred) {
+    WriteLog -Message "Exiting with error code 1 due to detected errors." -Level ERROR
+    Exit 1
+} else {
+    WriteLog -Message "Exiting with code 0 (Success)." -Level INFO
+    Exit 0
 }
