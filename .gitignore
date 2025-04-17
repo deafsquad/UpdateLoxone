@@ -6,7 +6,7 @@
 !*.psm1
 !README.md
 !*.example
-
+!LoxoneUtils/
 
 
 # Keep this .gitignore file

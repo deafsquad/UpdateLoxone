@@ -7,7 +7,8 @@ using System.Security.Principal;
 using System.Text;
 using System.Diagnostics; // Added for potential future logging
 using System.ComponentModel; // Added for Win32Exception
-using System.Xml; // Added for CLIXML parsing
+using System.Xml; // Added for Xml
+using System.IO; // Added for pipe reading
 
 namespace RunAsUser
 {
@@ -976,7 +977,7 @@ namespace RunAsUser
         }
 
         // Gets the privileges associated with a token.
-        public static Dictionary<String, PrivilegeAttributes> GetTokenPrivileges(SafeHandle hToken)
+        public static Dictionary<string, PrivilegeAttributes> GetTokenPrivileges(SafeHandle hToken)
         {
             var privileges = new Dictionary<string, PrivilegeAttributes>();
             int bufferSize = 0;
@@ -1001,7 +1002,6 @@ namespace RunAsUser
                       Console.WriteLine(string.Format("[ERROR] GetTokenInformation (data retrieval) failed. Code: {0}", error));
                      throw new Win32Exception(error, "GetTokenInformation failed to retrieve privileges.");
                  }
-
 
                  // Marshal the initial part of the structure (PrivilegeCount)
                  NativeHelpers.TOKEN_PRIVILEGES privilegeInfo = (NativeHelpers.TOKEN_PRIVILEGES)Marshal.PtrToStructure(
@@ -1075,7 +1075,7 @@ namespace RunAsUser
                 {
                      int error = Marshal.GetLastWin32Error();
                      // Handle specific errors if needed, e.g., ERROR_INVALID_PARAMETER if the OS doesn't support it
-                     Console.WriteLine("[ERROR] GetTokenInformation (TokenElevationType) failed. Code: {error}");
+                     Console.WriteLine(string.Format("[ERROR] GetTokenInformation (TokenElevationType) failed. Code: {0}", error));
                      throw new Win32Exception(error, "Failed to get token elevation type.");
                 }
 
@@ -1217,10 +1217,11 @@ if (-not ([System.Management.Automation.PSTypeName]'RunAsUser.ProcessExtensions'
     # Define Log Path before try block
     $addTypeLogPath = Join-Path $PSScriptRoot "runasuser_addtype_debug.log"; if (Test-Path $addTypeLogPath) { Remove-Item $addTypeLogPath -Force }
     try {
-        Write-Host "DEBUG: Attempting Add-Type. Logging details to $addTypeLogPath"
+        # Write-Log -Level DEBUG -Message "Attempting Add-Type. Logging details to $addTypeLogPath"
         # Add -PassThru and redirect all streams to log file
-                Add-Type -TypeDefinition $script:source -Language CSharp -ReferencedAssemblies 'System.dll', 'System.Core.dll', 'System.Management.Automation.dll', 'System.Xml.dll' -ErrorAction Stop -Verbose
-        Write-Host "DEBUG: Add-Type command finished (check $addTypeLogPath for details)."
+            Add-Type -TypeDefinition $script:source -Language CSharp -ErrorAction Stop -Verbose -ReferencedAssemblies 'System.dll','System.Xml.dll','System.Core.dll'
+            # Write-Log -Level DEBUG -Message "Add-Type command finished (check $addTypeLogPath for details)    ." 
+            # removed -ReferencedAssemblies 'mscorlib.dll','System.dll','System.Xml.dll','System.Core.dll','System.Collections.dll','System.Console.dll','Microsoft.Win32.Primitives.dll','System.Xml.ReaderWriter.dll'
         # Check if the type exists
         # Attempt to get the type using reflection
         $typeName = "RunAsUser.ProcessExtensions"
@@ -1233,10 +1234,10 @@ if (-not ([System.Management.Automation.PSTypeName]'RunAsUser.ProcessExtensions'
                  # If not found, try getting it directly from the dynamic assembly created by Add-Type
                  $dynamicAssembly = [System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.FullName -like 'Microsoft.PowerShell.Commands.NewCompiler*,*' } | Select-Object -First 1
                  if ($null -ne $dynamicAssembly) {
-                     Write-Host "DEBUG: Found dynamic assembly: $($dynamicAssembly.FullName)" -ForegroundColor Gray
+                     # Write-Log -Level DEBUG -Message "Found dynamic assembly: $($dynamicAssembly.FullName)"
                      $foundType = $dynamicAssembly.GetType($typeName)
                  } else {
-                     Write-Host "DEBUG: Dynamic assembly from Add-Type not found." -ForegroundColor Gray
+                     # Write-Log -Level DEBUG -Message "Dynamic assembly from Add-Type not found."
                  }
             }
         } catch {
@@ -1244,7 +1245,7 @@ if (-not ([System.Management.Automation.PSTypeName]'RunAsUser.ProcessExtensions'
         }
 
         if ($null -ne $foundType) {
-             Write-Host "DEBUG: Type [$($foundType.FullName)] successfully found via reflection." -ForegroundColor Green
+             # Write-Log -Level DEBUG -Message "Type [$($foundType.FullName)] successfully found via reflection."
         } else {
              Write-Warning "DEBUG: Type [$typeName] NOT found after Add-Type (checked via reflection)."
         }
@@ -1267,9 +1268,10 @@ function Invoke-AsCurrentUser {
         [string]$FilePath,
 
         [Parameter()] # Arguments can be used with FilePath
-        [string]$Arguments, # Optional arguments for the executable
+        [string]$Arguments, # Optional arguments for the executable,
 
         [Parameter()]
+
         [Switch]$NoWait,
 
         [Parameter()]
@@ -1282,7 +1284,7 @@ function Invoke-AsCurrentUser {
         [Switch]$UseWindowsPowerShell, # Note: Affects powershell.exe path
 
         [Parameter()]
-        [Switch]$NonElevatedSession, # Maps to inverted 'elevated' in C#
+        [Switch]$Elevated, # Maps to 'elevated' in C#
 
         [Parameter()]
         [Switch]$Breakaway, # Maps to 'breakaway' in C#
@@ -1326,7 +1328,7 @@ function Invoke-AsCurrentUser {
     $csVisible = $Visible.IsPresent
     # $csWait = if ($NoWait.IsPresent) { 0 } else { -1 } # Original: 0 for no wait, -1 for infinite wait
     $csWait = if ($NoWait.IsPresent) { 0 } else { 30000 } # Use 30-second timeout (30000 ms) instead of infinite
-    $csElevated = -not $NonElevatedSession.IsPresent # Inverted logic
+    $csElevated = $Elevated.IsPresent # Inverted logic
     $csRedirectOutput = $CaptureOutput.IsPresent
     $csBreakaway = $Breakaway.IsPresent
     $csWorkDir = $null # Use null for working directory, C# default handles it
@@ -1334,21 +1336,21 @@ function Invoke-AsCurrentUser {
     # Call the C# static method
     try {
         # --- Log parameters being passed to C# ---
-        Write-Host "DEBUG (Invoke-AsCurrentUser): Calling StartProcessAsCurrentUser with:" -ForegroundColor Yellow
-        Write-Host "  appPath = '$FilePath'" -ForegroundColor Yellow
-        Write-Host "  cmdLine = '$Arguments'" -ForegroundColor Yellow
-        Write-Host "  workDir = '$csWorkDir'" -ForegroundColor Yellow
-        Write-Host "  visible = $csVisible" -ForegroundColor Yellow
-        Write-Host "  wait = $csWait" -ForegroundColor Yellow
-        Write-Host "  elevated = $csElevated" -ForegroundColor Yellow
-        Write-Host "  redirectOutput = $csRedirectOutput" -ForegroundColor Yellow
-        Write-Host "  breakaway = $csBreakaway" -ForegroundColor Yellow
+        Write-Log -Level DEBUG -Message "DEBUG (Invoke-AsCurrentUser): Calling StartProcessAsCurrentUser with:"
+        Write-Log -Level DEBUG -Message "  appPath = '$FilePath'"
+        Write-Log -Level DEBUG -Message "  cmdLine = '$Arguments'"
+        Write-Log -Level DEBUG -Message "  workDir = '$csWorkDir'"
+        Write-Log -Level DEBUG -Message "  visible = $csVisible"
+        Write-Log -Level DEBUG -Message "  wait = $csWait"
+        Write-Log -Level DEBUG -Message "  elevated = $csElevated"
+        Write-Log -Level DEBUG -Message "  redirectOutput = $csRedirectOutput"
+        Write-Log -Level DEBUG -Message "  breakaway = $csBreakaway"
         # --- End Log ---
 
-        Write-Host "DEBUG: About to call C# StartProcessAsCurrentUser..." # Added diagnostic log
+        Write-Log -Level DEBUG -Message "About to call C# StartProcessAsCurrentUser..." # Added diagnostic log
         $result = [RunAsUser.ProcessExtensions]::StartProcessAsCurrentUser(
             $appPath,         # Use determined application path
-            $commandLineArgs, # Use determined command line arguments
+            $commandLineArgs, # Use determined command line arguments (from -Arguments)
             $csWorkDir,       # Passed as null from PS, C# method handles null/empty check
             $csVisible,
             $csWait,
@@ -1377,7 +1379,7 @@ function Invoke-AsCurrentUser {
     } finally {
         # Clean up temp script file if it was created
         if ($tempScriptPath -and (Test-Path -LiteralPath $tempScriptPath -PathType Leaf)) {
-            Write-Host "DEBUG: Removing temp script file: $tempScriptPath" -ForegroundColor Gray
+            Write-Log -Level DEBUG -Message "Removing temp script file: $tempScriptPath"
             Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
         }
     }
@@ -1387,3 +1389,4 @@ function Invoke-AsCurrentUser {
 Export-ModuleMember -Function Invoke-AsCurrentUser
 
 # Removed the loop that tried to import from .\Public
+
