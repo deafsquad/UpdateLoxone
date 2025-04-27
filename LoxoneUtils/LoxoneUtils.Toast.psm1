@@ -59,13 +59,12 @@ function Get-LoxoneConfigToastAppId {
         Write-Log -Level Info -Message "Loxone Config path found ('$loxonePath'). Using hardcoded Loxone Config AppId: '$hardcodedAppIdFormat'"
         $appId = $hardcodedAppIdFormat
     } else {
-        # Loxone Config not found, use fallback AppId
-        $fallbackAppId = "Loxone.UpdateScript"
-        Write-Log -Level Info -Message "Loxone Config path not found. Using fallback AppId: '$fallbackAppId'"
-        $appId = $fallbackAppId
+        # Loxone Config not found, do not use a specific AppId (will default to PowerShell)
+        Write-Log -Level Info -Message "Loxone Config path not found. No specific AppId will be used for toast notifications."
+        $appId = $null # Return null when Loxone Config is not found
     }
 
-    Write-Log -Level Debug -Message "Get-LoxoneConfigToastAppId: Determined AppId '$appId'."
+    Write-Log -Level Debug -Message ("Get-LoxoneConfigToastAppId: Determined AppId '{0}'." -f ($appId | Out-String).Trim()) # Handle potential $null output
     Exit-Function
     return $appId
 }
