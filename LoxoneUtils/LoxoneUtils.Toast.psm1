@@ -53,11 +53,19 @@ function Get-LoxoneConfigToastAppId {
         } catch { Write-Log -Level Warn -Message "Error calling Get-LoxoneExePath: $($_.Exception.Message)"; $loxonePath = $null }
     } else { Write-Log -Level Debug -Message "Using pre-found path: '$loxonePath'" }
 
-    # Always prefer the hardcoded AppId for BurntToast consistency
-    Write-Log -Level Info -Message "Using hardcoded Loxone Config AppId: '$hardcodedAppIdFormat'"
-    $appId = $hardcodedAppIdFormat
+    # Determine AppId based on whether Loxone Config was found
+    if (-not [string]::IsNullOrEmpty($loxonePath)) {
+        # Loxone Config found, use its hardcoded AppId
+        Write-Log -Level Info -Message "Loxone Config path found ('$loxonePath'). Using hardcoded Loxone Config AppId: '$hardcodedAppIdFormat'"
+        $appId = $hardcodedAppIdFormat
+    } else {
+        # Loxone Config not found, use fallback AppId
+        $fallbackAppId = "Loxone.UpdateScript"
+        Write-Log -Level Info -Message "Loxone Config path not found. Using fallback AppId: '$fallbackAppId'"
+        $appId = $fallbackAppId
+    }
 
-    Write-Log -Level Debug -Message "Get-LoxoneConfigToastAppId: Found Loxone Config AppId '$appId'."
+    Write-Log -Level Debug -Message "Get-LoxoneConfigToastAppId: Determined AppId '$appId'."
     Exit-Function
     return $appId
 }
