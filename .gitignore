@@ -4,6 +4,7 @@
 # But keep PowerShell script files
 !*.ps1
 !*.psm1
+!*.psd1
 !README.md
 !*.example
 !LoxoneUtils/
