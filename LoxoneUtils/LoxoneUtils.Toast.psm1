@@ -156,71 +156,65 @@ function Update-PersistentToast {
             Write-Log -Level Debug -Message "Updated OverallProgress to Status '$($Global:PersistentToastData['OverallProgressStatus'])' (Weight: $($Global:PersistentToastData['CurrentWeight'])/$($Global:PersistentToastData['TotalWeight'])) and Value '$($Global:PersistentToastData['OverallProgressValue'])'"
         }
 
-        # --- Create or Update ---
+        # --- Create or Update using Data Binding ---
         if (-not $Global:PersistentToastInitialized) {
             # --- Create Toast on First Call using New-BurntToastNotification ---
             Write-Log -Level Debug -Message "Persistent toast not initialized. Creating with New-BurntToastNotification."
             try {
-                $localProgressBar = New-BTProgressBar -Status "ProgressBarStatus" -Value "ProgressBarValue" -Title "Task Progress"
-                $localOverallProgressBar = New-BTProgressBar -Status "OverallProgressStatus" -Value "OverallProgressValue" -Title "Overall Progress"
+                # Define progress bars using the keys from the data binding hashtable
+                $localProgressBar = New-BTProgressBar -Status "ProgressBarStatus" -Value "ProgressBarValue" -Title "Task Progress" -ErrorAction SilentlyContinue
+                $localOverallProgressBar = New-BTProgressBar -Status "OverallProgressStatus" -Value "OverallProgressValue" -Title "Overall Progress" -ErrorAction SilentlyContinue
                 $AppLogoPath = (Join-Path $PSScriptRoot '..\ms.png')
                 $NewToastParams = @{
                     UniqueIdentifier = $Global:PersistentToastId
-                    Text             = $Global:PersistentToastData['StatusText']
-                    ProgressBar      = @($localProgressBar, $localOverallProgressBar)
+                    Text             = "StatusText" # Bind to the key in DataBinding
+                    ProgressBar      = @($localProgressBar, $localOverallProgressBar) # Pass bars here
                     DataBinding      = $Global:PersistentToastData
                     AppLogo          = $AppLogoPath
                     SnoozeAndDismiss = $true
                     Silent           = $true
                     ErrorAction      = 'Stop'
                 }
-                $appIdToUse = $script:ResolvedToastAppId
-                if (-not [string]::IsNullOrEmpty($appIdToUse)) {
-                    $NewToastParams['AppId'] = $appIdToUse
-                }
-                Write-Log -Level Info -Message "DataBinding BEFORE Update-BTNotification call: $($Global:PersistentToastData | Out-String)"
-                Write-Log -Level Info -Message "UpdateParams BEFORE Update-BTNotification call: $($UpdateParams | Out-String)"
+                if (-not [string]::IsNullOrEmpty($script:ResolvedToastAppId)) { $NewToastParams['AppId'] = $script:ResolvedToastAppId }
+
+                # Safely log parameters
+                $newToastParamsString = $NewToastParams | Format-List | Out-String
+                if ($DebugPreference -ne 'SilentlyContinue') { Write-Log -Level Info -Message "NewToastParams BEFORE New-BurntToastNotification call:`n$newToastParamsString" }
+
                 New-BurntToastNotification @NewToastParams
                 $Global:PersistentToastInitialized = $true # Set flag AFTER successful creation
-                Write-Log -Level INFO -Message "Persistent toast created successfully via New-BurntToastNotification (AppId used: $(if ($appIdToUse) {$appIdToUse} else {'Default'}))."
-            } catch {
-                Write-Log -Level Error -Message "Error creating persistent toast on first update call: ($($_ | Out-String))"
+                Write-Log -Level INFO -Message "Persistent toast created successfully via New-BurntToastNotification (AppId used: $(if ($NewToastParams.ContainsKey('AppId')) {$NewToastParams['AppId']} else {'Default'}))."
+            } catch { # Catch ANY error during creation
+                Write-Log -Level Error -Message "Error creating persistent toast on first update call: ($($_ | Out-String))" # Original log
                 $Global:PersistentToastInitialized = $false # Reset flag on failure
-                return
             }
         } else {
-            # --- Submit Update using Update-BTNotification ---
-            Write-Log -Level Debug -Message "Persistent toast initialized. Attempting update via Update-BTNotification."
+            # --- Update Existing Toast using Update-BTNotification and DataBinding ---
+            Write-Log -Level Debug -Message "Persistent toast initialized. Updating via Update-BTNotification with DataBinding."
             try {
-                $currentToastId = $Global:PersistentToastId
-                $currentAppId = $script:ResolvedToastAppId
-                if ([string]::IsNullOrEmpty($currentToastId)) {
-                    Write-Log -Level Error -Message "CRITICAL: UniqueIdentifier is NULL or EMPTY before Update-BTNotification! Update will fail."
-                    return
-                }
                 $UpdateParams = @{
-                    UniqueIdentifier = $currentToastId
-                    DataBinding      = $Global:PersistentToastData
+                    UniqueIdentifier = $Global:PersistentToastId
+                    DataBinding      = $Global:PersistentToastData # Pass the *entire* updated hashtable
                     ErrorAction      = 'Stop'
                 }
-                if (-not [string]::IsNullOrEmpty($currentAppId)) {
-                    $UpdateParams['AppId'] = $currentAppId
-                }
-                Write-Log -Level Info -Message "DataBinding BEFORE Update-BTNotification call: $($Global:PersistentToastData | Out-String)"
-                Write-Log -Level Info -Message "UpdateParams BEFORE Update-BTNotification call: $($UpdateParams | Out-String)"
-                [void](Update-BTNotification @UpdateParams)
-                Write-Log -Level Debug -Message "Update-BTNotification called successfully (AppId used: $(if ($UpdateParams.ContainsKey('AppId')) {$UpdateParams['AppId']} else {'Default'}))."
+                if (-not [string]::IsNullOrEmpty($script:ResolvedToastAppId)) { $UpdateParams['AppId'] = $script:ResolvedToastAppId }
+
+                # Log parameters before update
+                $updateParamsString = $UpdateParams | Format-List | Out-String
+                if ($DebugPreference -ne 'SilentlyContinue') { Write-Log -Level Info -Message "UpdateParams BEFORE Update-BTNotification call:`n$updateParamsString" }
+
+                Update-BTNotification @UpdateParams
+                Write-Log -Level INFO -Message "Persistent toast updated successfully via Update-BTNotification (AppId used: $(if ($UpdateParams.ContainsKey('AppId')) {$UpdateParams['AppId']} else {'Default'}))."
             } catch {
-                Write-Log -Level Error -Message "Error updating persistent toast directly: ($($_ | Out-String))"
-                # Consider if we should try to re-create the toast here if update fails
+                Write-Log -Level Error -Message "Error updating persistent toast via Update-BTNotification: ($($_ | Out-String))"
             }
         }
-
     } catch { Write-Log -Level Error -Message "An unexpected error occurred during persistent toast update/creation logic: ($($_ | Out-String))" }
     finally { Exit-Function }
 }
 
 #endregion Progress Toast Function
+
 function Show-FinalStatusToast {
     [CmdletBinding()]
     param(
@@ -242,9 +236,10 @@ function Show-FinalStatusToast {
         $logPathForAction = $null
         if (-not [string]::IsNullOrEmpty($LogFileToShow)) { $logPathForAction = $LogFileToShow } elseif ($script:LogFilePath -and (Test-Path $script:LogFilePath)) { $logPathForAction = $script:LogFilePath }
         $chatScriptPath = Join-Path $PSScriptRoot '..\Send-GoogleChat.ps1' # Assuming relative path works
-        # Generate a unique ID for each final toast instance by adding a timestamp
-        $TimestampSuffix = Get-Date -Format 'yyyyMMddHHmmssfff'
-        $ToastGUID = $Global:PersistentToastId + "_Final_" + $TimestampSuffix
+        # Use the GLOBAL PersistentToastId to REPLACE the progress toast, even for errors.
+        # $TimestampSuffix = Get-Date -Format 'yyyyMMddHHmmssfff' # Removed timestamp suffix
+        # $ToastGUID = $Global:PersistentToastId + "_Final_" + $TimestampSuffix # Removed suffix logic
+        $ToastGUID = $Global:PersistentToastId + "_Final" # Use a different ID for the final toast
         Write-Log -Level Debug -Message "Using ToastGUID: $ToastGUID for final status toast (to replace progress)."
 
         # 2. Define Content Elements

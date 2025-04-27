@@ -14,10 +14,13 @@
             [Parameter(Mandatory = $true)] [int]$MaxLogFileSizeMB,
             # Switch to enable debug logging.
             [Parameter()][switch]$DebugMode,
-            # Path to the *directory* containing the installed LoxoneConfig.exe.
-            [Parameter(Mandatory = $true)] [string]$InstalledExePath,
+            # Path to the *directory* containing the installed LoxoneConfig.exe. # REMOVED - Not needed for URL-based update trigger
+            # [Parameter(Mandatory = $true)] [string]$InstalledExePath, # REMOVED
             # Path to the script's save folder (used for context).
-            [Parameter(Mandatory = $true)] [string]$ScriptSaveFolder
+            [Parameter(Mandatory = $true)] [string]$ScriptSaveFolder,
+            # Step info for toast updates
+            [Parameter(Mandatory = $false)][int]$StepNumber = 1, # Default if not passed
+            [Parameter(Mandatory = $false)][int]$TotalSteps = 1  # Default if not passed
         )
 
         Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
@@ -144,14 +147,16 @@
                         $originalParams.Uri = $versionUri # Set original URI
                         $originalParams.ErrorAction = 'Stop' # Ensure ErrorAction is Stop
  
-                        # Add AllowUnencryptedAuthentication directly if needed
-                        if ($originalParams.ContainsKey('Credential')) {
-                            $originalParams.AllowUnencryptedAuthentication = $true # RE-ADDED - Required by user's environment for HTTP+Credentials
-                            Write-Log -Message "Attempting HTTP request to $msIP (with credentials, AllowUnencryptedAuthentication=$true)" -Level WARN
-                        }
- 
+                        # Attempt HTTP connection
                         try {
-                            $responseObject = Invoke-WebRequest @originalParams
+                            # Modify hashtable directly and use standard splatting
+                            if ($originalParams.ContainsKey('Credential')) {
+                                Write-Log -Message "Attempting HTTP request to $msIP (with credentials, adding AllowUnencryptedAuthentication=$true)." -Level WARN
+                                $originalParams.AllowUnencryptedAuthentication = $true
+                            } else {
+                                Write-Log -Message "Attempting HTTP request to $msIP (without credentials)..." -Level DEBUG
+                            }
+                            $responseObject = Invoke-WebRequest @originalParams # Use standard splatting
                             Write-Log -Message "Connection successful using $($originalScheme.ToUpper()) URI: $versionUri" -Level INFO
                             $msVersionCheckSuccess = $true
                         } catch [System.Net.WebException] {
@@ -160,19 +165,16 @@
                                 Write-Log -Message "$($originalScheme.ToUpper()) check returned 503 (Updating). Assuming update needed/in progress." -Level WARN
                                 $msVersionCheckSuccess = $true # Treat 503 as a reason to proceed
                             }
-                            # Check for the specific authentication error
-                            elseif ($_.Exception.Message -like '*AllowUnencryptedAuthentication*') {
-                                Write-Log -Message "Failed to connect using $($originalScheme.ToUpper()) URI: $($_.Exception.Message) Credentials blocked over HTTP." -Level ERROR
-                                # $msVersionCheckSuccess remains false
-                            }
                             # Log other WebExceptions
                             else {
-                                Write-Log -Message "Failed to connect using $($originalScheme.ToUpper()) URI (WebException): $($_.Exception.Message). Status: $($_.Exception.Response.StatusCode | Out-String -Stream)" -Level WARN
+                                Write-Log -Message "Failed to connect using $($originalScheme.ToUpper()) URI (WebException): $($_.Exception.Message). Status: $($_.Exception.Response.StatusCode | Out-String -Stream)" -Level ERROR # Keep as ERROR
+                                $script:ErrorOccurred = $true # Ensure error flag is set
                                 # $msVersionCheckSuccess remains false
                             }
                         } catch {
                             # Log other general errors
                             Write-Log -Message "Unexpected error during $($originalScheme.ToUpper()) connection attempt: $($_.Exception.Message)" -Level ERROR
+                            $script:ErrorOccurred = $true # Ensure error flag is set
                             # $msVersionCheckSuccess remains false
                         }
                     }
@@ -195,8 +197,10 @@
                         Write-Log -Message "Comparing current version (${normalizedCurrentVersion}) with desired version (${DesiredVersion})." -Level DEBUG
                         if ($normalizedCurrentVersion -ne $DesiredVersion) {
                             Write-Log -Message "Update required for Miniserver at '$msIP' (Current: ${normalizedCurrentVersion}, Desired: ${DesiredVersion}). Triggering update..." -Level "INFO"
-                            Update-PersistentToast -NewStatus "Loxone AutoUpdate: Starting update for Miniserver ${msIP}..."
-
+                            # Update toast using correct parameters
+                            $toastParamsMSStart = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "Starting update for MS ${msIP}..." }
+                            Update-PersistentToast @toastParamsMSStart
+    
                             # Construct the full URI including credentials if they exist
                             $uriForUpdate = $versionUri # Start with the base version URI (http://host/dev/cfg/version)
                             if ($credential) {
@@ -209,8 +213,11 @@
                             $invokeParams = @{
                                 MiniserverUri = $uriForUpdate # Pass the full URI
                                 NormalizedDesiredVersion = $DesiredVersion
-                                Credential = $credential # Pass credential object separately
-                            }
+                                Credential = $credential # Pass credential object separately (Removed comma)
+                                # Pass step info down
+                                StepNumber = $StepNumber
+                                TotalSteps = $TotalSteps
+                            } # Corrected closing brace placement
                             $updateSuccess = Invoke-MiniserverUpdate @invokeParams
                             if ($updateSuccess) {
                                 $anyMSUpdated = $true
@@ -227,6 +234,7 @@
                     } # End of if/elseif for successful connection check
                 } catch { # Outer catch for the whole MS processing
                     Write-Log -Message "Caught exception during processing for Miniserver '$msIP'. Error: $($_.Exception.Message)" -Level ERROR # Existing log, Removed -ForceLog
+                    $script:ErrorOccurred = $true # Set the main script error flag
                     Write-Log -Message "Continuing script execution after error processing Miniserver '$msIP'." -Level INFO # Added Log, Removed -ForceLog
                 } # End outer try/catch for this MS
             } # End foreach loop
@@ -235,6 +243,7 @@
         } # End main try block
         catch { # Main catch block
             Write-Log -Message "Unexpected error caught in main Update-MS try block: $($_.Exception.Message)" -Level ERROR
+            $script:ErrorOccurred = $true # Set the main script error flag
         } finally { # Main finally block
             Exit-Function # Corrected call
         }
@@ -250,10 +259,12 @@
             # The target version string (normalized) for verification after update.
             [Parameter(Mandatory=$true)][string]$NormalizedDesiredVersion,
             # Optional PSCredential object for authenticating requests.
-            [Parameter()][System.Management.Automation.PSCredential]$Credential = $null
+            [Parameter()][System.Management.Automation.PSCredential]$Credential = $null,
+            # Step info for toast updates
+            [Parameter(Mandatory = $false)][int]$StepNumber = 1, # Default if not passed
+            [Parameter(Mandatory = $false)][int]$TotalSteps = 1  # Default if not passed
         )
         Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-
         try {
         # Derive values needed for logging, pinging, and requests from MiniserverUri
         $redactedUri = Get-RedactedPassword $MiniserverUri
@@ -288,7 +299,8 @@
 
             # --- Wait for Miniserver Reboot and Verify Update (Using HTTP Polling) ---
             Write-Log -Message "Waiting for Miniserver ${hostForPing} to become responsive after update trigger..." -Level INFO
-            Update-PersistentToast -NewStatus "Waiting for Miniserver ${hostForPing} to reboot..."
+            $toastParamsMSReboot = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "Waiting for MS ${hostForPing} to reboot..." }
+            Update-PersistentToast @toastParamsMSReboot
 
             $startTime = Get-Date
             $timeout = New-TimeSpan -Minutes 15 # Total timeout for the Miniserver to come back and respond correctly
@@ -314,15 +326,45 @@
             while (((Get-Date) - $startTime) -lt $timeout) {
                 try {
                     Write-Log -Message "Polling $verificationUri ..." -Level DEBUG
-                    $lastResponse = Invoke-WebRequest @verifyParams # ErrorAction is Stop
-                    
-                    # If we get here, the request succeeded (likely 200 OK)
+                    # Dynamically build and execute the command for polling
+                    # Modify hashtable directly and use standard splatting for polling
+                    $pollHeaders = @{} # Initialize headers for polling
+                    # Check if Credential exists AND scheme is http before adding Authorization header
+                    if ($verifyParams.ContainsKey('Credential') -and $scheme -eq 'http') {
+                        Write-Log -Message "Polling HTTP $hostForPing (with credentials, using Authorization header)." -Level WARN
+                        $pollCredentialObject = $verifyParams.Credential
+                        $pollUserName = $pollCredentialObject.UserName
+                        $pollPassword = $pollCredentialObject.GetNetworkCredential().Password
+                        $pollEncodedCredentials = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${pollUserName}:${pollPassword}"))
+                        $pollHeaders.Authorization = "Basic $pollEncodedCredentials"
+                        # Remove Credential from splatting params as we're using header auth
+                        $verifyParams.Remove('Credential')
+                    }
+                    $lastResponse = Invoke-WebRequest @verifyParams -Headers $pollHeaders # Use standard splatting + Headers
+                    # If we get here, the request succeeded (status code check)
                     if ($lastResponse.StatusCode -eq 200) {
-                        Write-Log -Message "Miniserver ${hostForPing} responded with 200 OK." -Level INFO
-                        $msResponsive = $true
-                        break # Exit the while loop
-                    } else {
-                        # Log unexpected success code, but continue polling
+                        Write-Log -Message "Miniserver ${hostForPing} responded with 200 OK. Checking version..." -Level INFO
+                        $msResponsive = $true # Mark as responsive
+                        # Now check the version from this successful response
+                        try {
+                            $xmlCurrent = [xml]$lastResponse.Content
+                            $versionCurrent = $xmlCurrent.LL.value
+                            if ([string]::IsNullOrEmpty($versionCurrent)) { throw "Could not find version value in current poll response." }
+                            $normalizedVersionCurrent = Convert-VersionString $versionCurrent
+
+                            if ($normalizedVersionCurrent -eq $NormalizedDesiredVersion) {
+                                Write-Log -Message "Version matches desired version ($NormalizedDesiredVersion). Update successful." -Level INFO
+                                $verificationSuccess = $true # Set success flag
+                                break # Exit the while loop - SUCCESS
+                            } else {
+                                Write-Log -Message "Miniserver ${hostForPing} responded with 200 OK, but version is still '$normalizedVersionCurrent' (Expected '$NormalizedDesiredVersion'). Continuing poll..." -Level DEBUG
+                                # Do not break, continue polling after sleep
+                            }
+                        } catch {
+                            Write-Log -Message "Error parsing version from 200 OK response: $($_.Exception.Message). Continuing poll..." -Level WARN
+                            # Do not break, continue polling after sleep
+                        }
+                    } else { # Handle non-200 success codes
                         Write-Log -Message "Miniserver ${hostForPing} responded with unexpected status $($lastResponse.StatusCode). Continuing poll..." -Level WARN
                         Start-Sleep -Seconds $pollInterval.TotalSeconds
                     }
@@ -345,59 +387,40 @@
                 }
             } # End while loop
 
-            # --- Verification after Polling ---
-            if ($msResponsive -and $lastResponse) {
-                Write-Log -Message "Miniserver ${hostForPing} is responsive. Verifying version..." -Level INFO
-                Update-PersistentToast -NewStatus "Miniserver ${hostForPing} is responsive. Verifying version..."
-                try {
-                    $xmlAfterUpdate = [xml]$lastResponse.Content
-                    $versionAfterUpdate = $xmlAfterUpdate.LL.value
-                    if ([string]::IsNullOrEmpty($versionAfterUpdate)) {
-                        throw "Could not find version value in Miniserver XML response after update."
-                    }
-
-                    $normalizedVersionAfterUpdate = Convert-VersionString $versionAfterUpdate
-
-                    if ($normalizedVersionAfterUpdate) {
-                        Write-Log -Message "Version after update: ${normalizedVersionAfterUpdate}" -Level INFO
-                        if ($normalizedVersionAfterUpdate -eq $NormalizedDesiredVersion) {
-                            Write-Log -Message "SUCCESS: Miniserver ${hostForPing} successfully updated and verified to version ${NormalizedDesiredVersion}." -Level INFO
-                            Update-PersistentToast -NewStatus "SUCCESS: Miniserver ${hostForPing} updated to ${NormalizedDesiredVersion}."
-                            $verificationSuccess = $true
-                        } else {
-                            Write-Log -Message "FAILURE: Miniserver ${hostForPing} update verification failed. Version after update (${normalizedVersionAfterUpdate}) does not match desired (${NormalizedDesiredVersion})." -Level ERROR
-                            Update-PersistentToast -NewStatus "FAILED: Miniserver ${hostForPing} update verification failed. Found ${normalizedVersionAfterUpdate}, expected ${NormalizedDesiredVersion}."
-                            $verificationSuccess = $false
-                        }
-                    } else {
-                         Write-Log -Message "FAILURE: Could not determine a valid version for Miniserver ${hostForPing} after update attempt. Found raw value: '$versionAfterUpdate'." -Level ERROR
-                         Update-PersistentToast -NewStatus "FAILED: Could not verify Miniserver ${hostForPing} version after update."
-                         $verificationSuccess = $false
-                    }
-                } catch {
-                    Write-Log -Message "FAILURE: Could not verify Miniserver ${hostForPing} version after update. Error during verification processing: $($_.Exception.Message)" -Level ERROR
-                    Update-PersistentToast -NewStatus "FAILED: Could not verify Miniserver ${hostForPing} version after update (Error: $($_.Exception.Message))."
-                    $verificationSuccess = $false
-                }
+            # --- Final Status Check After Loop ---
+            # This block now executes only if the loop finished (either by break or timeout)
+            if ($verificationSuccess) {
+                # Success was already determined and logged within the loop
+                Write-Log -Message "Verification successful for Miniserver ${hostForPing} (Version: $NormalizedDesiredVersion)." -Level INFO
+                # Toast was already updated on success within the loop
+            } elseif ($msResponsive) {
+                # Loop finished, MS was responsive at some point, but version never matched (or couldn't be parsed)
+                Write-Log -Message "FAILURE: Miniserver ${hostForPing} became responsive, but version verification failed within the timeout period. Final checked version might be old or unparsable." -Level ERROR
+                $toastParamsMSFailVerifyLoop = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: MS ${hostForPing} verification failed (Timeout/Version Mismatch)." }
+                Update-PersistentToast @toastParamsMSFailVerifyLoop
+                $verificationSuccess = $false # Ensure it's false
             } else {
-                # Loop timed out
+                # Loop timed out without the Miniserver ever becoming responsive with 200 OK
                 Write-Log -Message "FAILURE: Miniserver ${hostForPing} did not become responsive with a 200 OK status at $verificationUri within the timeout period ($($timeout.TotalMinutes) minutes)." -Level ERROR
-                Update-PersistentToast -NewStatus "FAILED: Miniserver ${hostForPing} did not respond correctly after update attempt."
-                $verificationSuccess = $false
+                $toastParamsMSFailTimeout = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: MS ${hostForPing} did not respond after update." }
+                Update-PersistentToast @toastParamsMSFailTimeout
+                $verificationSuccess = $false # Ensure it's false
             }
-            
-            return $verificationSuccess # Return true only if version verified successfully
-            # --- End Wait and Verify (Using HTTP Polling) ---
 
-        } catch {
+        } catch { # Catch for the main update/verify try block (line 279)
+            # Removed duplicate inner catch block
             Write-Log -Message "Error triggering update for '${redactedUri}': $($_.Exception.Message)" -Level ERROR
-            Update-PersistentToast -NewStatus "FAILED: Error triggering update for Miniserver ${hostForPing}: $($_.Exception.Message)."
-            return $false # Indicate failure
-        }
-        } finally {
+            $script:ErrorOccurred = $true # Set the main script error flag
+            $toastParamsMSFailTrigger = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: Error triggering update for MS ${hostForPing}: $($_.Exception.Message)." }
+                Update-PersistentToast @toastParamsMSFailTrigger
+                return $false # Indicate failure
+            } # End catch for main try block (line 278)
+        } finally { # Finally for main try block (line 267)
             Exit-Function
         }
-    } # Closing brace for InvokeMiniserverUpdate
+        # Return statement should be outside the finally block but inside the function scope
+        return $verificationSuccess
+    } # Closing brace for Invoke-MiniserverUpdate
 #endregion Miniserver Update Logic
 
 # Ensure functions are available (though NestedModules in PSD1 is the primary mechanism)

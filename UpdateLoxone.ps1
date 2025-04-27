@@ -69,7 +69,7 @@ If specified, the script will skip the update if Loxone Config, Monitor, or Live
 param(
     [ValidateSet('Test', 'Public')]
     [string]$Channel = "Test",
-    [bool]$DebugMode = $false, # Changed back to bool with default
+    [switch]$DebugMode,
     [bool]$EnableCRC = $true, # Changed back to bool with default
     [ValidateSet('silent', 'verysilent')]
     [string]$InstallMode = "verysilent",
@@ -80,6 +80,8 @@ param(
     [switch]$RegisterTask, # New switch to trigger task registration
     [switch]$SkipUpdateIfAnyProcessIsRunning, # New switch
     [bool]$UpdateLoxoneApp = $true, # Changed back to bool with default
+    [ValidateSet('Test', 'Beta', 'Release', 'Internal', 'InternalV2', 'Latest')]
+    [string]$UpdateLoxoneAppChannel = "Latest", # New parameter for App channel
     [string]$PassedLogFile = $null # Internal: Used when re-launching elevated to specify the log file
 )
 # XML Signature Verification Function removed - Test showed it's not feasible with current structure
@@ -219,15 +221,15 @@ try {
 
         # Now import the rest of the modules
         $ModulesToImport = @(
-            # 'LoxoneUtils.Logging.psm1', # Already imported
-            'LoxoneUtils.ErrorHandling.psm1',
-            'LoxoneUtils.Installation.psm1',
-            'LoxoneUtils.Miniserver.psm1',
-            'LoxoneUtils.Network.psm1',
-            'LoxoneUtils.System.psm1',
-            'LoxoneUtils.Toast.psm1',
-            'LoxoneUtils.Utility.psm1',
-            'LoxoneUtils.psm1'                  # Root module file
+            # 'LoxoneUtils.Logging.psm1', # Already imported first
+            'LoxoneUtils.Utility.psm1',     # Import Utility functions (like Enter/Exit-Function) early
+            'LoxoneUtils.ErrorHandling.psm1', # Import Error Handling early
+            'LoxoneUtils.Installation.psm1',  # Depends on Utility/Logging
+            'LoxoneUtils.Network.psm1',       # Depends on Utility/Logging
+            'LoxoneUtils.System.psm1',        # Depends on Utility/Logging
+            'LoxoneUtils.Toast.psm1',         # Depends on Utility/Logging
+            'LoxoneUtils.Miniserver.psm1',    # Depends on Utility/Logging, Network, Toast
+            'LoxoneUtils.psm1'                  # Root module file (usually last)
         )
 
         foreach ($moduleFile in $ModulesToImport) {
@@ -364,111 +366,112 @@ if ($script:isRunningAsSystem) {
 $TaskName = "LoxoneUpdateTask" # Define Task Name early for both registration paths
 # --- Automatic Task Registration/Update for Interactive Runs ---
 if ($script:IsInteractiveRun) {
-if ($script:IsInteractive -and -not $script:isRunningAsSystem -and -not $RegisterTask.IsPresent) {
-    # This block handles interactive runs by a user (not SYSTEM) without the -RegisterTask switch.
-    # FIRST: Check if the task needs updating WITHOUT requiring admin rights.
-    # --- START: Pre-elevation Task Existence Check ---
-    Write-Log -Level DEBUG -Message "Performing pre-elevation check for task '$TaskName' existence using schtasks.exe..."
-    $taskExistsPreCheck = $false # Assume not found initially
-    $schtasksCmd = "schtasks.exe /query /tn `"$TaskName`" 2>&1" # Quote task name, redirect stderr
-    Write-Log -Level DEBUG -Message "Executing pre-check command: $schtasksCmd"
-    $schtasksOutput = @() # Initialize as array to capture multi-line output properly
-    try {
-        $schtasksOutput = Invoke-Expression $schtasksCmd
-        # Join array output into a single string for easier searching, handle potential null/empty output
-        $schtasksOutputString = ($schtasksOutput | Out-String).Trim()
-        Write-Log -Level DEBUG -Message "Raw schtasks.exe output:`n$schtasksOutputString"
-    } catch {
-        # Catch errors during Invoke-Expression itself (less likely for schtasks, but possible)
-        $schtasksOutputString = "ERROR executing schtasks: $($_.Exception.Message)"
-        Write-Log -Level ERROR -Message "Error executing schtasks.exe pre-check: $($_.Exception.Message)"
-        Write-Log -Level DEBUG -Message "Raw schtasks.exe output (on error):`n$schtasksOutputString"
-    }
-
-    # Interpret the output
-    $foundAccessDenied = $schtasksOutputString -like "*Access is denied.*"
-    Write-Log -Level DEBUG -Message "Output contains 'Access is denied.': $foundAccessDenied"
-    $foundCannotFind = $schtasksOutputString -like "*ERROR: The system cannot find the file specified.*"
-    Write-Log -Level DEBUG -Message "Output contains 'cannot find the file specified.': $foundCannotFind"
-
-    # Logic: Task likely exists if access is denied OR if no error is found (implies successful query)
-    if ($foundAccessDenied -or (-not $foundCannotFind -and -not $foundAccessDenied)) {
-         # If access denied, it exists but we can't query details.
-         # If neither error is found, assume the query succeeded, meaning it exists.
-        $taskExistsPreCheck = $true
-        Write-Log -Level DEBUG -Message "Inferred task '$TaskName' exists based on schtasks output."
-    } else {
-        # If 'cannot find' error is present, it doesn't exist.
-        $taskExistsPreCheck = $false
-        Write-Log -Level DEBUG -Message "Inferred task '$TaskName' does NOT exist based on schtasks output."
-    }
-    Write-Log -Level DEBUG -Message "Final pre-check result: `$taskExistsPreCheck = $taskExistsPreCheck"
-    # --- END: Pre-elevation Task Existence Check ---
-
-    # Log message based on pre-check result
-    if (-not $taskExistsPreCheck) {
-        Write-Log -Message "Task '$TaskName' requires registration or update (based on pre-check)." -Level INFO
-    }
-
-    # SECOND: Proceed with admin check/elevation if running interactively as non-admin without -RegisterTask.
-    # The elevated process will determine if action is needed.
-        if ($script:IsAdminRun) {
-            # User is Admin, register/update the task directly using the function
-            Write-Log -Message "Running interactively as Admin user. Ensuring scheduled task '$TaskName' is registered/updated via function." -Level INFO
-            try {
-                Register-ScheduledTaskForScript -ScriptPath $MyInvocation.MyCommand.Definition -TaskName $TaskName -ScheduledTaskIntervalMinutes $ScheduledTaskIntervalMinutes -ErrorAction Stop
-            } catch {
-                Write-Log -Message "Failed to register/update task via function even as Admin: $($_.Exception.Message)" -Level ERROR
-                if ($script:IsInteractive) { Write-Host "ERROR: Failed to register/update the scheduled task '$TaskName' even though running as Admin. Check logs." -ForegroundColor Red }
-            }
-        } else {
-            # User is NOT Admin. Check if elevation is required based on pre-check.
-            if ($taskExistsPreCheck -eq $false) {
-                # Task likely doesn't exist, elevation is required. Original logic follows (now indented):
-            # User is NOT Admin, elevation is required. Attempt to relaunch with elevation.
-            Write-Log -Message "Running interactively as non-Admin user. Elevation is required to register/update the scheduled task '$TaskName'. Attempting to relaunch with elevation..." -Level WARN
-            try {
-                # Construct the command string for the elevated process using -Command
-                $commandString = "& '$($MyInvocation.MyCommand.Definition)' -RegisterTask" # Call script, add mandatory switch
-                # Add string parameters with internal quoting
-                $commandString += " -Channel ""$Channel"""
-                $commandString += " -InstallMode ""$InstallMode"""
-                $commandString += " -ScriptSaveFolder ""$ScriptSaveFolder"""
-                $commandString += " -PassedLogFile ""$($global:LogFile)"""
-                # Add integer parameters directly
-                $commandString += " -MaxLogFileSizeMB $MaxLogFileSizeMB"
-                $commandString += " -ScheduledTaskIntervalMinutes $ScheduledTaskIntervalMinutes"
-                # Add boolean parameters using 1/0
-                $commandString += " -EnableCRC $(if ($EnableCRC) { 1 } else { 0 })"
-                $commandString += " -UpdateLoxoneApp $(if ($UpdateLoxoneApp) { 1 } else { 0 })"
-                $commandString += " -DebugMode $(if ($DebugMode) { 1 } else { 0 })"
-                # Add switch parameters conditionally
-                if ($CloseApplications.IsPresent) { $commandString += " -CloseApplications" }
-                if ($SkipUpdateIfAnyProcessIsRunning.IsPresent) { $commandString += " -SkipUpdateIfAnyProcessIsRunning" }
-
-                Write-Log -Message "Constructed Command string for elevation: $commandString" -Level DEBUG
-                # Attempt to start the elevated process and wait for it
-                # --- START DEBUG: Log full elevation command ---
-                # Note: The log below shows the command string as passed to -Command.
-                Write-Log -Message "DEBUG: Elevating with: FilePath='powershell.exe', ArgumentList='-Command', ""$commandString"", Verb='RunAs', Wait=`$true" -Level DEBUG
-                # --- END DEBUG ---
-                # Use -Command with the constructed string
-                Start-Process powershell.exe -Verb RunAs -ArgumentList "-Command", $commandString -Wait -ErrorAction Stop
-                Write-Log -Message "Successfully launched and waited for elevated process to handle task registration for '$TaskName'." -Level INFO
-            } catch {
-                # Log error if elevation fails
-                Write-Log -Message "Failed to launch or wait for elevated process for task registration. User may have cancelled UAC prompt or another error occurred: $($_.Exception.Message)" -Level ERROR
-                if ($script:IsInteractive) { Write-Host "ERROR: Could not elevate to register/update the scheduled task '$TaskName'. Please run the script as Administrator or use the '-RegisterTask' switch in an Administrator PowerShell session." -ForegroundColor Red }
-                # Do NOT exit here, allow the script to continue if possible, but log the failure.
-            }
-            } else {
-                # Task likely exists based on pre-check, skip elevation attempt.
-                Write-Log -Message "Running interactively as non-Admin user, but task pre-check indicates task '$TaskName' likely exists (`$taskExistsPreCheck` = $taskExistsPreCheck). Skipping elevation attempt." -Level INFO
-                # Decide what to do here. Maybe just proceed? Or exit? For now, just log and let the script continue.
-                # The main logic later might still fail if it needs admin rights for something else, but we avoid unnecessary elevation for the task check.
-            }
+    if ($script:IsInteractive -and -not $script:isRunningAsSystem -and -not $RegisterTask.IsPresent) {
+        # This block handles interactive runs by a user (not SYSTEM) without the -RegisterTask switch.
+        # FIRST: Check if the task needs updating WITHOUT requiring admin rights.
+        # --- START: Pre-elevation Task Existence Check ---
+        Write-Log -Level DEBUG -Message "Performing pre-elevation check for task '$TaskName' existence using schtasks.exe..."
+        $taskExistsPreCheck = $false # Assume not found initially
+        $schtasksCmd = "schtasks.exe /query /tn `"$TaskName`" 2>&1" # Quote task name, redirect stderr
+        Write-Log -Level DEBUG -Message "Executing pre-check command: $schtasksCmd"
+        $schtasksOutput = @() # Initialize as array to capture multi-line output properly
+        try {
+            $schtasksOutput = Invoke-Expression $schtasksCmd
+            # Join array output into a single string for easier searching, handle potential null/empty output
+            $schtasksOutputString = ($schtasksOutput | Out-String).Trim()
+            Write-Log -Level DEBUG -Message "Raw schtasks.exe output:`n$schtasksOutputString"
+        } catch {
+            # Catch errors during Invoke-Expression itself (less likely for schtasks, but possible)
+            $schtasksOutputString = "ERROR executing schtasks: $($_.Exception.Message)"
+            Write-Log -Level ERROR -Message "Error executing schtasks.exe pre-check: $($_.Exception.Message)"
+            Write-Log -Level DEBUG -Message "Raw schtasks.exe output (on error):`n$schtasksOutputString"
         }
-    # Removed closing brace for the removed 'if ($taskNeedsUpdate)' check above.
+
+        # Interpret the output
+        $foundAccessDenied = $schtasksOutputString -like "*Access is denied.*"
+        Write-Log -Level DEBUG -Message "Output contains 'Access is denied.': $foundAccessDenied"
+        $foundCannotFind = $schtasksOutputString -like "*ERROR: The system cannot find the file specified.*"
+        Write-Log -Level DEBUG -Message "Output contains 'cannot find the file specified.': $foundCannotFind"
+
+        # Logic: Task likely exists if access is denied OR if no error is found (implies successful query)
+        if ($foundAccessDenied -or (-not $foundCannotFind -and -not $foundAccessDenied)) {
+             # If access denied, it exists but we can't query details.
+             # If neither error is found, assume the query succeeded, meaning it exists.
+            $taskExistsPreCheck = $true
+            Write-Log -Level DEBUG -Message "Inferred task '$TaskName' exists based on schtasks output."
+        } else {
+            # If 'cannot find' error is present, it doesn't exist.
+            $taskExistsPreCheck = $false
+            Write-Log -Level DEBUG -Message "Inferred task '$TaskName' does NOT exist based on schtasks output."
+        }
+        Write-Log -Level DEBUG -Message "Final pre-check result: `$taskExistsPreCheck = $taskExistsPreCheck"
+        # --- END: Pre-elevation Task Existence Check ---
+
+        # Log message based on pre-check result
+        if (-not $taskExistsPreCheck) {
+            Write-Log -Message "Task '$TaskName' requires registration or update (based on pre-check)." -Level INFO
+        }
+
+        # SECOND: Proceed with admin check/elevation if running interactively as non-admin without -RegisterTask.
+        # The elevated process will determine if action is needed.
+            if ($script:IsAdminRun) {
+                # User is Admin, register/update the task directly using the function
+                Write-Log -Message "Running interactively as Admin user. Ensuring scheduled task '$TaskName' is registered/updated via function." -Level INFO
+                try {
+                    Register-ScheduledTaskForScript -ScriptPath $MyInvocation.MyCommand.Definition -TaskName $TaskName -ScheduledTaskIntervalMinutes $ScheduledTaskIntervalMinutes -ErrorAction Stop
+                } catch {
+                    Write-Log -Message "Failed to register/update task via function even as Admin: $($_.Exception.Message)" -Level ERROR
+                    if ($script:IsInteractive) { Write-Host "ERROR: Failed to register/update the scheduled task '$TaskName' even though running as Admin. Check logs." -ForegroundColor Red }
+                }
+            } else {
+                # User is NOT Admin. Check if elevation is required based on pre-check.
+                if ($taskExistsPreCheck -eq $false) {
+                    # Task likely doesn't exist, elevation is required. Original logic follows (now indented):
+                # User is NOT Admin, elevation is required. Attempt to relaunch with elevation.
+                Write-Log -Message "Running interactively as non-Admin user. Elevation is required to register/update the scheduled task '$TaskName'. Attempting to relaunch with elevation..." -Level WARN
+                try {
+                    # Construct the command string for the elevated process using -Command
+                    $commandString = "& '$($MyInvocation.MyCommand.Definition)' -RegisterTask" # Call script, add mandatory switch
+                    # Add string parameters with internal quoting
+                    $commandString += " -Channel ""$Channel"""
+                    $commandString += " -InstallMode ""$InstallMode"""
+                    $commandString += " -ScriptSaveFolder ""$ScriptSaveFolder"""
+                    $commandString += " -PassedLogFile ""$($global:LogFile)"""
+                    # Add integer parameters directly
+                    $commandString += " -MaxLogFileSizeMB $MaxLogFileSizeMB"
+                    $commandString += " -ScheduledTaskIntervalMinutes $ScheduledTaskIntervalMinutes"
+                    # Add boolean parameters using 1/0
+                    $commandString += " -EnableCRC $(if ($EnableCRC) { 1 } else { 0 })"
+                    $commandString += " -UpdateLoxoneApp $(if ($UpdateLoxoneApp) { 1 } else { 0 })"
+                    $commandString += " -DebugMode $(if ($DebugMode) { 1 } else { 0 })"
+                    # Add switch parameters conditionally
+                    if ($CloseApplications.IsPresent) { $commandString += " -CloseApplications" }
+                    if ($SkipUpdateIfAnyProcessIsRunning.IsPresent) { $commandString += " -SkipUpdateIfAnyProcessIsRunning" }
+
+                    Write-Log -Message "Constructed Command string for elevation: $commandString" -Level DEBUG
+                    # Attempt to start the elevated process and wait for it
+                    # --- START DEBUG: Log full elevation command ---
+                    # Note: The log below shows the command string as passed to -Command.
+                    Write-Log -Message "DEBUG: Elevating with: FilePath='powershell.exe', ArgumentList='-Command', ""$commandString"", Verb='RunAs', Wait=`$true" -Level DEBUG
+                    # --- END DEBUG ---
+                    # Use -Command with the constructed string
+                    Start-Process powershell.exe -Verb RunAs -ArgumentList "-Command", $commandString -Wait -ErrorAction Stop
+                    Write-Log -Message "Successfully launched and waited for elevated process to handle task registration for '$TaskName'." -Level INFO
+                } catch {
+                    # Log error if elevation fails
+                    Write-Log -Message "Failed to launch or wait for elevated process for task registration. User may have cancelled UAC prompt or another error occurred: $($_.Exception.Message)" -Level ERROR
+                    if ($script:IsInteractive) { Write-Host "ERROR: Could not elevate to register/update the scheduled task '$TaskName'. Please run the script as Administrator or use the '-RegisterTask' switch in an Administrator PowerShell session." -ForegroundColor Red }
+                    # Do NOT exit here, allow the script to continue if possible, but log the failure.
+                }
+                } else {
+                    # Task likely exists based on pre-check, skip elevation attempt.
+                    Write-Log -Message "Running interactively as non-Admin user, but task pre-check indicates task '$TaskName' likely exists (`$taskExistsPreCheck` = $taskExistsPreCheck). Skipping elevation attempt." -Level INFO
+                    # Decide what to do here. Maybe just proceed? Or exit? For now, just log and let the script continue.
+                    # The main logic later might still fail if it needs admin rights for something else, but we avoid unnecessary elevation for the task check.
+                }
+            }
+        # Removed closing brace for the removed 'if ($taskNeedsUpdate)' check above.
+    }
 }
 # --- End Automatic Task Registration ---
 
@@ -507,7 +510,6 @@ if ($RegisterTask) {
              exit 1
         }
     }
-}
 }
 # The elseif condition previously on line 788 is now redundant because the interactive admin case
 # is handled earlier (around line 698+) which now also calls the Register-ScheduledTaskForScript function.
@@ -613,54 +615,142 @@ if (-not ([long]::TryParse($updateNode.FileSize, [ref]$ExpectedZipSize))) { Writ
 $updateInfoMsg = "(Channel: $Channel):$LatestVersion, ${ExpectedZipSize}B, $ZipUrl"; if ($EnableCRC) { $updateInfoMsg += ", Expected CRC $ExpectedCRC" }; Write-Log -Message $updateInfoMsg -Level INFO
 
 # --- Loxone for Windows - Fetch Update Info ---
-$latestLoxWindowsVersionRaw = $null; $loxWindowsInstallerUrl = $null; $expectedLoxWindowsCRC = $null; $expectedLoxWindowsSize = 0L; $latestLoxWindowsVersion = $null
+$latestLoxWindowsVersionRaw = $null
+$loxWindowsInstallerUrl = $null
+$expectedLoxWindowsCRC = $null
+$expectedLoxWindowsSize = 0L
+$latestLoxWindowsVersion = $null
+$selectedAppChannelName = $UpdateLoxoneAppChannel # Store the selected channel name for logging/messages
+
 if ($UpdateLoxoneApp) {
-    Write-Log -Message "[App] Fetching update details for 'Loxone for Windows' from XML..." -Level INFO
+    Write-Log -Message "[App] Fetching update details for 'Loxone for Windows' (Channel: $selectedAppChannelName) from XML..." -Level INFO
     try {
-        $loxWindowsUpdateNode = $updateXml.SelectSingleNode("/Miniserversoftware/update[@Name='Loxone for Windows']/Release")
-        if ($loxWindowsUpdateNode) {
-            $latestLoxWindowsVersionRaw = $loxWindowsUpdateNode.Version; $loxWindowsInstallerUrl = $loxWindowsUpdateNode.Path; $expectedLoxWindowsCRC = $loxWindowsUpdateNode.crc32
-            if (-not ([long]::TryParse($loxWindowsUpdateNode.FileSize, [ref]$expectedLoxWindowsSize))) { Write-Log -Message "[App] Could not parse FileSize ('$($loxWindowsUpdateNode.FileSize)') for Loxone for Windows. Size check might be inaccurate." -Level WARN; $expectedLoxWindowsSize = 0L }
-            if ([string]::IsNullOrWhiteSpace($latestLoxWindowsVersionRaw) -or [string]::IsNullOrWhiteSpace($loxWindowsInstallerUrl)) { Write-Log -Message "[App] Required attributes (Version, Path) missing for 'Loxone for Windows' in XML. Cannot proceed with App update check." -Level WARN; $latestLoxWindowsVersionRaw = $null; $loxWindowsInstallerUrl = $null; $expectedLoxWindowsCRC = $null; $expectedLoxWindowsSize = 0L }
-            else {
-                $versionToConvert = $null; Write-Log -Message "[App] Raw version string from XML: '$latestLoxWindowsVersionRaw'" -Level DEBUG
-                if ($latestLoxWindowsVersionRaw -match '\(([\d.]+)\)') { $versionToConvert = $matches[1]; Write-Log -Message "[App] Extracted date-based version from XML: '$versionToConvert'" -Level DEBUG }
-                else { Write-Log -Message "[App] Could not extract numerical version pattern (X.Y.Z.W) from raw string '$latestLoxWindowsVersionRaw'. Cannot determine latest app version." -Level WARN; $latestLoxWindowsVersionRaw = $null; $latestLoxWindowsVersion = $null; $loxWindowsInstallerUrl = $null; $expectedLoxWindowsCRC = $null; $expectedLoxWindowsSize = 0L }
-                if ($versionToConvert) { $latestLoxWindowsVersion = Convert-VersionString $versionToConvert; Write-Log -Message "[App] Converted numerical version: '$latestLoxWindowsVersion'" -Level DEBUG }
-                $appUpdateInfoMsg = "[App] Latest Loxone for Windows (from XML): Version=$latestLoxWindowsVersionRaw ($latestLoxWindowsVersion), Size=${expectedLoxWindowsSize}B, URL=$loxWindowsInstallerUrl"
-                if ($EnableCRC -and -not ([string]::IsNullOrWhiteSpace($expectedLoxWindowsCRC))) { $appUpdateInfoMsg += ", Expected CRC=$expectedLoxWindowsCRC" } elseif ($EnableCRC) { Write-Log -Message "[App] CRC check enabled, but CRC missing for Loxone for Windows in XML." -Level WARN }
-                Write-Log -Message $appUpdateInfoMsg -Level INFO
+        $loxWindowsBaseNode = $updateXml.SelectSingleNode("/Miniserversoftware/update[@Name='Loxone for Windows']")
+        if (-not $loxWindowsBaseNode) { throw "Could not find base node for 'Loxone for Windows' in XML." }
+
+        $loxWindowsUpdateNode = $null
+
+        if ($UpdateLoxoneAppChannel -eq 'Latest') {
+            Write-Log -Message "[App] Finding latest version across all channels..." -Level DEBUG
+            $allChannelNodes = $loxWindowsBaseNode.SelectNodes("*") # Select Test, Beta, Release, Internal, InternalV2 etc.
+            $latestNode = $null
+            $latestParsedVersion = [Version]"0.0.0.0"
+
+            foreach ($channelNode in $allChannelNodes) {
+                $channelName = $channelNode.LocalName # Test, Beta, Release...
+                $rawVersion = $channelNode.Version
+                $parsedVersion = $null
+                $versionToConvert = $null
+                # Extract version like YYYY.MM.DD from strings like "15.3.3 (2025.03.11)"
+                if ($rawVersion -match '\(([\d.]+)\)') { $versionToConvert = $matches[1] }
+
+                if ($versionToConvert) {
+                    try {
+                        $parsedVersion = Convert-VersionString $versionToConvert
+                        Write-Log -Message "[App] Parsed version '$parsedVersion' from channel '$channelName' (Raw: '$rawVersion')." -Level DEBUG
+                        if ([Version]$parsedVersion -gt $latestParsedVersion) {
+                            $latestParsedVersion = [Version]$parsedVersion
+                            $latestNode = $channelNode
+                            $selectedAppChannelName = $channelName # Update selected channel name to the actual latest
+                            Write-Log -Message "[App] Found newer latest version: '$parsedVersion' in channel '$channelName'." -Level DEBUG
+                        }
+                    } catch {
+                        Write-Log -Message "[App] Error converting version '$versionToConvert' from channel '$channelName': $($_.Exception.Message). Skipping channel." -Level WARN
+                    }
+                } else {
+                    Write-Log -Message "[App] Could not extract numerical version pattern from raw string '$rawVersion' for channel '$channelName'. Skipping channel." -Level WARN
+                }
             }
-        } else { Write-Log -Message "[App] Could not find 'Loxone for Windows' update information in the XML. Cannot perform App update check." -Level WARN }
-    } catch { Write-Log -Message "[App] Error parsing XML for Loxone for Windows details: $($_.Exception.Message). Cannot perform App update check." -Level ERROR; $latestLoxWindowsVersionRaw = $null; $loxWindowsInstallerUrl = $null; $expectedLoxWindowsCRC = $null; $expectedLoxWindowsSize = 0L; $latestLoxWindowsVersion = $null }
-} elseif (-not $UpdateLoxoneApp) { Write-Log -Message "[App] Skipping Loxone for Windows update check as -UpdateLoxoneApp parameter was set to `$false`." -Level INFO }
+            $loxWindowsUpdateNode = $latestNode
+            if ($loxWindowsUpdateNode) {
+                 Write-Log -Message "[App] Selected latest version from channel '$selectedAppChannelName'." -Level INFO
+            } else {
+                 Write-Log -Message "[App] Could not determine the latest version across channels." -Level WARN
+            }
+
+        } else {
+            # Specific channel selected
+            $xpath = "/Miniserversoftware/update[@Name='Loxone for Windows']/$UpdateLoxoneAppChannel"
+            Write-Log -Message "[App] Selecting specific channel node using XPath: $xpath" -Level DEBUG
+            $loxWindowsUpdateNode = $updateXml.SelectSingleNode($xpath)
+        }
+
+        # --- Process the selected node ---
+        if ($loxWindowsUpdateNode) {
+            $latestLoxWindowsVersionRaw = $loxWindowsUpdateNode.Version
+            $loxWindowsInstallerUrl = $loxWindowsUpdateNode.Path
+            $expectedLoxWindowsCRC = $loxWindowsUpdateNode.crc32
+            if (-not ([long]::TryParse($loxWindowsUpdateNode.FileSize, [ref]$expectedLoxWindowsSize))) { Write-Log -Message "[App] Could not parse FileSize ('$($loxWindowsUpdateNode.FileSize)') for Loxone for Windows (Channel: $selectedAppChannelName). Size check might be inaccurate." -Level WARN; $expectedLoxWindowsSize = 0L }
+
+            if ([string]::IsNullOrWhiteSpace($latestLoxWindowsVersionRaw) -or [string]::IsNullOrWhiteSpace($loxWindowsInstallerUrl)) {
+                Write-Log -Message "[App] Required attributes (Version, Path) missing for 'Loxone for Windows' (Channel: $selectedAppChannelName) in XML. Cannot proceed with App update check." -Level WARN
+                $latestLoxWindowsVersionRaw = $null; $loxWindowsInstallerUrl = $null; $expectedLoxWindowsCRC = $null; $expectedLoxWindowsSize = 0L
+            } else {
+                $versionToConvert = $null
+                Write-Log -Message "[App] Raw version string from XML (Channel: $selectedAppChannelName): '$latestLoxWindowsVersionRaw'" -Level DEBUG
+                if ($latestLoxWindowsVersionRaw -match '\(([\d.]+)\)') {
+                    $versionToConvert = $matches[1]
+                    Write-Log -Message "[App] Extracted date-based version from XML (Channel: $selectedAppChannelName): '$versionToConvert'" -Level DEBUG
+                } else {
+                    Write-Log -Message "[App] Could not extract numerical version pattern (X.Y.Z.W) from raw string '$latestLoxWindowsVersionRaw' (Channel: $selectedAppChannelName). Cannot determine latest app version." -Level WARN
+                    $latestLoxWindowsVersionRaw = $null; $latestLoxWindowsVersion = $null; $loxWindowsInstallerUrl = $null; $expectedLoxWindowsCRC = $null; $expectedLoxWindowsSize = 0L
+                }
+
+                if ($versionToConvert) {
+                    try {
+                        $latestLoxWindowsVersion = Convert-VersionString $versionToConvert
+                        Write-Log -Message "[App] Converted numerical version (Channel: $selectedAppChannelName): '$latestLoxWindowsVersion'" -Level DEBUG
+                    } catch {
+                         Write-Log -Message "[App] Error converting extracted version '$versionToConvert' (Channel: $selectedAppChannelName): $($_.Exception.Message). Cannot determine latest app version." -Level WARN
+                         $latestLoxWindowsVersionRaw = $null; $latestLoxWindowsVersion = $null; $loxWindowsInstallerUrl = $null; $expectedLoxWindowsCRC = $null; $expectedLoxWindowsSize = 0L
+                    }
+                }
+
+                # Only log info if we successfully got a version
+                if ($latestLoxWindowsVersion) {
+                    $appUpdateInfoMsg = "[App] Latest Loxone for Windows (Channel: $selectedAppChannelName): Version=$latestLoxWindowsVersionRaw ($latestLoxWindowsVersion), Size=${expectedLoxWindowsSize}B, URL=$loxWindowsInstallerUrl"
+                    if ($EnableCRC -and -not ([string]::IsNullOrWhiteSpace($expectedLoxWindowsCRC))) { $appUpdateInfoMsg += ", Expected CRC=$expectedLoxWindowsCRC" } elseif ($EnableCRC) { Write-Log -Message "[App] CRC check enabled, but CRC missing for Loxone for Windows (Channel: $selectedAppChannelName) in XML." -Level WARN }
+                    Write-Log -Message $appUpdateInfoMsg -Level INFO
+                }
+            }
+        } else {
+            Write-Log -Message "[App] Could not find 'Loxone for Windows' update information for channel '$selectedAppChannelName' in the XML. Cannot perform App update check." -Level WARN
+        }
+    } catch {
+        Write-Log -Message "[App] Error parsing XML for Loxone for Windows details (Channel: $selectedAppChannelName): $($_.Exception.Message). Cannot perform App update check." -Level ERROR
+        $latestLoxWindowsVersionRaw = $null; $loxWindowsInstallerUrl = $null; $expectedLoxWindowsCRC = $null; $expectedLoxWindowsSize = 0L; $latestLoxWindowsVersion = $null
+    }
+} elseif (-not $UpdateLoxoneApp) {
+    Write-Log -Message "[App] Skipping Loxone for Windows update check as -UpdateLoxoneApp parameter was set to `$false`." -Level INFO
+}
 # --- End Loxone for Windows Fetch ---
 
-# --- Check and Prepare Loxone Application ---
-Write-Log -Message "[App] Checking Loxone application status before update..." -Level INFO
+# --- App Check: Check and Prepare Loxone Application ---
+Write-Log -Message "[App Check] Checking Loxone application status before update..." -Level INFO
 $appDetails = $null
 try {
     $appDetails = Get-AppVersionFromRegistry -RegistryPath 'HKCU:\Software\3c55ef21-dcba-528f-8e08-1a92f8822a13' -AppNameValueName 'shortcutname' -InstallPathValueName 'InstallLocation' -ErrorAction Stop
-    if ($appDetails.Error) { Write-Log -Message "[App] Failed to get Loxone application details from registry: $($appDetails.Error)" -Level WARN }
-    else { Write-Log -Message ("[App] Found Loxone App: Name='{0}', Path='{1}', ProductVersion='{2}', FileVersion='{3}'" -f $appDetails.ShortcutName, $appDetails.InstallLocation, $appDetails.ProductVersion, $appDetails.FileVersion) -Level INFO }
-} catch { Write-Log -Message "An error occurred during initial application check: $($_.Exception.Message)" -Level ERROR }
-
-# --- Loxone App Version Comparison and Update Logic ---
-$appUpdateNeeded = $false
+    if ($appDetails.Error) { Write-Log -Message "[App Check] Failed to get Loxone application details from registry: $($appDetails.Error)" -Level WARN }
+    else { Write-Log -Message ("[App Check] Found Loxone App: Name='{0}', Path='{1}', ProductVersion='{2}', FileVersion='{3}'" -f $appDetails.ShortcutName, $appDetails.InstallLocation, $appDetails.ProductVersion, $appDetails.FileVersion) -Level INFO }
+} catch { Write-Log -Message "[App Check] An error occurred during initial application check: $($_.Exception.Message)" -Level ERROR }
+ 
+# --- App Check: Loxone App Version Comparison and Update Logic ---
+$appUpdateNeeded = $false # Initialize here
 if ($appDetails -and -not $appDetails.Error) {
     if ($UpdateLoxoneApp -and $latestLoxWindowsVersion) {
-        Write-Log -Message "[App] Comparing installed FileVersion '$($appDetails.FileVersion)' with latest available '$($latestLoxWindowsVersion)'..." -Level INFO
+        Write-Log -Message "[App Check] Comparing installed FileVersion '$($appDetails.FileVersion)' with latest available '$($latestLoxWindowsVersion)'..." -Level INFO
         $normalizedLatestApp = Convert-VersionString $latestLoxWindowsVersion; $normalizedInstalledApp = Convert-VersionString $appDetails.FileVersion
         try {
             if ([Version]$normalizedLatestApp -ne [Version]$normalizedInstalledApp) {
-                 if ([Version]$normalizedLatestApp -gt [Version]$normalizedInstalledApp) { $appUpdateNeeded = $true; Write-Log -Message "[App] Comparison result: Update needed (Latest '$normalizedLatestApp' > Installed '$normalizedInstalledApp')." -Level DEBUG }
-                 else { Write-Log -Message "[App] Comparison result: No update needed (Latest '$normalizedLatestApp' <= Installed '$normalizedInstalledApp')." -Level DEBUG }
-            } else { Write-Log -Message "[App] Comparison result: Versions match ('$normalizedLatestApp'). No update needed." -Level DEBUG }
-        } catch { Write-Log -Message "[App] Error comparing versions '$normalizedLatestApp' and '$normalizedInstalledApp': $($_.Exception.Message). Assuming no update needed." -Level WARN; $appUpdateNeeded = $false }
+                 if ([Version]$normalizedLatestApp -gt [Version]$normalizedInstalledApp) { $appUpdateNeeded = $true; Write-Log -Message "[App Check] Comparison result: Update needed (Latest '$normalizedLatestApp' > Installed '$normalizedInstalledApp')." -Level DEBUG }
+                 else { Write-Log -Message "[App Check] Comparison result: No update needed (Latest '$normalizedLatestApp' <= Installed '$normalizedInstalledApp')." -Level DEBUG }
+            } else { Write-Log -Message "[App Check] Comparison result: Versions match ('$normalizedLatestApp'). No update needed." -Level DEBUG }
+        } catch { Write-Log -Message "[App Check] Error comparing versions '$normalizedLatestApp' and '$normalizedInstalledApp': $($_.Exception.Message). Assuming no update needed." -Level WARN; $appUpdateNeeded = $false }
     }
-
+ 
+    # This block executes only if $appUpdateNeeded was set to true above
     if ($appUpdateNeeded) {
-        Write-Log -Message "[App] Update required for Loxone for Windows (Installed FileVersion: '$($appDetails.FileVersion)', Available: '$latestLoxWindowsVersion')." -Level INFO
+        Write-Log -Message "[App Check] Update required for Loxone for Windows (Channel: $selectedAppChannelName, Installed FileVersion: '$($appDetails.FileVersion)', Available: '$latestLoxWindowsVersion')." -Level INFO
 
         # --- Step: Stop App (if running) ---
         # Note: Stopping the app isn't counted as a main step for the overall progress bar, but we update the status text.
@@ -723,8 +813,8 @@ if ($appDetails -and -not $appDetails.Error) {
             TotalWeight      = $script:TotalWeight
         }
         Write-Log -Message "[App] Calling Invoke-LoxoneDownload for App Update using stored command object and splatting." -Level DEBUG
-        $script:currentDownload += 1 # Increment before download
-        $appDownloadSuccess = & $script:InvokeLoxoneDownloadCmd @appDownloadParams
+        # $script:currentDownload += 1 # Increment before download - Incorrect, should be done once per download step
+        $appDownloadSuccess = Invoke-LoxoneDownload @appDownloadParams
         if (-not $appDownloadSuccess) { throw "[App] Invoke-LoxoneDownload reported failure for Loxone App. Halting app update process." }
         $script:CurrentWeight += 1 # Increment weight AFTER successful download
         Write-Log -Message "[App] Loxone for Windows download completed successfully. Incremented weight to $($script:CurrentWeight)." -Level INFO
@@ -809,53 +899,47 @@ if ($appDetails -and -not $appDetails.Error) {
                      # Removed duplicate line from previous failed diff
                  } else { Write-Log -Message "[App] Loxone App update verification failed! Expected FileVersion '$normalizedLatestAppVerify' but found '$normalizedNewInstalledAppVerify' after installation." -Level ERROR; $toastParamsAppVerifyFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Loxone App verification failed!"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppVerifyFail }
              } else { Write-Log -Message "[App] Failed to get Loxone App details from registry after installation attempt. Verification failed. Error: $($newAppDetails.Error)" -Level ERROR; $toastParamsAppVerifyFailReg = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Loxone App verification failed (Registry)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppVerifyFailReg }
-        # } # REMOVED BRACE HERE
             }
-    } catch { Write-Log -Message "[App] Failed to run Loxone for Windows installer: $($_.Exception.Message)" -Level ERROR; $toastParamsAppInstallFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="FAILED: Loxone App installation failed"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppInstallFail; throw "[App] Failed to execute Loxone for Windows installer." }
+        } catch { Write-Log -Message "[App] Failed to run Loxone for Windows installer: $($_.Exception.Message)" -Level ERROR; $toastParamsAppInstallFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="FAILED: Loxone App installation failed"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppInstallFail; throw "[App] Failed to execute Loxone for Windows installer." }
 
-} else { # Corresponds to: if ($appUpdateNeeded)
-    if ($appDetails -and -not $appDetails.Error) { Write-Log -Message "[App] Loxone for Windows is already up-to-date (FileVersion: $($appDetails.FileVersion))." -Level INFO } # Removed step increment and toast update here
-} # Closes: else corresponding to if ($appUpdateNeeded)
-
-} # Closes: if ($appDetails -and -not $appDetails.Error) <--- ADDING MISSING BRACE HERE
-elseif ($UpdateLoxoneApp -and -not $latestLoxWindowsVersion) { Write-Log -Message "[App] Skipping Loxone App update because latest version details could not be retrieved from XML (XML fetch/parse failed)." -Level WARN; $updateToastParams14 = @{ NewStatus = "WARN: Loxone App update skipped (failed to get latest version info)." }; Update-PersistentToast @updateToastParams14 } # UseTaskWorkaround removed
-elseif ($UpdateLoxoneApp -and (!$appDetails -or $appDetails.Error)) { Write-Log -Message "[App] Skipping Loxone App update check because installed application details could not be retrieved." -Level WARN; $updateToastParams15 = @{ NewStatus = "WARN: Loxone App update skipped (cannot find installed app)." }; Update-PersistentToast @updateToastParams15 } # UseTaskWorkaround removed
-# --- End Check and Prepare Loxone Application ---
-
-
-# --- ORIGINAL BLOCK STARTING AT LINE 769 (Now follows App Check block) ---
-# --- Compare Versions (Using Initially Detected Version) ---
+    } else { # Corresponds to: if ($appUpdateNeeded)
+        if ($appDetails -and -not $appDetails.Error) { Write-Log -Message "[App Check] Loxone for Windows (Channel: $selectedAppChannelName) is already up-to-date (FileVersion: $($appDetails.FileVersion))." -Level INFO } # Removed step increment and toast update here
+    } # Closes: else corresponding to if ($appUpdateNeeded)
+ 
+} # Closes: if ($appDetails -and -not $appDetails.Error)
+elseif ($UpdateLoxoneApp -and -not $latestLoxWindowsVersion) { Write-Log -Message "[App Check] Skipping Loxone App update (Channel: $selectedAppChannelName) because latest version details could not be retrieved from XML (XML fetch/parse failed)." -Level WARN; $updateToastParams14 = @{ NewStatus = "WARN: Loxone App update skipped (failed to get latest version info)." }; Update-PersistentToast @updateToastParams14 } # UseTaskWorkaround removed
+elseif ($UpdateLoxoneApp -and (!$appDetails -or $appDetails.Error)) { Write-Log -Message "[App Check] Skipping Loxone App update check (Channel: $selectedAppChannelName) because installed application details could not be retrieved." -Level WARN; $updateToastParams15 = @{ NewStatus = "WARN: Loxone App update skipped (cannot find installed app)." }; Update-PersistentToast @updateToastParams15 } # UseTaskWorkaround removed
+# --- End App Check ---
+ 
+ 
+# --- Config Check: Compare Versions (Using Initially Detected Version) ---
 $LatestVersion = Convert-VersionString $LatestVersion # Normalize latest version from XML
 
 # Use the $script:InitialInstalledVersion determined earlier (around line 195)
 $normalizedInstalled = Convert-VersionString $script:InitialInstalledVersion # Normalize the initially found version
 
 # Log the comparison versions
-Write-Log -Level DEBUG -Message "[Config] Comparing versions - Latest (Normalized): '$LatestVersion', Installed (Initially Detected, Normalized): '$normalizedInstalled'"
-
+Write-Log -Level DEBUG -Message "[Config Check] Comparing versions - Latest (Normalized): '$LatestVersion', Installed (Initially Detected, Normalized): '$normalizedInstalled'"
+ 
 # Determine if Config update is needed based on the initially detected version
 $configUpdateNeeded = $false # Default to false
 if ([string]::IsNullOrWhiteSpace($normalizedInstalled)) {
     # If no initial version was found (path missing or version retrieval failed), assume update is needed if a latest version exists
     if ($LatestVersion) {
         $configUpdateNeeded = $true
-        Write-Log -Message "[Config] No initial installed version detected. Update required to latest version '$LatestVersion'." -Level INFO
+        Write-Log -Message "[Config Check] No initial installed version detected. Update required to latest version '$LatestVersion'." -Level INFO
     } else {
-        Write-Log -Message "[Config] No initial installed version detected AND no latest version available. Cannot determine if update is needed." -Level WARN
+        Write-Log -Message "[Config Check] No initial installed version detected AND no latest version available. Cannot determine if update is needed." -Level WARN
     }
 } elseif ($LatestVersion -ne $normalizedInstalled) {
     $configUpdateNeeded = $true
-    Write-Log -Message "[Config] Loxone Config update required (Installed: '$($script:InitialInstalledVersion)', Available: '$LatestVersion'). Update process will proceed." -Level INFO
+    Write-Log -Message "[Config Check] Loxone Config update required (Installed: '$($script:InitialInstalledVersion)', Available: '$LatestVersion'). Update process will proceed." -Level INFO
 } else {
     # Versions match
-    Write-Log -Message "[Config] Loxone Config is already up-to-date (Version: $($script:InitialInstalledVersion)). Config update will be skipped." -Level INFO
+    Write-Log -Message "[Config Check] Loxone Config is already up-to-date (Version: $($script:InitialInstalledVersion)). Config update will be skipped." -Level INFO
 }
 
-# Check if we can exit early in non-interactive mode
-if (($script:IsInteractiveRun -eq $false) -and ($configUpdateNeeded -eq $false) -and ($appUpdateNeeded -eq $false)) {
-    Write-Log -Level INFO -Message "No updates needed for Config or App, and running non-interactively. Exiting script."
-    exit 0 # Exit cleanly
-}
+# Early exit removed - Proceed to Miniserver checks even if Config/App are up-to-date
 
 
 # --- Determine Loxone Icon Path (Uses $script:InstalledExePath) ---
@@ -866,66 +950,151 @@ if ($script:InstalledExePath -and (Test-Path $script:InstalledExePath)) {
     else { Write-Log -Level DEBUG -Message "LoxoneConfig.ico not found in $InstallDir. No icon will be used." }
 }
 
-# --- Calculate Total Steps & Downloads for Progress ---
-Write-Log -Level DEBUG -Message "Calculating total steps and downloads for progress reporting..."
-$script:totalSteps = 1 # Start with 1 step for initial checks
-$script:totalDownloads = 0
-# $configUpdateNeeded is now determined earlier based on $script:InitialInstalledVersion
+# --- Miniserver Check: Check Miniserver Versions ---
+Write-Log -Message "[Miniserver Check] Starting Miniserver version check..." -Level INFO
+$miniserverVersions = @{} # Store versions here (Host -> Version)
+if (Test-Path $MSListPath) {
+    try { # Outer try for reading/processing MS list
+        $miniserverEntriesPreCheck = Get-Content $MSListPath -ErrorAction Stop | Where-Object { $_ -match '\S' -and $_.TrimStart()[0] -ne '#' }
+        Write-Log -Message "[Miniserver Check] Found $($miniserverEntriesPreCheck.Count) Miniserver entries in '$MSListPath'." -Level DEBUG
 
-if ($configUpdateNeeded) {
-    $script:totalSteps += 3 # Download (or skip), Extract, Install Config
-    $script:totalDownloads += 1
-    Write-Log -Level DEBUG -Message "Config update needed. Adding 2 steps, 1 download."
-} else {
-    Write-Log -Level DEBUG -Message "Config update not needed."
+        foreach ($msEntryPreCheck in $miniserverEntriesPreCheck) {
+            $redactedEntryForLogPreCheck = Get-RedactedPassword $msEntryPreCheck
+            Write-Log -Message "[Miniserver Check] Processing entry: ${redactedEntryForLogPreCheck}" -Level DEBUG
+            $msIPPreCheck = $null; $versionUriPreCheck = $null; $credentialPreCheck = $null
+
+            try { # Inner try for parsing entry
+                $entryToParsePreCheck = $msEntryPreCheck # Assign here
+                if ($entryToParsePreCheck -notmatch '^[a-zA-Z]+://') { $entryToParsePreCheck = "http://" + $entryToParsePreCheck }
+                $uriBuilderPreCheck = [System.UriBuilder]$entryToParsePreCheck
+                $msIPPreCheck = $uriBuilderPreCheck.Host
+
+                if (-not ([string]::IsNullOrWhiteSpace($uriBuilderPreCheck.UserName))) {
+                    $securePasswordPreCheck = $uriBuilderPreCheck.Password | ConvertTo-SecureString -AsPlainText -Force
+                    $credentialPreCheck = New-Object System.Management.Automation.PSCredential($uriBuilderPreCheck.UserName, $securePasswordPreCheck)
+                }
+
+                $uriBuilderPreCheck.Path = "/dev/cfg/version"
+                $uriBuilderPreCheck.Port = 80 # Default to HTTP port for version check URI construction
+                $uriBuilderPreCheck.Password = $null
+                $uriBuilderPreCheck.UserName = $null
+                $versionUriPreCheck = $uriBuilderPreCheck.Uri.AbsoluteUri
+
+            } catch { # Inner catch for parsing entry
+                Write-Log -Message "[Miniserver Check] Failed to parse Miniserver entry '$redactedEntryForLogPreCheck' as URI: $($_.Exception.Message). Assuming IP/hostname." -Level WARN
+                $credentialPreCheck = $null
+                $msIPPreCheck = $msEntryPreCheck.Split('@')[-1].Split('/')[0]
+                if ($msIPPreCheck) { $versionUriPreCheck = "http://${msIPPreCheck}/dev/cfg/version" }
+                else { Write-Log -Message "[Miniserver Check] Could not determine IP/Host from entry '$redactedEntryForLogPreCheck'. Skipping." -Level ERROR; continue }
+            }
+
+            $redactedVersionUriPreCheck = Get-RedactedPassword $versionUriPreCheck
+            Write-Log -Message "[Miniserver Check] Checking version for '$msIPPreCheck' via URI: ${redactedVersionUriPreCheck}" -Level DEBUG
+
+            $responseObjectPreCheck = $null; $msVersionCheckSuccessPreCheck = $false; $currentVersionPreCheck = "Error"
+            $iwrParamsBasePreCheck = @{ TimeoutSec = 10; ErrorAction = 'Stop'; Method = 'Get' }
+            if ($credentialPreCheck) { $iwrParamsBasePreCheck.Credential = $credentialPreCheck }
+            try { # Try HTTPS
+                $httpsUriBuilderPreCheck = [System.UriBuilder]$versionUriPreCheck; $httpsUriBuilderPreCheck.Scheme = 'https'; $httpsUriBuilderPreCheck.Port = 443
+                $httpsUriPreCheck = $httpsUriBuilderPreCheck.Uri.AbsoluteUri
+                $httpsParamsPreCheck = $iwrParamsBasePreCheck.Clone(); $httpsParamsPreCheck.Uri = $httpsUriPreCheck
+                Write-Log -Message "[Miniserver Check] Attempting HTTPS connection to $msIPPreCheck..." -Level DEBUG
+                $responseObjectPreCheck = Invoke-WebRequest @httpsParamsPreCheck
+                Write-Log -Message "[Miniserver Check] HTTPS connection successful for $msIPPreCheck." -Level DEBUG
+                $msVersionCheckSuccessPreCheck = $true
+            } catch { # Catch for HTTPS attempt
+                Write-Log -Message "[Miniserver Check] HTTPS failed for $msIPPreCheck ($($_.Exception.Message)). Falling back to HTTP." -Level DEBUG
+                try { # Try HTTP
+                    $httpParamsPreCheck = $iwrParamsBasePreCheck.Clone(); $httpParamsPreCheck.Uri = $versionUriPreCheck # Use original HTTP URI
+                    $headers = @{} # Initialize headers hashtable
+                    Write-Log -Message "[Miniserver Check] Attempting HTTP connection to $msIPPreCheck..." -Level DEBUG
+                    if ($httpParamsPreCheck.ContainsKey('Credential')) {
+                         Write-Log -Message "[Miniserver Check] Attempting HTTP request to $msIPPreCheck (with credentials, using Authorization header)." -Level WARN
+                         # Construct Basic Auth Header
+                         $credentialObject = $httpParamsPreCheck.Credential
+                         $userName = $credentialObject.UserName
+                         $password = $credentialObject.GetNetworkCredential().Password
+                         $encodedCredentials = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${userName}:${password}"))
+                         $headers.Authorization = "Basic $encodedCredentials"
+                         # Remove Credential from splatting params as we're using header auth
+                         $httpParamsPreCheck.Remove('Credential')
+                    } else {
+                         Write-Log -Message "[Miniserver Check] Attempting HTTP request to $msIPPreCheck (no credentials)." -Level DEBUG
+                    }
+                    # Use standard splatting, adding Headers parameter
+                    $responseObjectPreCheck = Invoke-WebRequest @httpParamsPreCheck -Headers $headers
+                    Write-Log -Message "[Miniserver Check] HTTP connection successful for $msIPPreCheck." -Level DEBUG
+                    $msVersionCheckSuccessPreCheck = $true
+                } catch { # Catch for HTTP attempt (Invoke-WebRequest)
+                    Write-Log -Message "[Miniserver Check] Failed to get version for '$msIPPreCheck' via HTTP as well: $($_.Exception.Message)" -Level ERROR # Keep as ERROR
+                    $script:ErrorOccurred = $true # Set error flag as connection failed
+                    $msVersionCheckSuccessPreCheck = $false
+                } # End HTTP catch
+            } # End HTTPS catch
+
+            # Process response if EITHER HTTPS or HTTP succeeded
+            if ($msVersionCheckSuccessPreCheck -and $responseObjectPreCheck) {
+                try { # Try parsing XML
+                    $xmlResponsePreCheck = [xml]$responseObjectPreCheck.Content
+                    $currentVersionPreCheck = $xmlResponsePreCheck.LL.value
+                    if ($null -eq $xmlResponsePreCheck -or $null -eq $xmlResponsePreCheck.LL -or $null -eq $xmlResponsePreCheck.LL.value) { throw "Could not find version value in parsed XML." }
+                    Write-Log -Message "[Miniserver Check] Miniserver '$msIPPreCheck' current version: ${currentVersionPreCheck}" -Level INFO
+                } catch { # Catch for parsing XML
+                    Write-Log -Message "[Miniserver Check] Failed to parse version XML for '$msIPPreCheck': $($_.Exception.Message)" -Level ERROR
+                    $currentVersionPreCheck = "Error Parsing XML"
+                } # End XML parsing catch
+            } elseif (-not $msVersionCheckSuccessPreCheck) {
+                $currentVersionPreCheck = "Error Connecting" # Already logged specific error
+            } # End if/elseif for processing response
+            $miniserverVersions[$msIPPreCheck] = $currentVersionPreCheck # Store result
+        } # End foreach msEntryPreCheck
+    } catch { # Catch for the outer try (started line 959)
+        Write-Log -Message "[Miniserver Check] Error reading or processing Miniserver list '$MSListPath': $($_.Exception.Message). Skipping Miniserver version pre-check." -Level WARN
+    } # End outer catch
+} else { # Else for the if (Test-Path $MSListPath) (line 958)
+    Write-Log -Message "[Miniserver Check] Miniserver list '$MSListPath' not found. Skipping Miniserver version pre-check." -Level INFO
 }
+# You can access the collected versions in the $miniserverVersions hashtable later if needed
+Write-Log -Message "[Miniserver Check] Finished Miniserver version check." -Level INFO
+# --- End Miniserver Check: Check Miniserver Versions ---
 
-if ($appUpdateNeeded) {
-    $script:totalSteps += 2 # Download + Install
-    $script:totalDownloads += 1
-    Write-Log -Level DEBUG -Message "App update needed. Adding 2 steps, 1 download."
-} else {
-    Write-Log -Level DEBUG -Message "App update not needed."
-}
-
+# Recalculate miniserverCount for step/weight calculations
+$miniserverCount = 0
 if (Test-Path $MSListPath) {
     try {
+        $miniserverEntries = Get-Content $MSListPath -ErrorAction Stop | Where-Object { $_ -match '\S' -and $_.TrimStart()[0] -ne '#' }
+        $miniserverCount = ($miniserverEntries | Measure-Object).Count
     } catch {
-        Write-Log -Level WARN -Message "Error reading Miniserver list '$MSListPath': $($_.Exception.Message). Skipping Miniserver updates."
+        Write-Log -Level WARN -Message "Error reading Miniserver list '$MSListPath' during step/weight calculation: $($_.Exception.Message). Assuming 0 Miniservers."
     }
-} else {
-    Write-Log -Level INFO -Message "Miniserver list '$MSListPath' not found. Skipping Miniserver updates."
 }
 
-# --- Step/Download Calculation Moved Later ---
-
-# --- Find Installed Loxone Config ---
-# --- Monitor Test (Optional, requires installation) ---
-if ($InstalledExePath) { } else { Write-Log -Message "No existing Loxone Config installation found. Cannot run Monitor test without installation." -Level WARN }
-
-# --- Main Update Logic ---
 # --- Define Progress Steps (Moved before Try block) ---
-$ProgressSteps = @( @{ ID = 'InitialCheck'; Description = 'Checking versions'; Weight = 1; Condition = { $true } }; @{ ID = 'DownloadConfig'; Description = 'Downloading Loxone Config'; Weight = 2; Condition = { $LatestVersion -ne $normalizedInstalled } }; @{ ID = 'ExtractConfig'; Description = 'Extracting Loxone Config'; Weight = 1; Condition = { $LatestVersion -ne $normalizedInstalled -and -not $skipDownload } }; @{ ID = 'InstallConfig'; Description = 'Installing Loxone Config'; Weight = 3; Condition = { $LatestVersion -ne $normalizedInstalled } }; @{ ID = 'VerifyConfig'; Description = 'Verifying Loxone Config install'; Weight = 1; Condition = { $LatestVersion -ne $normalizedInstalled } }; @{ ID = 'UpdateMS'; Description = 'Updating Miniservers'; Weight = 0; Condition = { $miniserverCount -gt 0 } }; @{ ID = 'Finalize'; Description = 'Finalizing'; Weight = 1; Condition = { $true } } )
+$ProgressSteps = @(
+    @{ ID = 'InitialCheck';   Description = 'Checking versions';              Weight = 1; Condition = { $true } };
+    @{ ID = 'DownloadConfig'; Description = 'Downloading Loxone Config';      Weight = 2; Condition = { $configUpdateNeeded } };
+    @{ ID = 'ExtractConfig';  Description = 'Extracting Loxone Config';       Weight = 1; Condition = { $configUpdateNeeded } }; # Weight applied even if download skipped
+    @{ ID = 'InstallConfig';  Description = 'Installing Loxone Config';       Weight = 3; Condition = { $configUpdateNeeded } };
+    @{ ID = 'VerifyConfig';   Description = 'Verifying Loxone Config install';Weight = 1; Condition = { $configUpdateNeeded } };
+    @{ ID = 'DownloadApp';    Description = 'Downloading Loxone App';         Weight = 1; Condition = { $appUpdateNeeded } };
+    @{ ID = 'InstallApp';     Description = 'Installing Loxone App';          Weight = 1; Condition = { $appUpdateNeeded } };
+    @{ ID = 'UpdateMS';       Description = 'Updating Miniservers';           Weight = 0; Condition = { $miniserverCount -gt 0 -and $configUpdateNeeded } }; # Condition includes config update needed
+    @{ ID = 'Finalize';       Description = 'Finalizing';                     Weight = 1; Condition = { $true } }
+)
 function Get-StepWeight { param([string]$StepID); $stepObject = $ProgressSteps | Where-Object { $_.ID -eq $StepID } | Select-Object -First 1; if ($stepObject) { if ($stepObject.ContainsKey('Weight')) { return $stepObject.Weight } else { Write-Log -Level WARN -Message "Get-StepWeight: Found step with ID '$StepID' but it lacked a 'Weight' key."; return 0 } } else { Write-Log -Level WARN -Message "Get-StepWeight: Could not find step with ID '$StepID'."; return 0 } }
 
-try {
+try { # --- Start of Main Try Block ---
     # --- Calculate Total Weight ---
-    Write-Log -Message "Calculating total progress weight..." -Level INFO; $script:TotalWeight = 0; $script:CurrentWeight = 0; $miniserverCount = 0
-    if (Test-Path $MSListPath) { try { $miniserverEntries = Get-Content $MSListPath -ErrorAction Stop | Where-Object { $_ -match '\S' -and $_.TrimStart()[0] -ne '#' }; $miniserverCount = ($miniserverEntries | Measure-Object).Count } catch { Write-Log -Message "Error reading Miniserver list file '$MSListPath' for weight calculation: $($_.Exception.Message)." -Level WARN } }
+    Write-Log -Message "Calculating total progress weight..." -Level INFO; $script:TotalWeight = 0; $script:CurrentWeight = 0;
+    # $miniserverCount already calculated above
     foreach ($step in $ProgressSteps) { $runStep = $false; try { $runStep = Invoke-Command -ScriptBlock $step.Condition } catch { Write-Log -Message "Error evaluating condition for step '$($step.ID)': $($_.Exception.Message)" -Level WARN; $runStep = $false }; if ($runStep) { if ($step.ID -eq 'UpdateMS') { $msWeightPerServer = 2; $script:TotalWeight += ($miniserverCount * $msWeightPerServer); Write-Log -Message "Condition TRUE for step '$($step.ID)'. Adding weight: $($miniserverCount * $msWeightPerServer) ($miniserverCount servers * $msWeightPerServer weight/server)." -Level DEBUG } else { $script:TotalWeight += $step.Weight; Write-Log -Message "Condition TRUE for step '$($step.ID)'. Adding weight: $($step.Weight)." -Level DEBUG } } else { Write-Log -Message "Condition FALSE for step '$($step.ID)'. Skipping weight: $($step.Weight)." -Level DEBUG } }
     $initialCheckStep = $ProgressSteps | Where-Object { $_.ID -eq 'InitialCheck' } | Select-Object -First 1; if ($initialCheckStep) { $script:CurrentWeight = $initialCheckStep.Weight; Write-Log -Message "Setting initial weight to $($script:CurrentWeight) for completed 'InitialCheck' step." -Level DEBUG }
     Write-Log -Message "Total calculated progress weight: $script:TotalWeight" -Level INFO
-    # Update toast after initial checks using new parameters
-    $script:currentStep++ # Increment step after initial checks
-    $initialCheckStepName = "Initial Checks Complete"
-    # --- Calculate Total Steps/Downloads (Moved Here) ---
+
+    # --- Calculate Total Steps/Downloads ---
     $script:totalSteps = 1 # Start count at 1 (for Initial Checks step)
     $script:totalDownloads = 0
     Write-Log -Level DEBUG -Message "Recalculating steps/downloads..."
-
-    # Step 1: Initial Checks (Always performed implicitly before this block)
-    # We don't add 1 here, but start the toast display at Step 1 later
-
     if ($configUpdateNeeded) {
         $script:totalSteps += 3 # Download (or skip), Extract, Install Config
         $script:totalDownloads += 1
@@ -933,7 +1102,6 @@ try {
     } else {
          Write-Log -Level DEBUG -Message "Config update NOT needed. Skipping Config steps/download."
     }
-
     if ($appUpdateNeeded) {
         $script:totalSteps += 2 # Download, Install App
         $script:totalDownloads += 1
@@ -941,70 +1109,20 @@ try {
     } else {
          Write-Log -Level DEBUG -Message "App update NOT needed. Skipping App steps/download."
     }
-
-    # Check Miniservers again based on final config update status
-    $miniserverCount = 0
-    if (Test-Path $MSListPath) {
-        try { $miniserverEntries = Get-Content $MSListPath -ErrorAction Stop | Where-Object { $_ -match '\S' -and $_.TrimStart()[0] -ne '#' }; $miniserverCount = ($miniserverEntries | Measure-Object).Count } catch { Write-Log -Message "Error reading Miniserver list file '$MSListPath' for step calculation: $($_.Exception.Message)." -Level WARN }
-    }
-
-    if ($miniserverCount -gt 0 -and $configUpdateNeeded) { # Only add MS step if Config was actually updated
+    # Add Miniserver step only if Config update is needed AND servers exist
+    if ($configUpdateNeeded -and $miniserverCount -gt 0) {
         $script:totalSteps += 1 # Miniserver Update Step
-        Write-Log -Level DEBUG -Message "Miniserver updates needed ($miniserverCount servers) AND Config updated. Adding 1 step."
+        Write-Log -Level DEBUG -Message "Miniserver updates needed ($miniserverCount servers) because Config is updating. Adding 1 step."
     } elseif ($miniserverCount -gt 0) {
-         Write-Log -Level DEBUG -Message "Miniserver list found, but Config update not performed. Skipping Miniserver update step."
+         Write-Log -Level DEBUG -Message "Miniserver update step skipped because Config is not updating."
     } else {
-         Write-Log -Level DEBUG -Message "No Miniserver updates needed."
+         Write-Log -Level DEBUG -Message "No Miniserver updates needed (list empty or error)."
     }
-
     # Step X: Finalization (Always performed)
     $script:totalSteps += 1
     Write-Log -Level DEBUG -Message "Adding 1 step for Finalization."
-
     Write-Log -Level INFO -Message "Recalculated Totals - Steps: $script:totalSteps, Downloads: $script:totalDownloads"
     # --- End Calculate Total Steps/Downloads ---
-
-    # --- Define Progress Steps (Using Calculated Totals) ---
-    # Note: The weight calculation might need adjustment if steps are skipped, but the total count should be more accurate for display.
-    $ProgressSteps = @(
-        @{ ID = 'InitialCheck';   Description = 'Checking versions';              Weight = 1; Condition = { $true } };
-        @{ ID = 'DownloadConfig'; Description = 'Downloading Loxone Config';      Weight = 2; Condition = { $configUpdateNeeded } };
-        @{ ID = 'ExtractConfig';  Description = 'Extracting Loxone Config';       Weight = 1; Condition = { $configUpdateNeeded } }; # Weight applied even if download skipped
-        @{ ID = 'InstallConfig';  Description = 'Installing Loxone Config';       Weight = 3; Condition = { $configUpdateNeeded } };
-        @{ ID = 'VerifyConfig';   Description = 'Verifying Loxone Config install';Weight = 1; Condition = { $configUpdateNeeded } };
-        @{ ID = 'DownloadApp';    Description = 'Downloading Loxone App';         Weight = 1; Condition = { $appUpdateNeeded } };
-        @{ ID = 'InstallApp';     Description = 'Installing Loxone App';          Weight = 1; Condition = { $appUpdateNeeded } };
-        @{ ID = 'UpdateMS';       Description = 'Updating Miniservers';           Weight = 0; Condition = { $miniserverCount -gt 0 -and $configUpdateNeeded } }; # Condition ensures MS step only counts if Config updated
-        @{ ID = 'Finalize';       Description = 'Finalizing';                     Weight = 1; Condition = { $true } }
-    )
-    # Function to get weight remains the same
-    function Get-StepWeight { param([string]$StepID); $stepObject = $ProgressSteps | Where-Object { $_.ID -eq $StepID } | Select-Object -First 1; if ($stepObject) { if ($stepObject.ContainsKey('Weight')) { return $stepObject.Weight } else { Write-Log -Level WARN -Message "Get-StepWeight: Found step with ID '$StepID' but it lacked a 'Weight' key."; return 0 } } else { Write-Log -Level WARN -Message "Get-StepWeight: Could not find step with ID '$StepID'."; return 0 } }
-
-    # --- Calculate Total Weight (Moved Here) ---
-    Write-Log -Message "Calculating total progress weight based on conditions..." -Level INFO
-    $script:TotalWeight = 0
-    $script:CurrentWeight = 0 # Reset current weight before recalculating total
-    foreach ($step in $ProgressSteps) {
-        $runStep = $false
-        try { $runStep = Invoke-Command -ScriptBlock $step.Condition } catch { Write-Log -Message "Error evaluating condition for step '$($step.ID)': $($_.Exception.Message)" -Level WARN; $runStep = $false }
-        if ($runStep) {
-            if ($step.ID -eq 'UpdateMS') {
-                $msWeightPerServer = 2 # Keep weight per server
-                $script:TotalWeight += ($miniserverCount * $msWeightPerServer)
-                Write-Log -Message "Condition TRUE for step '$($step.ID)'. Adding weight: $($miniserverCount * $msWeightPerServer) ($miniserverCount servers * $msWeightPerServer weight/server)." -Level DEBUG
-            } else {
-                $script:TotalWeight += $step.Weight
-                Write-Log -Message "Condition TRUE for step '$($step.ID)'. Adding weight: $($step.Weight)." -Level DEBUG
-            }
-        } else {
-            Write-Log -Message "Condition FALSE for step '$($step.ID)'. Skipping weight: $($step.Weight)." -Level DEBUG
-        }
-    }
-    # Set initial weight after calculation
-    $initialCheckStep = $ProgressSteps | Where-Object { $_.ID -eq 'InitialCheck' } | Select-Object -First 1
-    if ($initialCheckStep) { $script:CurrentWeight = $initialCheckStep.Weight; Write-Log -Message "Setting initial weight to $($script:CurrentWeight) for completed 'InitialCheck' step." -Level DEBUG }
-    Write-Log -Message "Total calculated progress weight: $script:TotalWeight" -Level INFO
-    # --- End Calculate Total Weight ---
 
     # Update toast after calculations (This is Step 1: Initial Checks Complete)
     $script:currentStep = 1 # Start counting from Step 1
@@ -1014,8 +1132,8 @@ try {
     # --- End Progress Calculation ---
 
     # Set path for potential Miniserver update (use initially detected path)
-    $LoxoneConfigExePathForMSUpdate = $script:InstalledExePath
-    Write-Log -Message "[Miniserver] Using initially determined Loxone Config path for potential Miniserver update: '$LoxoneConfigExePathForMSUpdate'" -Level INFO
+    $LoxoneConfigExePathForMSUpdate = $script:InstalledExePath # Still needed for the check below, even if not passed to Update-MS
+    Write-Log -Message "[Miniserver] Using initially determined Loxone Config path for potential Miniserver update check: '$LoxoneConfigExePathForMSUpdate'" -Level INFO
 
     # Check if Config update is needed (using $configUpdateNeeded determined earlier)
     if ($configUpdateNeeded) {
@@ -1089,7 +1207,7 @@ try {
                 TotalWeight      = $script:TotalWeight
             }
             Write-Log -Message "[Config] Calling Invoke-LoxoneDownload for Config Update using stored command object and splatting." -Level DEBUG
-            $script:currentDownload += 1 # Increment before download
+            # $script:currentDownload += 1 # Increment before download - Incorrect, should be done once per download step
             $downloadSuccess = Invoke-LoxoneDownload @downloadParams
             if (-not $downloadSuccess) { throw "Invoke-LoxoneDownload reported failure. Halting update process." }
             $script:CurrentWeight += Get-StepWeight -StepID 'DownloadConfig' # Increment weight AFTER successful download
@@ -1273,32 +1391,36 @@ try {
 # --- Step: Update Miniservers ---
 # Check if this step should run based on conditions calculated earlier
 $runMiniserverUpdateStep = $false
-if ($miniserverCount -gt 0 -and $configUpdateNeeded) { $runMiniserverUpdateStep = $true }
+if ($miniserverCount -gt 0) { $runMiniserverUpdateStep = $true } # Condition changed to run if servers exist
 
 if ($runMiniserverUpdateStep) {
-    $script:currentStep++
-    $msUpdateStepName = "Updating Miniservers ($miniserverCount)"
-    Write-Log -Message "[Miniserver] $msUpdateStepName (Step $($script:currentStep)/$($script:totalSteps))..." -Level INFO
-
-    # Update Toast for MS Update Start
-    $toastParamsMSUpdateStart = @{
-        StepNumber    = $script:currentStep
-        TotalSteps    = $script:totalSteps
-        StepName      = $msUpdateStepName
-        CurrentWeight = $script:CurrentWeight # Pass current weight
-        TotalWeight   = $script:TotalWeight
-    }
-    Update-PersistentToast @toastParamsMSUpdateStart
-
-    if (-not ([string]::IsNullOrWhiteSpace($LoxoneConfigExePathForMSUpdate)) -and (Test-Path $LoxoneConfigExePathForMSUpdate)) {
-        $miniserversUpdated = Update-MS -DesiredVersion $LatestVersion -MSListPath $MSListPath -LogFile $global:LogFile -MaxLogFileSizeMB $MaxLogFileSizeMB -DebugMode:$DebugMode -ScriptSaveFolder $ScriptSaveFolder -InstalledExePath (Split-Path -Parent $LoxoneConfigExePathForMSUpdate)
+    # Only run if Config needed updating AND Miniservers exist in the list
+    if ($configUpdateNeeded -and $runMiniserverUpdateStep) {
+        # Increment step and update toast ONLY if attempting the update
+        $script:currentStep++
+        $msUpdateStepName = "Updating Miniservers ($miniserverCount)"
+        Write-Log -Message "[Miniserver] $msUpdateStepName (Step $($script:currentStep)/$($script:totalSteps))..." -Level INFO
+ 
+        # Update Toast for MS Update Start
+        $toastParamsMSUpdateStart = @{
+            StepNumber    = $script:currentStep
+            TotalSteps    = $script:totalSteps
+            StepName      = $msUpdateStepName
+            CurrentWeight = $script:CurrentWeight # Pass current weight
+            TotalWeight   = $script:TotalWeight
+        }
+        Update-PersistentToast @toastParamsMSUpdateStart
+ 
+        Write-Log -Message "[Miniserver] Config needed update and Miniservers exist. Proceeding with Update-MS function." -Level INFO
+        # Pass StepNumber and TotalSteps to Update-MS (Removed -InstalledExePath argument)
+        $miniserversUpdated = Update-MS -DesiredVersion $LatestVersion -MSListPath $MSListPath -LogFile $global:LogFile -MaxLogFileSizeMB $MaxLogFileSizeMB -DebugMode:$DebugMode -ScriptSaveFolder $ScriptSaveFolder -StepNumber $script:currentStep -TotalSteps $script:totalSteps
         # Add weight based on the number of servers AFTER the update attempt
         if (-not $script:ErrorOccurred) {
-             $msWeightPerServer = Get-StepWeight -StepID 'UpdateMS' # Get weight per server (defined in $ProgressSteps)
+             $msWeightPerServer = 2 # Define weight per server directly here as it's only used in this block
              $msTotalWeight = $miniserverCount * $msWeightPerServer
              $script:CurrentWeight += $msTotalWeight
              Write-Log -Message "[Miniserver] Added weight for Miniserver updates. Current weight: $($script:CurrentWeight)." -Level DEBUG
-
+ 
              # Update Toast for MS Update Complete
              $toastParamsMSUpdateComplete = @{
                  StepNumber    = $script:currentStep
@@ -1309,19 +1431,19 @@ if ($runMiniserverUpdateStep) {
              }
              Update-PersistentToast @toastParamsMSUpdateComplete
         }
-    } else {
-        Write-Log -Message "[Miniserver] Skipping Miniserver update because a valid Loxone Config path could not be determined (Path: '$LoxoneConfigExePathForMSUpdate')." -Level WARN
-        # Update Toast for MS Update Skipped (Config Path Issue)
-        $toastParamsMSSkipPath = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Skipped MS Update (No Config Path)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-        Update-PersistentToast @toastParamsMSSkipPath
+        # Removed incorrect 'else' block and misplaced toast update here
+    } elseif ($runMiniserverUpdateStep) { # Condition if MS list exists but Config update was NOT needed
+        # Increment step counter here for skipped step
+        $script:currentStep++
+        Write-Log -Message "[Miniserver] Skipping Miniserver update because Config was already up-to-date." -Level INFO
+        # Update Toast for MS Update Skipped (Config Up-to-date)
+        $toastParamsMSSkipConfig = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Skipped MS Update (Config OK)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
+        Update-PersistentToast @toastParamsMSSkipConfig
         # Add weight for skipped step
-        $msWeightPerServer = Get-StepWeight -StepID 'UpdateMS'; $msTotalWeight = $miniserverCount * $msWeightPerServer; $script:CurrentWeight += $msTotalWeight
-        Write-Log -Message "[Miniserver] Added weight for skipped MS update step. Current weight: $($script:CurrentWeight)." -Level DEBUG
+        $msWeightPerServer = 2; $msTotalWeight = $miniserverCount * $msWeightPerServer; $script:CurrentWeight += $msTotalWeight
+        Write-Log -Message "[Miniserver] Added weight for skipped MS update step (Config OK). Current weight: $($script:CurrentWeight)." -Level DEBUG
     }
-} else { # Corresponds to if ($runMiniserverUpdateStep)
-     if ($miniserverCount -gt 0) { Write-Log -Message "[Miniserver] Skipping Miniserver update step as Config was not updated or list was empty/invalid." -Level INFO }
-     else { Write-Log -Message "[Miniserver] Skipping Miniserver update step as no servers were listed." -Level INFO }
-     # $script:currentStep++ # Do NOT increment step counter when skipping
+} else { # Corresponds to if ($runMiniserverUpdateStep) - i.e., no servers in list
      # Remove toast update for skipped step
      # $toastParamsMSSkipCond = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Miniserver Update Skipped"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
      # Update-PersistentToast @toastParamsMSSkipCond
@@ -1329,10 +1451,14 @@ if ($runMiniserverUpdateStep) {
      $msWeightPerServer = Get-StepWeight -StepID 'UpdateMS'; $msTotalWeight = $miniserverCount * $msWeightPerServer; $script:CurrentWeight += $msTotalWeight
      Write-Log -Message "[Miniserver] Added weight for skipped MS update step. Current weight: $($script:CurrentWeight)." -Level DEBUG
 }
-
+ 
 # --- Finalization Step ---
-$script:currentStep++ # Increment for the finalization step
+# Only increment if the MS update step was actually run (not skipped)
+if ($configUpdateNeeded -and $runMiniserverUpdateStep) {
+    $script:currentStep++ # Increment for the finalization step
+}
 $finalStepName = "Finalizing"
+# Use the potentially incremented step number
 Write-Log -Message "[Main] $finalStepName (Step $($script:currentStep)/$($script:totalSteps))..." -Level INFO
 $anyUpdatePerformed = $script:configUpdated -or $miniserversUpdated # Re-evaluate here
 Write-Log -Message "Update Status - Config Updated: $($script:configUpdated), Miniservers Updated: $($miniserversUpdated), Any Update Performed: $anyUpdatePerformed" -Level INFO
@@ -1357,8 +1483,13 @@ if (-not $script:ErrorOccurred) {
 
 } # --- End of Main Try Block ---
 catch {
-    $script:ErrorOccurred = $true; $script:LastErrorLine = try { $_.InvocationInfo.ScriptLineNumber } catch { 0 }
-    $exceptionMessage = try { $_ | Out-String } catch { "Could not retrieve full error object." }; $commandName = try { $_.InvocationInfo.MyCommand.ToString() -as [string] } catch { "N/A" }; $scriptName = try { $_.InvocationInfo.ScriptName -as [string] } catch { "N/A" }; $lineContent = try { $_.InvocationInfo.Line -as [string] } catch { "N/A" }
+    $script:ErrorOccurred = $true
+    # Safely get error details, checking for null InvocationInfo
+    $script:LastErrorLine = if ($_.InvocationInfo) { try { $_.InvocationInfo.ScriptLineNumber } catch { 0 } } else { 0 }
+    $exceptionMessage = try { $_ | Out-String } catch { "Could not retrieve full error object." }
+    $commandName = if ($_.InvocationInfo) { try { $_.InvocationInfo.MyCommand.ToString() -as [string] } catch { "N/A" } } else { "N/A" }
+    $scriptName = if ($_.InvocationInfo) { try { $_.InvocationInfo.ScriptName -as [string] } catch { "N/A" } } else { "N/A" }
+    $lineContent = if ($_.InvocationInfo) { try { $_.InvocationInfo.Line -as [string] } catch { "N/A" } } else { "N/A" }
     $errorMessage = "An unexpected error occurred during the update process: $exceptionMessage"; $errorDetails = @"
 Error: $exceptionMessage
 Script: $scriptName
@@ -1388,13 +1519,13 @@ Line Content: $lineContent
 
 # --- Final Exit Code Handling ---
 if ($script:ErrorOccurred) {
-    Write-Log -Message "Exiting with error code 1 due to detected errors." -Level ERROR
+    Write-Log -Message "Script finished with errors. Exit Code: 1" -Level ERROR
     Exit 1
 } else {
-    Write-Log -Message "Exiting with code 0 (Success)." -Level INFO
     # Always attempt final notification; toast function handles context
     Write-Log -Message "Preparing final status notification." -Level DEBUG
-
+    # REMOVED premature exit log message
+ 
     # --- Final Log Rotation (Moved Here) ---
     $logPathToShow = $null
     if ($global:LogFile) {
@@ -1414,9 +1545,9 @@ if ($script:ErrorOccurred) {
 
     if (-not $anyUpdatePerformed) {
         Write-Log -Message "No updates performed. Constructing CONCISE summary notification." -Level INFO; $summaryLines = @() # Removed "Update Check:" line
-        if (Test-Path $MSListPath) { try { $miniserverEntries = Get-Content $MSListPath -ErrorAction Stop | Where-Object { $_ -match '\S' -and $_.TrimStart()[0] -ne '#' }; if (($miniserverEntries | Measure-Object).Count -gt 0) { $summaryLines += "Miniserver(s): Up-to-date (v$($LatestVersion))." } else { $summaryLines += "Miniserver(s): List empty/not checked." } } catch { $summaryLines += "Miniserver(s): Error checking list." } } else { $summaryLines += "Miniserver(s): List not found." }
-        if ($InstalledExePath -and (Test-Path $InstalledExePath)) { if ($LatestVersion -ne $normalizedInstalled) { $summaryLines += "Config: Update available (v$($LatestVersion.ToString())) but skipped (Installed: v$InstalledVersion)." } else { $summaryLines += "Config: Up-to-date (v$InstalledVersion)." } } else { $summaryLines += "Config: Not Found." }
-        if ($UpdateLoxoneApp) { if ($appDetails -and -not $appDetails.Error) { if ($appUpdateNeeded) { $summaryLines += "App: Update available (v$($latestLoxWindowsVersion)) but skipped/failed." } else { $summaryLines += "App: Up-to-date (v$($appDetails.FileVersion))." } } elseif ($latestLoxWindowsVersion) { $summaryLines += "App: Not Found/Error checking." } else { $summaryLines += "App: Check skipped (details unavailable)." } } else { $summaryLines += "App: Check disabled." }
+        if (Test-Path $MSListPath) { try { $miniserverEntries = Get-Content $MSListPath -ErrorAction Stop | Where-Object { $_ -match '\S' -and $_.TrimStart()[0] -ne '#' }; if (($miniserverEntries | Measure-Object).Count -gt 0) { $summaryLines += "Miniserver(s): Up-to-date (v$($LatestVersion))" } else { $summaryLines += "Miniserver(s): List empty/not checked." } } catch { $summaryLines += "Miniserver(s): Error checking list." } } else { $summaryLines += "Miniserver(s): List not found." }
+        if ($InstalledExePath -and (Test-Path $InstalledExePath)) { if ($LatestVersion -ne $normalizedInstalled) { $summaryLines += "Config: Update available (v$($LatestVersion.ToString())) but skipped (Installed: v$($script:InitialInstalledVersion))." } else { $summaryLines += "Config: Up-to-date (v$($script:InitialInstalledVersion))" } } else { $summaryLines += "Config: Not Found." } # Removed dot
+        if ($UpdateLoxoneApp) { if ($appDetails -and -not $appDetails.Error) { if ($appUpdateNeeded) { $summaryLines += "App ($selectedAppChannelName): Update available (v$($latestLoxWindowsVersion)) but skipped/failed." } else { $summaryLines += "App ($selectedAppChannelName): Up-to-date (v$($appDetails.FileVersion))" } } elseif ($latestLoxWindowsVersion) { $summaryLines += "App ($selectedAppChannelName): Not Found/Error checking." } else { $summaryLines += "App ($selectedAppChannelName): Check skipped (details unavailable)." } } else { $summaryLines += "App: Check disabled." } # Removed dot
         $summaryMessage = $summaryLines -join "`n"; $script:CurrentWeight = $script:TotalWeight
         # Pass the rotated log path
         # Show summary toast only if interactive run (as no update was performed)
@@ -1434,8 +1565,7 @@ if ($script:ErrorOccurred) {
         # Pass the rotated log path
         Show-FinalStatusToast -StatusMessage $successMessage -Success:$true -LogFileToShow $logPathToShow
     }
+    Write-Log -Level INFO -Message "Script finished successfully. Exit Code: 0"
     Exit 0
 }
-# End of script
-# Removed extra closing brace
 # End of script
