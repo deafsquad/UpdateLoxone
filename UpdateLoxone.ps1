@@ -819,7 +819,7 @@ if ($appDetails -and -not $appDetails.Error) {
                     TotalSteps = $script:totalSteps
                     StepName   = "Stopping Loxone App"
                 }
-                Update-PersistentToast @toastParamsStopApp
+                if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsStopApp }
                 if (Get-ProcessStatus -ProcessName $appDetails.ShortcutName -StopProcess:$true) { Write-Log -Message "[App] Successfully requested termination for process '$($appDetails.ShortcutName)'." -Level INFO; Start-Sleep -Seconds 2 }
                 else { Write-Log -Message "[App] Get-ProcessStatus -StopProcess returned false for '$($appDetails.ShortcutName)'. It might have failed or was already stopped." -Level WARN }
             } else { Write-Log -Message "[App] Process '$($appDetails.ShortcutName)' is not running." -Level INFO }
@@ -845,7 +845,7 @@ if ($appDetails -and -not $appDetails.Error) {
             CurrentWeight    = $script:CurrentWeight # Pass current weight for overall progress
             TotalWeight      = $script:TotalWeight
         }
-        Update-PersistentToast @toastParamsAppDownloadStart
+        if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppDownloadStart }
 
         # Call Invoke-LoxoneDownload
         $appDownloadParams = @{
@@ -883,7 +883,7 @@ if ($appDetails -and -not $appDetails.Error) {
             CurrentWeight = $script:CurrentWeight # Pass current weight
             TotalWeight   = $script:TotalWeight
         }
-        Update-PersistentToast @toastParamsAppInstall
+        if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppInstall }
         $appInstallArgs = "/$InstallMode"
         Write-Log -Message "[App] Executing: Start-Process -FilePath '$LoxoneWindowsInstallerPath' -ArgumentList '$appInstallArgs' -Wait -PassThru" -Level DEBUG
         try {
@@ -904,7 +904,7 @@ if ($appDetails -and -not $appDetails.Error) {
                      CurrentWeight = $script:CurrentWeight # Pass current weight
                      TotalWeight   = $script:TotalWeight
                  }
-                 Update-PersistentToast @toastParamsAppVerify
+                 if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppVerify }
 
                  Write-Log -Message "[App] Waiting 5 seconds before verification..." -Level DEBUG; Start-Sleep -Seconds 5
                  Write-Log -Message "[App] Verifying Loxone for Windows installation..." -Level INFO
@@ -924,7 +924,7 @@ if ($appDetails -and -not $appDetails.Error) {
                              CurrentWeight = $script:CurrentWeight # Pass current weight
                              TotalWeight   = $script:TotalWeight
                          }
-                         Update-PersistentToast @toastParamsAppComplete
+                         if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppComplete }
 
                          # --- Step: Restart App (if needed) ---
                          # Not counted as a main step, but update status text
@@ -937,21 +937,21 @@ if ($appDetails -and -not $appDetails.Error) {
                                  CurrentWeight = $script:CurrentWeight # Pass current weight
                                  TotalWeight   = $script:TotalWeight
                              }
-                             Update-PersistentToast @toastParamsAppRestart
+                             if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppRestart }
                              $appPathToRestart = $newAppDetails.InstallLocation
                              if ($script:IsInteractive -and -not $script:isRunningAsSystem) {
                                  Write-Log -Message "[App] Restarting interactively using Start-Process..." -Level INFO
                                  try { Start-Process -FilePath $appPathToRestart -WindowStyle Minimized -ErrorAction Stop; Write-Log -Message "[App] Start-Process command issued for '$appPathToRestart'." -Level INFO }
-                                 catch { Write-Log -Message "[App] Failed to restart Loxone App interactively using Start-Process: $($_.Exception.Message)" -Level ERROR; $toastParamsAppRestartFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Failed to restart Loxone App"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppRestartFail }
+                                 catch { Write-Log -Message "[App] Failed to restart Loxone App interactively using Start-Process: $($_.Exception.Message)" -Level ERROR; $toastParamsAppRestartFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Failed to restart Loxone App"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppRestartFail } }
                              } elseif ($script:isRunningAsSystem) { # This condition is now technically always false here due to re-launch logic, but keep structure for now
                                  Write-Log -Message "[App] Running as SYSTEM. Attempting restart via Invoke-AsCurrentUser function..." -Level INFO
                                  try { Write-Log -Message "[App] Calling Invoke-AsCurrentUser -FilePath '$appPathToRestart' -Visible -NoWait..." -Level DEBUG; Invoke-AsCurrentUser -FilePath $appPathToRestart -NoWait -ErrorAction Stop; Write-Log -Message "[App] Invoke-AsCurrentUser command issued for '$appPathToRestart'." -Level INFO }
-                                 catch { Write-Log -Message "[App] Invoke-AsCurrentUser function failed to restart Loxone App: $($_.Exception.Message)" -Level ERROR; $toastParamsAppRestartFailSys = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Failed to restart Loxone App (System)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppRestartFailSys }
-                             } else { Write-Log -Message "[App] Unclear execution context (Not Interactive User, Not SYSTEM). Automatic restart not attempted." -Level WARN; $toastParamsAppRestartSkip = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="WARN: Loxone App restart skipped"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppRestartSkip }
+                                 catch { Write-Log -Message "[App] Invoke-AsCurrentUser function failed to restart Loxone App: $($_.Exception.Message)" -Level ERROR; $toastParamsAppRestartFailSys = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Failed to restart Loxone App (System)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppRestartFailSys } }
+                             } else { Write-Log -Message "[App] Unclear execution context (Not Interactive User, Not SYSTEM). Automatic restart not attempted." -Level WARN; $toastParamsAppRestartSkip = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="WARN: Loxone App restart skipped"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppRestartSkip } }
                          } else { Write-Log -Message "[App] Loxone App was not running before the update. No restart needed." -Level INFO }
                      # Removed duplicate line from previous failed diff
-                 } else { Write-Log -Message "[App] Loxone App update verification failed! Expected FileVersion '$normalizedLatestAppVerify' but found '$normalizedNewInstalledAppVerify' after installation." -Level ERROR; $toastParamsAppVerifyFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Loxone App verification failed!"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppVerifyFail }
-             } else { Write-Log -Message "[App] Failed to get Loxone App details from registry after installation attempt. Verification failed. Error: $($newAppDetails.Error)" -Level ERROR; $toastParamsAppVerifyFailReg = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Loxone App verification failed (Registry)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppVerifyFailReg }
+                 } else { Write-Log -Message "[App] Loxone App update verification failed! Expected FileVersion '$normalizedLatestAppVerify' but found '$normalizedNewInstalledAppVerify' after installation." -Level ERROR; $toastParamsAppVerifyFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Loxone App verification failed!"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppVerifyFail } }
+             } else { Write-Log -Message "[App] Failed to get Loxone App details from registry after installation attempt. Verification failed. Error: $($newAppDetails.Error)" -Level ERROR; $toastParamsAppVerifyFailReg = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="ERROR: Loxone App verification failed (Registry)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppVerifyFailReg } }
             }
         } catch { Write-Log -Message "[App] Failed to run Loxone for Windows installer: $($_.Exception.Message)" -Level ERROR; $toastParamsAppInstallFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="FAILED: Loxone App installation failed"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }; Update-PersistentToast @toastParamsAppInstallFail; throw "[App] Failed to execute Loxone for Windows installer." }
 
@@ -960,8 +960,8 @@ if ($appDetails -and -not $appDetails.Error) {
     } # Closes: else corresponding to if ($appUpdateNeeded)
  
 } # Closes: if ($appDetails -and -not $appDetails.Error)
-elseif ($UpdateLoxoneApp -and -not $latestLoxWindowsVersion) { Write-Log -Message "[App Check] Skipping Loxone App update (Channel: $selectedAppChannelName) because latest version details could not be retrieved from XML (XML fetch/parse failed)." -Level WARN; $updateToastParams14 = @{ NewStatus = "WARN: Loxone App update skipped (failed to get latest version info)." }; Update-PersistentToast @updateToastParams14 } # UseTaskWorkaround removed
-elseif ($UpdateLoxoneApp -and (!$appDetails -or $appDetails.Error)) { Write-Log -Message "[App Check] Skipping Loxone App update check (Channel: $selectedAppChannelName) because installed application details could not be retrieved." -Level WARN; $updateToastParams15 = @{ StepName = "WARN: Loxone App update skipped (cannot find installed app)." }; Update-PersistentToast @updateToastParams15 } # UseTaskWorkaround removed
+elseif ($UpdateLoxoneApp -and -not $latestLoxWindowsVersion) { Write-Log -Message "[App Check] Skipping Loxone App update (Channel: $selectedAppChannelName) because latest version details could not be retrieved from XML (XML fetch/parse failed)." -Level WARN; $updateToastParams14 = @{ NewStatus = "WARN: Loxone App update skipped (failed to get latest version info)." }; if ($script:IsInteractiveRun) { Update-PersistentToast @updateToastParams14 } } # UseTaskWorkaround removed
+elseif ($UpdateLoxoneApp -and (!$appDetails -or $appDetails.Error)) { Write-Log -Message "[App Check] Skipping Loxone App update check (Channel: $selectedAppChannelName) because installed application details could not be retrieved." -Level WARN; $updateToastParams15 = @{ StepName = "WARN: Loxone App update skipped (cannot find installed app)." }; if ($script:IsInteractiveRun) { Update-PersistentToast @updateToastParams15 } } # UseTaskWorkaround removed
 # --- End App Check ---
  
  
@@ -1221,7 +1221,7 @@ try { # --- Start of Main Try Block ---
     $script:currentStep = 1 # Start counting from Step 1
     $initialCheckStepName = "Initial Checks Complete"
     Write-Log -Level DEBUG -Message "Updating toast for step $($script:currentStep)/$($script:totalSteps): $initialCheckStepName"
-    Update-PersistentToast -StepNumber $script:currentStep -TotalSteps $script:totalSteps -StepName $initialCheckStepName -CurrentWeight $script:CurrentWeight -TotalWeight $script:TotalWeight
+    if ($script:IsInteractiveRun) { Update-PersistentToast -StepNumber $script:currentStep -TotalSteps $script:totalSteps -StepName $initialCheckStepName -CurrentWeight $script:CurrentWeight -TotalWeight $script:TotalWeight }
     # --- End Progress Calculation ---
 
     # Set path for potential Miniserver update (use initially detected path)
@@ -1244,7 +1244,7 @@ try { # --- Start of Main Try Block ---
         if ($anyProcessRunning -and $SkipUpdateIfAnyProcessIsRunning) {
             Write-Log -Message "Skipping update because one or more Loxone processes are running and -SkipUpdateIfAnyProcessIsRunning was specified." -Level WARN
             $toastParamsCfgSkipRunningPre = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Skipped: Loxone process running"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-            Update-PersistentToast @toastParamsCfgSkipRunningPre
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgSkipRunningPre }
             exit 0 # Exit cleanly
         }
 
@@ -1258,7 +1258,7 @@ try { # --- Start of Main Try Block ---
                  Write-Log -Message "[Config] Existing installer '$InstallerPath' matches target version. Skipping download." -Level INFO; $skipDownload = $true
                  # Update Toast to reflect skipping download
                  $toastParamsCfgSkipDownload = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Using Existing Config Installer"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-                 Update-PersistentToast @toastParamsCfgSkipDownload
+                 if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgSkipDownload }
                  $script:CurrentWeight += Get-StepWeight -StepID 'DownloadConfig' # Add weight even if skipped
                  Write-Log -Message "[Config] Added weight for skipped download. Current weight: $($script:CurrentWeight)." -Level DEBUG
             } else { Write-Log -Message "[Config] Existing installer '$InstallerPath' version mismatch. Removing and proceeding with download." -Level WARN; Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue }
@@ -1279,7 +1279,7 @@ try { # --- Start of Main Try Block ---
                 CurrentWeight    = $script:CurrentWeight
                 TotalWeight      = $script:TotalWeight
             }
-            Update-PersistentToast @toastParamsCfgDownloadStart
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgDownloadStart }
 
             # Call Invoke-LoxoneDownload
             $downloadParams = @{
@@ -1316,7 +1316,7 @@ try { # --- Start of Main Try Block ---
                 DownloadFileName = $ZipFileName # Keep filename for context
                 ProgressPercentage = 100 # Set download bar to 100%
             }
-            Update-PersistentToast @toastParamsCfgDownloadVerify
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgDownloadVerify }
         }
 
         # --- Extract (Part of Download Step if download happened, otherwise part of Install step) ---
@@ -1329,7 +1329,7 @@ try { # --- Start of Main Try Block ---
             CurrentWeight = $script:CurrentWeight
             TotalWeight   = $script:TotalWeight
         }
-        Update-PersistentToast @toastParamsCfgExtract
+        if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgExtract }
         # Ensure installer isn't present from a previous failed run if download was skipped
         if ($skipDownload -and (Test-Path $InstallerPath)) {
             Write-Log -Level DEBUG -Message "Download skipped, removing potentially stale installer before extraction: $InstallerPath"
@@ -1365,7 +1365,7 @@ try { # --- Start of Main Try Block ---
             CurrentWeight = $script:CurrentWeight
             TotalWeight   = $script:TotalWeight
         }
-        Update-PersistentToast @toastParamsCfgVerifySig
+        if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgVerifySig }
         # Use ExpectedXmlSignature fetched earlier
         if ($ExpectedXmlSignature) {
              $sigCheckResult = Get-ExecutableSignature -ExePath $InstallerPath
@@ -1407,14 +1407,14 @@ try { # --- Start of Main Try Block ---
         if ($anyProcessRunning -and $SkipUpdateIfAnyProcessIsRunning) {
             Write-Log -Message "Skipping installation because one or more Loxone processes are running and -SkipUpdateIfAnyProcessIsRunning was specified." -Level WARN
             $toastParamsCfgSkipRunningInstall = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Skipped Install: Loxone process running"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-            Update-PersistentToast @toastParamsCfgSkipRunningInstall
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgSkipRunningInstall }
             $installationSkippedDueToRunningProcess = $true
             # Do not exit script here, allow potential MS update check later if needed? Or should we exit? For now, just skip install.
         } elseif ($CloseApplications) {
             if ($anyProcessRunning) { # Only close if actually running
                 Write-Log -Message "[Config] Attempting to close running Loxone applications..." -Level INFO
                 $toastParamsCfgCloseApps = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Closing Loxone Applications"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-                Update-PersistentToast @toastParamsCfgCloseApps
+                if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgCloseApps }
                 foreach ($procName in $processesToCheck) { Get-ProcessStatus -ProcessName $procName -StopProcess:$true }
                 Write-Log -Message "[Config] Close application requests sent." -Level INFO
                 Start-Sleep -Seconds 2 # Give processes time to close
@@ -1422,14 +1422,14 @@ try { # --- Start of Main Try Block ---
         } elseif ($anyProcessRunning) { # Apps running, but CloseApps not specified
              Write-Log -Message "[Config] Loxone application(s) are running, but -CloseApplications was not specified. Installation might fail." -Level WARN
              $toastParamsCfgWarnRunning = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="WARN: Loxone process(es) running"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-             Update-PersistentToast @toastParamsCfgWarnRunning
+             if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgWarnRunning }
         }
 
         # --- Install (if not skipped) ---
         if (-not $installationSkippedDueToRunningProcess) {
             Write-Log -Message "[Config] Running Loxone Config installer..." -Level INFO
             $toastParamsCfgInstall = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName=$configInstallStepName; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-            Update-PersistentToast @toastParamsCfgInstall
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgInstall }
 
             $installArgs = "/$InstallMode"; Write-Log -Message "[Config] Executing: Start-Process -FilePath '$InstallerPath' -ArgumentList '$installArgs' -Wait -PassThru" -Level DEBUG
             $installProcess = Start-Process -FilePath $InstallerPath -ArgumentList $installArgs -Wait -PassThru -ErrorAction Stop
@@ -1443,7 +1443,7 @@ try { # --- Start of Main Try Block ---
             $verifyInstallStepName = "Verifying Loxone Config Installation"
              Write-Log -Message "[Config] $verifyInstallStepName..." -Level INFO
              $toastParamsCfgVerifyInstall = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName=$verifyInstallStepName; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-             Update-PersistentToast @toastParamsCfgVerifyInstall
+             if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgVerifyInstall }
 
             $NewInstalledExePath = Get-LoxoneExePath; $NewInstalledVersion = if ($NewInstalledExePath -and (Test-Path $NewInstalledExePath)) { (Get-Item -Path $NewInstalledExePath -ErrorAction SilentlyContinue).VersionInfo.FileVersion } else { "" }; $normalizedNewInstalled = Convert-VersionString $NewInstalledVersion
             if ($normalizedNewInstalled -eq $LatestVersion) {
@@ -1454,12 +1454,12 @@ try { # --- Start of Main Try Block ---
                 Write-Log -Message "[Config] Added weight for verification. Current weight: $($script:CurrentWeight)." -Level DEBUG
 
                 $toastParamsCfgInstallComplete = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Loxone Config Update Complete (v$NewInstalledVersion)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-                Update-PersistentToast @toastParamsCfgInstallComplete
+                if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgInstallComplete }
             } else {
                  $errorMessage = "Update verification failed! Expected version '$($LatestVersion)' but found '$($normalizedNewInstalled)' after installation."
                  Write-Log -Message "[Config] $errorMessage" -Level ERROR
                  $toastParamsCfgVerifyFail = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="FAILED: Config verification failed!"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-                 Update-PersistentToast @toastParamsCfgVerifyFail
+                 if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgVerifyFail }
                  throw $errorMessage
             }
         }
@@ -1502,7 +1502,7 @@ if ($runMiniserverUpdateStep) {
             CurrentWeight = $script:CurrentWeight # Pass current weight
             TotalWeight   = $script:TotalWeight
         }
-        Update-PersistentToast @toastParamsMSUpdateStart
+        if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsMSUpdateStart }
  
         Write-Log -Message "[Miniserver] Config needed update and Miniservers exist. Proceeding with Update-MS function." -Level INFO
         # Pass StepNumber and TotalSteps to Update-MS (Removed -InstalledExePath argument)
@@ -1522,7 +1522,7 @@ if ($runMiniserverUpdateStep) {
                  CurrentWeight = $script:CurrentWeight
                  TotalWeight   = $script:TotalWeight
              }
-             Update-PersistentToast @toastParamsMSUpdateComplete
+             if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsMSUpdateComplete }
         }
         # Removed incorrect 'else' block and misplaced toast update here
     } # Removed redundant elseif block that handled skipping when config was up-to-date
@@ -1558,7 +1558,7 @@ if (-not $script:ErrorOccurred) {
          CurrentWeight = $script:CurrentWeight
          TotalWeight   = $script:TotalWeight
      }
-     Update-PersistentToast @toastParamsFinal
+     if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsFinal }
 }
 # --- End Finalization Step ---
 
