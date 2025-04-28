@@ -40,6 +40,23 @@
             $global:LogFile = $LogFile
             $script:DebugMode = $DebugMode.IsPresent
             Write-Log -Message "Starting Miniserver update check process..." -Level "INFO"
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+# WARNING: Bypasses certificate validation. Use with caution.
+    try {
+        add-type @"
+        using System.Net;
+        using System.Security.Cryptography.X509Certificates;
+        public class TrustAllCertsPolicy : ICertificatePolicy {
+            public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem) {
+                return true;
+            }
+        }
+"@
+        [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+        Write-Log -Level INFO -Message "Temporarily bypassing SSL/TLS certificate validation for Miniserver checks."
+    } catch {
+        Write-Log -Level WARN -Message "Failed to apply certificate validation bypass. Certificate errors may occur. Error: $($_.Exception.Message)"
+    }
 
             if (-not (Test-Path $MSListPath)) {
                 Write-Log -Message "Miniserver list file not found at '${MSListPath}'. Skipping Miniserver updates." -Level "WARN"

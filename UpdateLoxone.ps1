@@ -941,7 +941,7 @@ if ($appDetails -and -not $appDetails.Error) {
  
 } # Closes: if ($appDetails -and -not $appDetails.Error)
 elseif ($UpdateLoxoneApp -and -not $latestLoxWindowsVersion) { Write-Log -Message "[App Check] Skipping Loxone App update (Channel: $selectedAppChannelName) because latest version details could not be retrieved from XML (XML fetch/parse failed)." -Level WARN; $updateToastParams14 = @{ NewStatus = "WARN: Loxone App update skipped (failed to get latest version info)." }; Update-PersistentToast @updateToastParams14 } # UseTaskWorkaround removed
-elseif ($UpdateLoxoneApp -and (!$appDetails -or $appDetails.Error)) { Write-Log -Message "[App Check] Skipping Loxone App update check (Channel: $selectedAppChannelName) because installed application details could not be retrieved." -Level WARN; $updateToastParams15 = @{ NewStatus = "WARN: Loxone App update skipped (cannot find installed app)." }; Update-PersistentToast @updateToastParams15 } # UseTaskWorkaround removed
+elseif ($UpdateLoxoneApp -and (!$appDetails -or $appDetails.Error)) { Write-Log -Message "[App Check] Skipping Loxone App update check (Channel: $selectedAppChannelName) because installed application details could not be retrieved." -Level WARN; $updateToastParams15 = @{ StepName = "WARN: Loxone App update skipped (cannot find installed app)." }; Update-PersistentToast @updateToastParams15 } # UseTaskWorkaround removed
 # --- End App Check ---
  
  
