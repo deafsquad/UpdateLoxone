@@ -99,7 +99,7 @@
                     }
 
                     $uriBuilder.Path = "/dev/cfg/version"
-                    $uriBuilder.Port = 80
+                    # Port is handled implicitly by UriBuilder based on Scheme and original URI
                     $uriBuilder.Password = $null
                     $uriBuilder.UserName = $null
                     $versionUri = $uriBuilder.Uri.AbsoluteUri
@@ -377,8 +377,9 @@
         $verificationUri = "$($scheme)://$($uriObject.Authority)/dev/cfg/version" # Construct version URI
         $autoupdateUri = "$($scheme)://$($uriObject.Authority)/dev/sys/autoupdate" # Construct autoupdate URI
  
-        Write-Log -Message "Attempting to trigger update for Miniserver: ${redactedUri}" -Level INFO
- 
+        $redactedAutoupdateUri = Get-RedactedPassword $autoupdateUri # Redact the correct URI for logging
+        Write-Log -Message "Attempting to trigger update for Miniserver via: ${redactedAutoupdateUri}" -Level INFO # Use redacted autoupdate URI in log
+
         try {
             # --- Trigger Update via URL ---
             $triggerParams = @{
@@ -411,6 +412,7 @@
             $msResponsive = $false
             $lastResponse = $null
             $verificationSuccess = $false
+            $loggedUpdatingStatus = $false # Flag to ensure 503 'Updating' status is logged only once
 
             # Prepare verification parameters (used inside loop)
             $verifyParams = @{
@@ -427,6 +429,9 @@
             }
 
             while (((Get-Date) - $startTime) -lt $timeout) {
+                # Wait 10 seconds between checks
+                Start-Sleep -Seconds 10
+
                 try {
                     Write-Log -Message "Polling $verificationUri ..." -Level DEBUG
                     # Dynamically build and execute the command for polling
@@ -471,22 +476,53 @@
                             Write-Log -Message "Miniserver ${hostForPing} responded with unexpected status $($lastResponse.StatusCode). Continuing poll..." -Level WARN
                             Start-Sleep -Seconds $pollInterval.TotalSeconds
                         }
-                    } catch [System.Net.WebException] { # Catch block for polling Invoke-WebRequest (line 408)
+                    } catch [System.Net.WebException] { # Catch block for polling Invoke-WebRequest (line 431)
                         $statusCode = $null
-                        if ($null -ne $_.Exception.Response) {
-                            $statusCode = $_.Exception.Response.StatusCode
-                        }
+                        $errorDetail = $null # Initialize errorDetail
 
-                        if ($statusCode -eq [System.Net.HttpStatusCode]::ServiceUnavailable) {
-                            Write-Log -Message "Miniserver ${hostForPing} returned 503 (Updating/Rebooting)... Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
+                        if ($null -ne $_.Exception.Response) {
+                            $statusCode = [int]$_.Exception.Response.StatusCode # Cast to int
+
+                            if ($statusCode -eq 503) {
+                                try {
+                                    # Read the response body to check for specific error detail
+                                    $responseStream = $_.Exception.Response.GetResponseStream()
+                                    $streamReader = New-Object System.IO.StreamReader($responseStream)
+                                    $responseBody = $streamReader.ReadToEnd()
+                                    $streamReader.Close()
+                                    $responseStream.Close()
+
+                                    # Extract error detail using regex
+                                    if ($responseBody -match '<errordetail>(.*?)</errordetail>') {
+                                        $errorDetail = $matches[1].Trim() # Trim whitespace
+                                    } else {
+                                        $errorDetail = 'Updating (detail unavailable)'
+                                    }
+
+                                    # Log the specific updating status ONCE
+                                    if (-not $loggedUpdatingStatus) {
+                                        Write-Log -Level INFO -Message "Miniserver $hostForPing status: $errorDetail"
+                                        $loggedUpdatingStatus = $true # Set flag so it doesn't log again
+                                    } else {
+                                        Write-Log -Message "Miniserver ${hostForPing} still reporting 503 ($errorDetail)... Will retry check after 10s sleep." -Level DEBUG
+                                    }
+                                } catch {
+                                    # If reading the response body fails, log generic 503
+                                    Write-Log -Message "Miniserver ${hostForPing} returned 503 (Updating/Rebooting - Error reading detail: $($_.Exception.Message))... Will retry check after 10s sleep." -Level DEBUG
+                                }
+                            } else {
+                                # Log other WebExceptions
+                                Write-Log -Message "Miniserver ${hostForPing} WebException ($($statusCode)): $($_.Exception.Message). Will retry check after 10s sleep." -Level DEBUG
+                            }
                         } else {
-                            Write-Log -Message "Miniserver ${hostForPing} WebException ($($statusCode)): $($_.Exception.Message). Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
+                            # Handle cases where there's no response object (e.g., connection timeout)
+                             Write-Log -Message "Miniserver ${hostForPing} WebException (No Response): $($_.Exception.Message). Will retry check after 10s sleep." -Level DEBUG
                         }
-                        Start-Sleep -Seconds $pollInterval.TotalSeconds
-                    } catch { # Catch block for other polling errors (line 408)
+                        # No sleep needed here, it happens at the start of the next loop iteration.
+                    } catch { # Catch block for other polling errors (line 487)
                         # Catch other errors like connection refused, DNS errors, etc.
-                        Write-Log -Message "Miniserver ${hostForPing} unreachable: $($_.Exception.Message). Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
-                        Start-Sleep -Seconds $pollInterval.TotalSeconds
+                        Write-Log -Message "Miniserver ${hostForPing} unreachable: $($_.Exception.Message). Will retry check after 10s sleep." -Level DEBUG
+                        # No sleep needed here, it happens at the start of the next loop iteration.
                     }
                 } # End while loop (line 407)
 

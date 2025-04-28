@@ -277,6 +277,26 @@ try {
         }
         Write-Log -Message "Successfully imported required LoxoneUtils modules individually." -Level INFO
 
+# Force TLS 1.2 for all web requests
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+Write-Log -Level INFO -Message "Applied TLS 1.2 globally."
+
+# WARNING: Bypasses certificate validation globally. Use with caution.
+try {
+    add-type @"
+    using System.Net;
+    using System.Security.Cryptography.X509Certificates;
+    public class TrustAllCertsPolicy : ICertificatePolicy {
+        public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem) {
+            return true;
+        }
+    }
+"@
+    [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
+    Write-Log -Level INFO -Message "Applied global SSL/TLS certificate validation bypass."
+} catch {
+    Write-Log -Level WARN -Message "Failed to apply global certificate validation bypass. Certificate errors may occur. Error: $($_.Exception.Message)"
+}
 # Check if running non-interactively
 # Interactivity check using [Environment]::UserInteractive removed as it was unreliable for Invoke-AsCurrentUser scenario.
 # Environment variables will be logged below for comparison instead.
@@ -1579,8 +1599,8 @@ Line Content: $lineContent
 } # Closing brace for the finally block
 
 # --- Final Exit Code Handling ---
-if ($script:ErrorOccurred) {
-    Write-Log -Message "Script finished with errors. Exit Code: 1" -Level ERROR
+if ($script:ErrorOccurred -and -not $anyUpdatePerformed) {
+    Write-Log -Message "Script finished with errors AND no updates were performed. Exit Code: 1" -Level ERROR
     Exit 1
 } else {
     # Always attempt final notification; toast function handles context
