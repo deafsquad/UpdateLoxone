@@ -195,7 +195,8 @@ function Update-PersistentToast {
                 Write-Log -Level Error -Message "Error creating persistent toast on first update call: ($($_ | Out-String))" # Original log
                 $Global:PersistentToastInitialized = $false # Reset flag on failure
             }
-        } else {
+        } # <-- Closing brace for 'if (-not $Global:PersistentToastInitialized)'
+        else {
             # --- Update Existing Toast using Update-BTNotification and DataBinding ---
             Write-Log -Level Debug -Message "Persistent toast initialized. Updating via Update-BTNotification with DataBinding."
             try {

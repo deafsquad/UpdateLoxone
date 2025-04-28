@@ -82,7 +82,8 @@ param(
     [bool]$UpdateLoxoneApp = $true, # Changed back to bool with default
     [ValidateSet('Test', 'Beta', 'Release', 'Internal', 'InternalV2', 'Latest')]
     [string]$UpdateLoxoneAppChannel = "Latest", # New parameter for App channel
-    [string]$PassedLogFile = $null # Internal: Used when re-launching elevated to specify the log file
+    $PassedLogFile = $null, # Internal: Used when re-launching elevated to specify the log file
+    [switch]$SkipCertificateCheck # New switch to bypass SSL/TLS certificate validation for Miniserver connections
 )
 # XML Signature Verification Function removed - Test showed it's not feasible with current structure
 
@@ -260,7 +261,7 @@ try {
             $modulePath = Join-Path -Path $LoxoneUtilsDir -ChildPath $moduleFile
             if (Test-Path $modulePath) {
                 Write-Log -Message "Importing module: $modulePath" -Level DEBUG
-                $importedModule = Import-Module $modulePath -Force -ErrorAction SilentlyContinue -PassThru # Force ensures reload if needed
+                $importedModule = Import-Module $modulePath -Force -ErrorAction Stop -PassThru # Force ensures reload if needed, Stop on error
                 if (-not $importedModule) {
                     if ($moduleFile -eq 'LoxoneUtils.Toast.psm1') {
                          Write-Log -Message "Failed to load LoxoneUtils.Toast.psm1 module from '$modulePath'. Toast notifications will be unavailable. This may be due to the BurntToast dependency not being met." -Level WARN
@@ -1036,6 +1037,26 @@ if (Test-Path $MSListPath) {
                 $msVersionCheckSuccessPreCheck = $true
             } catch { # Catch for HTTPS attempt
                 Write-Log -Message "[Miniserver Check] HTTPS failed for $msIPPreCheck ($($_.Exception.Message)). Falling back to HTTP." -Level DEBUG
+                # Add more details in Debug mode
+                if ($Global:DebugPreference -eq 'Continue') {
+                    $exceptionDetails = "[Miniserver Check] HTTPS Failure Details for ${msIPPreCheck}:"
+                    if ($_.Exception -is [System.Net.WebException]) {
+                        if ($_.Exception.Status) { $exceptionDetails += "`n  Status: $($_.Exception.Status)" }
+                        if ($_.Exception.Response) {
+                            $responseStream = $_.Exception.Response.GetResponseStream()
+                            $streamReader = New-Object System.IO.StreamReader($responseStream)
+                            $responseBody = $streamReader.ReadToEnd()
+                            $streamReader.Close()
+                            $responseStream.Close()
+                            $exceptionDetails += "`n  Response: $($_.Exception.Response.StatusCode) / $($_.Exception.Response.StatusDescription)"
+                            if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
+                                $exceptionDetails += "`n  Response Body: $($responseBody)"
+                            }
+                        }
+                    }
+                    $exceptionDetails += "`n  Full Exception: $($_.Exception | Out-String)" # Include full exception details
+                    Write-Log -Message $exceptionDetails -Level DEBUG
+                }
                 try { # Try HTTP
                     $httpParamsPreCheck = $iwrParamsBasePreCheck.Clone(); $httpParamsPreCheck.Uri = $versionUriPreCheck # Use original HTTP URI
                     $headers = @{} # Initialize headers hashtable
@@ -1058,7 +1079,27 @@ if (Test-Path $MSListPath) {
                     Write-Log -Message "[Miniserver Check] HTTP connection successful for $msIPPreCheck." -Level DEBUG
                     $msVersionCheckSuccessPreCheck = $true
                 } catch { # Catch for HTTP attempt (Invoke-WebRequest)
-                    Write-Log -Message "[Miniserver Check] Failed to get version for '$msIPPreCheck' via HTTP as well: $($_.Exception.Message)" -Level ERROR # Keep as ERROR
+                    Write-Log -Message "[Miniserver Check] Failed to get version for '$msIPPreCheck' via HTTP as well: $($_.Exception.Message)" -Level ERROR # Keep primary message as ERROR
+                    # Add more details in Debug mode
+                    if ($Global:DebugPreference -eq 'Continue') {
+                        $exceptionDetails = "[Miniserver Check] HTTP Failure Details for ${msIPPreCheck}:"
+                        if ($_.Exception -is [System.Net.WebException]) {
+                            if ($_.Exception.Status) { $exceptionDetails += "`n  Status: $($_.Exception.Status)" }
+                            if ($_.Exception.Response) {
+                                $responseStream = $_.Exception.Response.GetResponseStream()
+                                $streamReader = New-Object System.IO.StreamReader($responseStream)
+                                $responseBody = $streamReader.ReadToEnd()
+                                $streamReader.Close()
+                                $responseStream.Close()
+                                $exceptionDetails += "`n  Response: $($_.Exception.Response.StatusCode) / $($_.Exception.Response.StatusDescription)"
+                                if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
+                                    $exceptionDetails += "`n  Response Body: $($responseBody)"
+                                }
+                            }
+                        }
+                        $exceptionDetails += "`n  Full Exception: $($_.Exception | Out-String)" # Include full exception details
+                        Write-Log -Message $exceptionDetails -Level DEBUG # Log extra details at DEBUG level
+                    }
                     $script:ErrorOccurred = $true # Set error flag as connection failed
                     $msVersionCheckSuccessPreCheck = $false
                 } # End HTTP catch
@@ -1445,7 +1486,7 @@ if ($runMiniserverUpdateStep) {
  
         Write-Log -Message "[Miniserver] Config needed update and Miniservers exist. Proceeding with Update-MS function." -Level INFO
         # Pass StepNumber and TotalSteps to Update-MS (Removed -InstalledExePath argument)
-        $miniserversUpdated = Update-MS -DesiredVersion $LatestVersion -MSListPath $MSListPath -LogFile $global:LogFile -MaxLogFileSizeMB $MaxLogFileSizeMB -DebugMode:$DebugMode -ScriptSaveFolder $ScriptSaveFolder -StepNumber $script:currentStep -TotalSteps $script:totalSteps
+        $miniserversUpdated = Update-MS -DesiredVersion $LatestVersion -MSListPath $MSListPath -LogFile $global:LogFile -MaxLogFileSizeMB $MaxLogFileSizeMB -DebugMode:$DebugMode -ScriptSaveFolder $ScriptSaveFolder -StepNumber $script:currentStep -TotalSteps $script:totalSteps -SkipCertificateCheck:$SkipCertificateCheck
         # Add weight based on the number of servers AFTER the update attempt
         if (-not $script:ErrorOccurred) {
              $msWeightPerServer = 2 # Define weight per server directly here as it's only used in this block

@@ -20,9 +20,16 @@
             [Parameter(Mandatory = $true)] [string]$ScriptSaveFolder,
             # Step info for toast updates
             [Parameter(Mandatory = $false)][int]$StepNumber = 1, # Default if not passed
-            [Parameter(Mandatory = $false)][int]$TotalSteps = 1  # Default if not passed
+            [Parameter(Mandatory = $false)][int]$TotalSteps = 1,  # Default if not passed
+            # New switch to bypass SSL/TLS certificate validation
+            [Parameter()][switch]$SkipCertificateCheck
         )
 
+# Validate DesiredVersion parameter
+        if ([string]::IsNullOrWhiteSpace($DesiredVersion)) {
+            Write-Log -Message "Update-MS called with null or empty -DesiredVersion. Skipping update logic." -Level ERROR
+            return $false # Cannot proceed without a target version
+        }
         Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
         $script:ErrorOccurred = $false # Initialize error flag for this function scope
 
@@ -110,9 +117,20 @@
                         Write-Log -Message "Using credentials for Invoke-WebRequest to $msIP" -Level DEBUG
                     }
 
-                    if ($originalScheme -eq 'http') {
-                        # Attempt HTTPS first
-                        $httpsUriBuilder = [System.UriBuilder]$versionUri
+                    # --- Certificate Bypass Logic ---
+                    $originalCallback = $null
+                    $callbackChanged = $false
+                    if ($SkipCertificateCheck.IsPresent) {
+                        Write-Log -Message "WARNING: Bypassing Miniserver SSL/TLS certificate validation for $msIP due to -SkipCertificateCheck parameter." -Level WARN
+                        $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                        $callbackChanged = $true
+                    }
+                    # --- End Certificate Bypass Logic ---
+                    try { # Add outer try for callback restoration
+                        if ($originalScheme -eq 'http') {
+                            # Attempt HTTPS first
+                            $httpsUriBuilder = [System.UriBuilder]$versionUri
                         $httpsUriBuilder.Scheme = 'https'
                         $httpsUriBuilder.Port = 443 # Standard HTTPS port
                         $httpsUri = $httpsUriBuilder.Uri.AbsoluteUri
@@ -132,9 +150,37 @@
                                 $msVersionCheckSuccess = $true # Treat 503 as a reason to proceed to update/wait logic
                             } else {
                                 Write-Log -Message "HTTPS failed (WebException): $($_.Exception.Message). Status: $($_.Exception.Response.StatusCode | Out-String -Stream). Falling back to HTTP." -Level WARN
+                                # Add more details in Debug mode
+                                if ($Global:DebugPreference -eq 'Continue') {
+                                    $exceptionDetails = "[Update-MS] HTTPS WebException Details for ${msIP}:"
+                                    if ($_.Exception.Status) { $exceptionDetails += "`n  Status: $($_.Exception.Status)" }
+                                    if ($_.Exception.Response) {
+                                        try { # Handle potential errors reading response stream
+                                            $responseStream = $_.Exception.Response.GetResponseStream()
+                                            $streamReader = New-Object System.IO.StreamReader($responseStream)
+                                            $responseBody = $streamReader.ReadToEnd()
+                                            $streamReader.Close()
+                                            $responseStream.Close()
+                                            $exceptionDetails += "`n  Response: $($_.Exception.Response.StatusCode) / $($_.Exception.Response.StatusDescription)"
+                                            if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
+                                                $exceptionDetails += "`n  Response Body: $($responseBody)"
+                                                }
+                                        } catch {
+                                            $exceptionDetails += "`n  Response: $($_.Exception.Response.StatusCode) / $($_.Exception.Response.StatusDescription) (Error reading response body: $($_.Exception.Message))"
+                                        }
+                                    }
+                                    $exceptionDetails += "`n  Full Exception: $($_.Exception | Out-String)"
+                                    Write-Log -Message $exceptionDetails -Level DEBUG
+                                }
                             }
                         } catch {
                             Write-Log -Message "Unexpected error during HTTPS connection attempt: $($_.Exception.Message). Falling back to HTTP." -Level WARN
+                            # Add more details in Debug mode
+                            if ($Global:DebugPreference -eq 'Continue') {
+                                $exceptionDetails = "[Update-MS] HTTPS General Exception Details for ${msIP}:"
+                                $exceptionDetails += "`n  Full Exception: $($_.Exception | Out-String)"
+                                Write-Log -Message $exceptionDetails -Level DEBUG
+                            }
                         }
                     }
 
@@ -164,17 +210,53 @@
                             }
                             # Log other WebExceptions
                             else {
-                                Write-Log -Message "Failed to connect using $($originalScheme.ToUpper()) URI (WebException): $($_.Exception.Message). Status: $($_.Exception.Response.StatusCode | Out-String -Stream)" -Level ERROR # Keep as ERROR
+                                Write-Log -Message "Failed to connect using $($originalScheme.ToUpper()) URI (WebException): $($_.Exception.Message). Status: $($_.Exception.Response.StatusCode | Out-String -Stream)" -Level ERROR # Keep primary message as ERROR
+                                # Add more details in Debug mode
+                                if ($Global:DebugPreference -eq 'Continue') {
+                                    $exceptionDetails = "[Update-MS] HTTP WebException Details for ${msIP}:"
+                                    if ($_.Exception.Status) { $exceptionDetails += "`n  Status: $($_.Exception.Status)" }
+                                    if ($_.Exception.Response) {
+                                        try { # Handle potential errors reading response stream
+                                            $responseStream = $_.Exception.Response.GetResponseStream()
+                                            $streamReader = New-Object System.IO.StreamReader($responseStream)
+                                            $responseBody = $streamReader.ReadToEnd()
+                                            $streamReader.Close()
+                                            $responseStream.Close()
+                                            $exceptionDetails += "`n  Response: $($_.Exception.Response.StatusCode) / $($_.Exception.Response.StatusDescription)"
+                                            if (-not [string]::IsNullOrWhiteSpace($responseBody)) {
+                                                $exceptionDetails += "`n  Response Body: $($responseBody)"
+                                            }
+                                        } catch {
+                                            $exceptionDetails += "`n  Response: $($_.Exception.Response.StatusCode) / $($_.Exception.Response.StatusDescription) (Error reading response body: $($_.Exception.Message))"
+                                        }
+                                    }
+                                    $exceptionDetails += "`n  Full Exception: $($_.Exception | Out-String)"
+                                    Write-Log -Message $exceptionDetails -Level DEBUG # Log extra details at DEBUG level
+                                }
                                 $script:ErrorOccurred = $true # Ensure error flag is set
                                 # $msVersionCheckSuccess remains false
                             }
                         } catch {
                             # Log other general errors
-                            Write-Log -Message "Unexpected error during $($originalScheme.ToUpper()) connection attempt: $($_.Exception.Message)" -Level ERROR
+                            Write-Log -Message "Unexpected error during $($originalScheme.ToUpper()) connection attempt: $($_.Exception.Message)" -Level ERROR # Keep primary message as ERROR
+                            # Add more details in Debug mode
+                            if ($Global:DebugPreference -eq 'Continue') {
+                                $exceptionDetails = "[Update-MS] HTTP General Exception Details for ${msIP}:"
+                                $exceptionDetails += "`n  Full Exception: $($_.Exception | Out-String)"
+                                Write-Log -Message $exceptionDetails -Level DEBUG # Log extra details at DEBUG level
+                            }
                             $script:ErrorOccurred = $true # Ensure error flag is set
                             # $msVersionCheckSuccess remains false
                         }
+                    } # End HTTP connection try/catch
+                } finally { # Finally for the try block started on line 125 (wrapping connection attempts)
+                    # --- Restore Certificate Callback ---
+                    if ($callbackChanged) {
+                        Write-Log -Message "Restoring original SSL/TLS certificate validation callback for $msIP." -Level DEBUG
+                        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
                     }
+                    # --- End Restore Certificate Callback ---
+                }
 
                     # --- Process response ONLY if a connection succeeded ---
                     if ($msVersionCheckSuccess -and $responseObject) {
@@ -290,10 +372,10 @@
             }
             if ($Credential) {
                 $triggerParams.Credential = $Credential
-                # Add AllowUnencryptedAuthentication ONLY if it's HTTP
+                # Add -AllowUnencryptedAuthentication switch parameter ONLY if it's HTTP
                 if ($scheme -eq 'http') {
-                    $triggerParams.AllowUnencryptedAuthentication = $true # RE-ADDED - Required by user's environment for HTTP+Credentials
-                    Write-Log -Message "Attempting HTTP update trigger to $hostForPing (with credentials, AllowUnencryptedAuthentication=$true)" -Level WARN
+                    $triggerParams['-AllowUnencryptedAuthentication'] = $true # Correct way to add a switch parameter
+                    Write-Log -Message "Attempting HTTP update trigger to $hostForPing (with credentials, using -AllowUnencryptedAuthentication)" -Level WARN
                 }
             }
             Write-Log -Message "Triggering update via $autoupdateUri..." -Level DEBUG
@@ -323,7 +405,7 @@
             if ($Credential) {
                 $verifyParams.Credential = $Credential
                 if ($scheme -eq 'http') {
-                    $verifyParams.AllowUnencryptedAuthentication = $true
+                    $verifyParams['-AllowUnencryptedAuthentication'] = $true # Correct way to add a switch parameter
                 }
             }
 
@@ -363,64 +445,69 @@
                             } else {
                                 Write-Log -Message "Miniserver ${hostForPing} responded with 200 OK, but version is still '$normalizedVersionCurrent' (Expected '$NormalizedDesiredVersion'). Continuing poll..." -Level DEBUG
                                 # Do not break, continue polling after sleep
+                                } # End of try block for version parsing inside the while loop (line 430)
+                            } catch { # Catch block for version parsing try (line 430)
+                                Write-Log -Message "Error parsing version from 200 OK response: $($_.Exception.Message). Continuing poll..." -Level WARN
+                                # Do not break, continue polling after sleep
                             }
-                        } catch {
-                            Write-Log -Message "Error parsing version from 200 OK response: $($_.Exception.Message). Continuing poll..." -Level WARN
-                            # Do not break, continue polling after sleep
+                        } else { # Handle non-200 success codes (line 426)
+                            Write-Log -Message "Miniserver ${hostForPing} responded with unexpected status $($lastResponse.StatusCode). Continuing poll..." -Level WARN
+                            Start-Sleep -Seconds $pollInterval.TotalSeconds
                         }
-                    } else { # Handle non-200 success codes
-                        Write-Log -Message "Miniserver ${hostForPing} responded with unexpected status $($lastResponse.StatusCode). Continuing poll..." -Level WARN
+                    } catch [System.Net.WebException] { # Catch block for polling Invoke-WebRequest (line 408)
+                        $statusCode = $null
+                        if ($null -ne $_.Exception.Response) {
+                            $statusCode = $_.Exception.Response.StatusCode
+                        }
+
+                        if ($statusCode -eq [System.Net.HttpStatusCode]::ServiceUnavailable) {
+                            Write-Log -Message "Miniserver ${hostForPing} returned 503 (Updating/Rebooting)... Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
+                        } else {
+                            Write-Log -Message "Miniserver ${hostForPing} WebException ($($statusCode)): $($_.Exception.Message). Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
+                        }
+                        Start-Sleep -Seconds $pollInterval.TotalSeconds
+                    } catch { # Catch block for other polling errors (line 408)
+                        # Catch other errors like connection refused, DNS errors, etc.
+                        Write-Log -Message "Miniserver ${hostForPing} unreachable: $($_.Exception.Message). Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
                         Start-Sleep -Seconds $pollInterval.TotalSeconds
                     }
-                } catch [System.Net.WebException] {
-                    $statusCode = $null
-                    if ($null -ne $_.Exception.Response) {
-                        $statusCode = $_.Exception.Response.StatusCode
-                    }
+                } # End while loop (line 407)
 
-                    if ($statusCode -eq [System.Net.HttpStatusCode]::ServiceUnavailable) {
-                        Write-Log -Message "Miniserver ${hostForPing} returned 503 (Updating/Rebooting)... Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
-                    } else {
-                        Write-Log -Message "Miniserver ${hostForPing} WebException ($($statusCode)): $($_.Exception.Message). Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
-                    }
-                    Start-Sleep -Seconds $pollInterval.TotalSeconds
-                } catch {
-                    # Catch other errors like connection refused, DNS errors, etc.
-                    Write-Log -Message "Miniserver ${hostForPing} unreachable: $($_.Exception.Message). Retrying in $($pollInterval.TotalSeconds)s." -Level DEBUG
-                    Start-Sleep -Seconds $pollInterval.TotalSeconds
+                # --- Final Status Check After Loop ---
+                # This block now executes only if the loop finished (either by break or timeout)
+                if ($verificationSuccess) {
+                    # Success was already determined and logged within the loop
+                    Write-Log -Message "Verification successful for Miniserver ${hostForPing} (Version: $NormalizedDesiredVersion)." -Level INFO
+                    # Toast was already updated on success within the loop
+                } elseif ($msResponsive) {
+                    # Loop finished, MS was responsive at some point, but version never matched (or couldn't be parsed)
+                    Write-Log -Message "FAILURE: Miniserver ${hostForPing} became responsive, but version verification failed within the timeout period. Final checked version might be old or unparsable." -Level ERROR
+                    $toastParamsMSFailVerifyLoop = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: MS ${hostForPing} verification failed (Timeout/Version Mismatch)." }
+                    Update-PersistentToast @toastParamsMSFailVerifyLoop
+                    $verificationSuccess = $false # Ensure it's false
+                } else {
+                    # Loop timed out without the Miniserver ever becoming responsive with 200 OK
+                    Write-Log -Message "FAILURE: Miniserver ${hostForPing} did not become responsive with a 200 OK status at $verificationUri within the timeout period ($($timeout.TotalMinutes) minutes)." -Level ERROR
+                    $toastParamsMSFailTimeout = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: MS ${hostForPing} did not respond after update." }
+                    Update-PersistentToast @toastParamsMSFailTimeout
+                    $verificationSuccess = $false # Ensure it's false
                 }
-            } # End while loop
 
-            # --- Final Status Check After Loop ---
-            # This block now executes only if the loop finished (either by break or timeout)
-            if ($verificationSuccess) {
-                # Success was already determined and logged within the loop
-                Write-Log -Message "Verification successful for Miniserver ${hostForPing} (Version: $NormalizedDesiredVersion)." -Level INFO
-                # Toast was already updated on success within the loop
-            } elseif ($msResponsive) {
-                # Loop finished, MS was responsive at some point, but version never matched (or couldn't be parsed)
-                Write-Log -Message "FAILURE: Miniserver ${hostForPing} became responsive, but version verification failed within the timeout period. Final checked version might be old or unparsable." -Level ERROR
-                $toastParamsMSFailVerifyLoop = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: MS ${hostForPing} verification failed (Timeout/Version Mismatch)." }
-                Update-PersistentToast @toastParamsMSFailVerifyLoop
-                $verificationSuccess = $false # Ensure it's false
-            } else {
-                # Loop timed out without the Miniserver ever becoming responsive with 200 OK
-                Write-Log -Message "FAILURE: Miniserver ${hostForPing} did not become responsive with a 200 OK status at $verificationUri within the timeout period ($($timeout.TotalMinutes) minutes)." -Level ERROR
-                $toastParamsMSFailTimeout = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: MS ${hostForPing} did not respond after update." }
-                Update-PersistentToast @toastParamsMSFailTimeout
-                $verificationSuccess = $false # Ensure it's false
+            } catch { # Catch for the inner try block (line 360) handling Trigger + Wait/Verify logic
+                # Log error from the update/verify process
+                Write-Log -Message "Error during update trigger or verification for '${redactedUri}': $($_.Exception.Message)" -Level ERROR
+                $script:ErrorOccurred = $true # Set the main script error flag
+                $toastParamsMSFailInner = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: Error during update/verify for MS ${hostForPing}: $($_.Exception.Message)." }
+                Update-PersistentToast @toastParamsMSFailInner
+                $verificationSuccess = $false # Ensure failure
+            } # End catch for inner try block (line 360)
+        } finally { # Finally for the outer try block (line 359)
+            # --- Restore Certificate Callback ---
+            if ($callbackChanged) {
+                Write-Log -Message "Restoring original SSL/TLS certificate validation callback for ${hostForPing} in Invoke-MiniserverUpdate." -Level DEBUG
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
             }
-
-        } catch { # Catch for the main update/verify try block (line 279)
-            # Removed duplicate inner catch block
-            Write-Log -Message "Error triggering update for '${redactedUri}': $($_.Exception.Message)" -Level ERROR
-            $script:ErrorOccurred = $true # Set the main script error flag
-            $toastParamsMSFailTrigger = @{ StepNumber = $StepNumber; TotalSteps = $TotalSteps; StepName = "FAILED: Error triggering update for MS ${hostForPing}: $($_.Exception.Message)." }
-                Update-PersistentToast @toastParamsMSFailTrigger
-                return $false # Indicate failure
-            } # End catch for main try block (line 278)
-        } finally { # Finally for main try block (line 267)
-            Exit-Function
+            # --- End Restore Certificate Callback ---
         }
         # Return statement should be outside the finally block but inside the function scope
         return $verificationSuccess

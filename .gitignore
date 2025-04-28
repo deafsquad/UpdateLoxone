@@ -8,6 +8,7 @@
 !README.md
 !*.example
 !LoxoneUtils/
+!*.png
 
 
 # Keep this .gitignore file
