@@ -24,6 +24,7 @@
         )
 
         Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+        $script:ErrorOccurred = $false # Initialize error flag for this function scope
 
         $anyMSUpdated = $false # Initialize flag
 
@@ -43,14 +44,11 @@
 
             if ($miniservers.Count -eq 0) {
                 Write-Log -Message "Miniserver list is empty. Skipping Miniserver updates." -Level "INFO"
-                return $false
+                return $true # No error, just no servers to update.
             }
 
-            $loxoneConfigExe = Join-Path -Path $InstalledExePath -ChildPath "LoxoneConfig.exe"
-            if (-not (Test-Path $loxoneConfigExe)) {
-                Write-Log -Message "LoxoneConfig.exe not found (checked based on directory path '${InstalledExePath}'). Cannot perform Miniserver updates." -Level "ERROR"
-                return $false
-            }
+            # Removed check for LoxoneConfig.exe (lines 49-53) as it's no longer needed for URL-based updates
+            # and the associated parameter $InstalledExePath was removed.
 
             foreach ($msEntry in $miniservers) {
                 $redactedEntryForLog = Get-RedactedPassword $msEntry # Corrected call
@@ -58,7 +56,6 @@
 
                 $msIP = $null
                 $versionUri = $null
-                $updateArg = $null
                 $credential = $null
 
                 try { # Inner try for parsing entry
@@ -130,7 +127,7 @@
                             Write-Log -Message "HTTPS connection successful." -Level INFO
                             $msVersionCheckSuccess = $true
                         } catch [System.Net.WebException] {
-                            if ($_.Exception.Response -ne $null -and $_.Exception.Response.StatusCode -eq [System.Net.HttpStatusCode]::ServiceUnavailable) {
+                            if ($null -ne $_.Exception.Response -and $_.Exception.Response.StatusCode -eq [System.Net.HttpStatusCode]::ServiceUnavailable) {
                                 Write-Log -Message "HTTPS check returned 503 (Updating). Assuming update needed/in progress." -Level WARN
                                 $msVersionCheckSuccess = $true # Treat 503 as a reason to proceed to update/wait logic
                             } else {
@@ -151,8 +148,8 @@
                         try {
                             # Modify hashtable directly and use standard splatting
                             if ($originalParams.ContainsKey('Credential')) {
-                                Write-Log -Message "Attempting HTTP request to $msIP (with credentials, adding AllowUnencryptedAuthentication=$true)." -Level WARN
-                                $originalParams.AllowUnencryptedAuthentication = $true
+                                Write-Log -Message "Attempting HTTP request to $msIP (with credentials)." -Level WARN
+                                # Removed invalid parameter: $originalParams.AllowUnencryptedAuthentication = $true
                             } else {
                                 Write-Log -Message "Attempting HTTP request to $msIP (without credentials)..." -Level DEBUG
                             }
@@ -161,7 +158,7 @@
                             $msVersionCheckSuccess = $true
                         } catch [System.Net.WebException] {
                             # Check for 503 specifically
-                            if ($_.Exception.Response -ne $null -and $_.Exception.Response.StatusCode -eq [System.Net.HttpStatusCode]::ServiceUnavailable) {
+                            if ($null -ne $_.Exception.Response -and $_.Exception.Response.StatusCode -eq [System.Net.HttpStatusCode]::ServiceUnavailable) {
                                 Write-Log -Message "$($originalScheme.ToUpper()) check returned 503 (Updating). Assuming update needed/in progress." -Level WARN
                                 $msVersionCheckSuccess = $true # Treat 503 as a reason to proceed
                             }
@@ -249,7 +246,14 @@
         }
 
         # Return the final status after try/catch/finally
-        return $anyMSUpdated
+        # Final return logic: Return $false if any error occurred, otherwise return whether any MS was updated.
+        if ($script:ErrorOccurred) {
+            Write-Log -Message "Update-MS returning `$false due to errors encountered during processing." -Level WARN
+            return $false
+        } else {
+            Write-Log -Message "Update-MS returning `$anyMSUpdated: $anyMSUpdated (No errors encountered)." -Level INFO
+            return $anyMSUpdated
+        }
     }
 
     function Invoke-MiniserverUpdate {
@@ -370,7 +374,7 @@
                     }
                 } catch [System.Net.WebException] {
                     $statusCode = $null
-                    if ($_.Exception.Response -ne $null) {
+                    if ($null -ne $_.Exception.Response) {
                         $statusCode = $_.Exception.Response.StatusCode
                     }
 
