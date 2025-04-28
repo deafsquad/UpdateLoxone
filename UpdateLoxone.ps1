@@ -185,7 +185,7 @@ $burntToastAvailable = Get-Module -ListAvailable -Name BurntToast
 if (-not $burntToastAvailable) {
     Write-Host "INFO: 'BurntToast' module not found. Attempting to install from PSGallery..."
     try {
-        Install-Module -Name BurntToast -Scope CurrentUser -Repository PSGallery -Force -ErrorAction Stop
+        Install-Module -Name BurntToast -Scope CurrentUser -Repository PSGallery -Force -ErrorAction SilentlyContinue
         Write-Host "INFO: 'BurntToast' installed successfully."
         # Verify again after installation attempt
         $burntToastAvailable = Get-Module -ListAvailable -Name BurntToast
