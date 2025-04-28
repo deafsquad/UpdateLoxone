@@ -178,12 +178,36 @@ if (-not (Test-Path $UtilsModulePath)) {
 # The -Force on Import-Module below handles reloading. Explicit Remove-Module is not needed here and removes the already loaded logging module.
 # Write-Log -Message "Attempting to forcefully remove existing LoxoneUtils module (before import)..." -Level DEBUG # Removed
 # Remove-Module LoxoneUtils -Force -ErrorAction SilentlyContinue # Removed
+# Check for BurntToast dependency before attempting to load LoxoneUtils
+Write-Host "INFO: Checking for required module 'BurntToast'..."
+$burntToastAvailable = Get-Module -ListAvailable -Name BurntToast
+if (-not $burntToastAvailable) {
+    Write-Host "INFO: 'BurntToast' module not found. Attempting to install from PSGallery..."
+    try {
+        Install-Module -Name BurntToast -Scope CurrentUser -Repository PSGallery -Force -AcceptLicense -ErrorAction Stop
+        Write-Host "INFO: 'BurntToast' installed successfully."
+        # Verify again after installation attempt
+        $burntToastAvailable = Get-Module -ListAvailable -Name BurntToast
+    } catch {
+        Write-Warning "Failed to install 'BurntToast' module. Toast notifications will be unavailable. Error: $($_.Exception.Message)"
+    }
+} else {
+    Write-Host "INFO: 'BurntToast' module found."
+}
+
 try {
     if ($script:isRunningAsSystem) {
         # Running as SYSTEM: Import the full module via manifest (includes RunAsUser)
-        Import-Module $UtilsModulePath -Force -ErrorAction Stop
-        Write-Log -Message "Running as SYSTEM. Importing full LoxoneUtils module via manifest '$UtilsModulePath'." -Level INFO
-        Write-Log -Message "Successfully imported LoxoneUtils module using manifest for SYSTEM context." -Level INFO
+        # Import LoxoneUtils module (SYSTEM context)
+        $LoxoneUtilsModule = Import-Module $UtilsModulePath -Force -ErrorAction SilentlyContinue -PassThru
+        if (-not $LoxoneUtilsModule) {
+            Write-Warning "Failed to load LoxoneUtils module via manifest '$UtilsModulePath'. Core functionality might be affected. This may be due to the BurntToast dependency not being met."
+            # Optionally add logic here to exit if LoxoneUtils is absolutely critical,
+            # or set flags to disable features dependent on it.
+        } else {
+            Write-Log -Message "Running as SYSTEM. Importing full LoxoneUtils module via manifest '$UtilsModulePath'." -Level INFO
+            Write-Log -Message "Successfully loaded LoxoneUtils module via manifest for SYSTEM context." -Level INFO
+        }
 
         # --- Log bound parameters (SYSTEM context) ---
         # Note: Logging parameters might be less relevant in pure SYSTEM context before re-launch, but keep for consistency.
@@ -236,7 +260,15 @@ try {
             $modulePath = Join-Path -Path $LoxoneUtilsDir -ChildPath $moduleFile
             if (Test-Path $modulePath) {
                 Write-Log -Message "Importing module: $modulePath" -Level DEBUG
-                Import-Module $modulePath -Force -ErrorAction Stop # Force ensures reload if needed
+                $importedModule = Import-Module $modulePath -Force -ErrorAction SilentlyContinue -PassThru # Force ensures reload if needed
+                if (-not $importedModule) {
+                    if ($moduleFile -eq 'LoxoneUtils.Toast.psm1') {
+                         Write-Log -Message "Failed to load LoxoneUtils.Toast.psm1 module from '$modulePath'. Toast notifications will be unavailable. This may be due to the BurntToast dependency not being met." -Level WARN
+                    } else {
+                         Write-Log -Message "Failed to load module '$moduleFile' from '$modulePath'. This might affect functionality." -Level WARN
+                    }
+                    # Consider if failure of other specific modules should be treated as critical
+                }
             } else {
                 Write-Log -Message "Module file not found: $modulePath. Skipping import." -Level WARN
                 # Consider throwing an error if a critical module is missing
@@ -1395,7 +1427,7 @@ if ($miniserverCount -gt 0) { $runMiniserverUpdateStep = $true } # Condition cha
 
 if ($runMiniserverUpdateStep) {
     # Only run if Config needed updating AND Miniservers exist in the list
-    if ($configUpdateNeeded -and $runMiniserverUpdateStep) {
+    if ($runMiniserverUpdateStep) { # Condition changed: Run if servers exist, regardless of config update status
         # Increment step and update toast ONLY if attempting the update
         $script:currentStep++
         $msUpdateStepName = "Updating Miniservers ($miniserverCount)"
@@ -1432,17 +1464,7 @@ if ($runMiniserverUpdateStep) {
              Update-PersistentToast @toastParamsMSUpdateComplete
         }
         # Removed incorrect 'else' block and misplaced toast update here
-    } elseif ($runMiniserverUpdateStep) { # Condition if MS list exists but Config update was NOT needed
-        # Increment step counter here for skipped step
-        $script:currentStep++
-        Write-Log -Message "[Miniserver] Skipping Miniserver update because Config was already up-to-date." -Level INFO
-        # Update Toast for MS Update Skipped (Config Up-to-date)
-        $toastParamsMSSkipConfig = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Skipped MS Update (Config OK)"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-        Update-PersistentToast @toastParamsMSSkipConfig
-        # Add weight for skipped step
-        $msWeightPerServer = 2; $msTotalWeight = $miniserverCount * $msWeightPerServer; $script:CurrentWeight += $msTotalWeight
-        Write-Log -Message "[Miniserver] Added weight for skipped MS update step (Config OK). Current weight: $($script:CurrentWeight)." -Level DEBUG
-    }
+    } # Removed redundant elseif block that handled skipping when config was up-to-date
 } else { # Corresponds to if ($runMiniserverUpdateStep) - i.e., no servers in list
      # Remove toast update for skipped step
      # $toastParamsMSSkipCond = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Miniserver Update Skipped"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
@@ -1453,10 +1475,8 @@ if ($runMiniserverUpdateStep) {
 }
  
 # --- Finalization Step ---
-# Only increment if the MS update step was actually run (not skipped)
-if ($configUpdateNeeded -and $runMiniserverUpdateStep) {
-    $script:currentStep++ # Increment for the finalization step
-}
+# Set the current step to the total for the finalization step
+$script:currentStep = $script:totalSteps
 $finalStepName = "Finalizing"
 # Use the potentially incremented step number
 Write-Log -Message "[Main] $finalStepName (Step $($script:currentStep)/$($script:totalSteps))..." -Level INFO
