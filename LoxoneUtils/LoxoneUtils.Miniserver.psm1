@@ -41,23 +41,6 @@
             $script:DebugMode = $DebugMode.IsPresent
             Write-Log -Message "Starting Miniserver update check process..." -Level "INFO"
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-# WARNING: Bypasses certificate validation. Use with caution.
-    try {
-        add-type @"
-        using System.Net;
-        using System.Security.Cryptography.X509Certificates;
-        public class TrustAllCertsPolicy : ICertificatePolicy {
-            public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem) {
-                return true;
-            }
-        }
-"@
-        [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-        Write-Log -Level INFO -Message "Temporarily bypassing SSL/TLS certificate validation for Miniserver checks."
-    } catch {
-        Write-Log -Level WARN -Message "Failed to apply certificate validation bypass. Certificate errors may occur. Error: $($_.Exception.Message)"
-    }
-
             if (-not (Test-Path $MSListPath)) {
                 Write-Log -Message "Miniserver list file not found at '${MSListPath}'. Skipping Miniserver updates." -Level "WARN"
                 return $false
@@ -212,7 +195,8 @@
                             # Modify hashtable directly and use standard splatting
                             if ($originalParams.ContainsKey('Credential')) {
                                 Write-Log -Message "Attempting HTTP request to $msIP (with credentials)." -Level WARN
-                                # Removed invalid parameter: $originalParams.AllowUnencryptedAuthentication = $true
+                                # Allow sending credentials over HTTP as fallback required by Miniserver configuration (Security Risk!)
+                                $originalParams['-AllowUnencryptedAuthentication'] = $true # Add switch for HTTP+Credentials
                             } else {
                                 Write-Log -Message "Attempting HTTP request to $msIP (without credentials)..." -Level DEBUG
                             }
@@ -428,12 +412,20 @@
                 }
             }
 
+            $Attempts = 0
+            $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10) # Based on 10s sleep
+            $LastPollStatusMessage = "Initiating..."
+
             while (((Get-Date) - $startTime) -lt $timeout) {
+                $Attempts++
+                # Display progress on a single line
+                Write-Host -NoNewline ("`rPolling Miniserver $hostForPing (Attempt $Attempts/$MaxAttempts): $LastPollStatusMessage".PadRight(120)) # Pad to clear previous line
+
                 # Wait 10 seconds between checks
                 Start-Sleep -Seconds 10
 
                 try {
-                    Write-Log -Message "Polling $verificationUri ..." -Level DEBUG
+                    Write-Log -Message "Polling $verificationUri (Attempt $Attempts/$MaxAttempts)..." -Level DEBUG # Added attempt info to log
                     # Dynamically build and execute the command for polling
                     # Modify hashtable directly and use standard splatting for polling
                     $pollHeaders = @{} # Initialize headers for polling
@@ -463,20 +455,24 @@
                             if ($normalizedVersionCurrent -eq $NormalizedDesiredVersion) {
                                 Write-Log -Message "Version matches desired version ($NormalizedDesiredVersion). Update successful." -Level INFO
                                 $verificationSuccess = $true # Set success flag
+                                $LastPollStatusMessage = "OK - Version $NormalizedDesiredVersion" # Update status before break
                                 break # Exit the while loop - SUCCESS
                             } else {
                                 Write-Log -Message "Miniserver ${hostForPing} responded with 200 OK, but version is still '$normalizedVersionCurrent' (Expected '$NormalizedDesiredVersion'). Continuing poll..." -Level DEBUG
+                                $LastPollStatusMessage = "OK - Version $normalizedVersionCurrent (Expected $NormalizedDesiredVersion)" # Update status
                                 # Do not break, continue polling after sleep
-                                } # End of try block for version parsing inside the while loop (line 430)
-                            } catch { # Catch block for version parsing try (line 430)
+                                } # End of if/else for version check
+                            } catch { # Catch block for version parsing try (line 449)
                                 Write-Log -Message "Error parsing version from 200 OK response: $($_.Exception.Message). Continuing poll..." -Level WARN
+                                $LastPollStatusMessage = "OK - Error parsing version: $($_.Exception.Message.Split([Environment]::NewLine)[0])" # Update status
                                 # Do not break, continue polling after sleep
                             }
-                        } else { # Handle non-200 success codes (line 426)
+                        } else { # Handle non-200 success codes (line 445)
                             Write-Log -Message "Miniserver ${hostForPing} responded with unexpected status $($lastResponse.StatusCode). Continuing poll..." -Level WARN
-                            Start-Sleep -Seconds $pollInterval.TotalSeconds
+                            $LastPollStatusMessage = "Responded with $($lastResponse.StatusCode)" # Update status
+                            # Start-Sleep -Seconds $pollInterval.TotalSeconds # Sleep is at the start of the loop now
                         }
-                    } catch [System.Net.WebException] { # Catch block for polling Invoke-WebRequest (line 431)
+                    } catch [System.Net.WebException] { # Catch block for polling Invoke-WebRequest (line 443)
                         $statusCode = $null
                         $errorDetail = $null # Initialize errorDetail
 
@@ -498,35 +494,42 @@
                                     } else {
                                         $errorDetail = 'Updating (detail unavailable)'
                                     }
+                                    $LastPollStatusMessage = "Updating ($errorDetail)" # Update status
 
                                     # Log the specific updating status ONCE
                                     if (-not $loggedUpdatingStatus) {
                                         Write-Log -Level INFO -Message "Miniserver $hostForPing status: $errorDetail"
                                         $loggedUpdatingStatus = $true # Set flag so it doesn't log again
                                     } else {
-                                        Write-Log -Message "Miniserver ${hostForPing} still reporting 503 ($errorDetail)... Will retry check after 10s sleep." -Level DEBUG
+                                        # Log subsequent 503s only at DEBUG level to avoid spamming INFO logs
+                                        Write-Log -Message "Miniserver ${hostForPing} still reporting 503 ($errorDetail)..." -Level DEBUG
                                     }
                                 } catch {
                                     # If reading the response body fails, log generic 503
-                                    Write-Log -Message "Miniserver ${hostForPing} returned 503 (Updating/Rebooting - Error reading detail: $($_.Exception.Message))... Will retry check after 10s sleep." -Level DEBUG
+                                    Write-Log -Message "Miniserver ${hostForPing} returned 503 (Updating/Rebooting - Error reading detail: $($_.Exception.Message))..." -Level DEBUG
+                                    $LastPollStatusMessage = "Updating (503 - Error reading detail)" # Update status
                                 }
                             } else {
                                 # Log other WebExceptions
-                                Write-Log -Message "Miniserver ${hostForPing} WebException ($($statusCode)): $($_.Exception.Message). Will retry check after 10s sleep." -Level DEBUG
+                                Write-Log -Message "Miniserver ${hostForPing} WebException ($($statusCode)): $($_.Exception.Message). Retrying..." -Level WARN
+                                $LastPollStatusMessage = "Error ($($statusCode)): $($_.Exception.Message.Split([Environment]::NewLine)[0])" # Update status (first line only)
                             }
                         } else {
                             # Handle cases where there's no response object (e.g., connection timeout)
-                             Write-Log -Message "Miniserver ${hostForPing} WebException (No Response): $($_.Exception.Message). Will retry check after 10s sleep." -Level DEBUG
+                             Write-Log -Message "Miniserver ${hostForPing} WebException (No Response): $($_.Exception.Message). Retrying..." -Level WARN
+                             $LastPollStatusMessage = "Error (No Response): $($_.Exception.Message.Split([Environment]::NewLine)[0])" # Update status (first line only)
                         }
                         # No sleep needed here, it happens at the start of the next loop iteration.
-                    } catch { # Catch block for other polling errors (line 487)
+                    } catch { # Catch block for other polling errors (line 523)
                         # Catch other errors like connection refused, DNS errors, etc.
-                        Write-Log -Message "Miniserver ${hostForPing} unreachable: $($_.Exception.Message). Will retry check after 10s sleep." -Level DEBUG
+                        Write-Log -Message "Miniserver ${hostForPing} unreachable: $($_.Exception.Message). Retrying..." -Level WARN
+                        $LastPollStatusMessage = "Unreachable: $($_.Exception.Message.Split([Environment]::NewLine)[0])" # Update status (first line only)
                         # No sleep needed here, it happens at the start of the next loop iteration.
                     }
-                } # End while loop (line 407)
+                } # End while loop (line 419)
 
                 # --- Final Status Check After Loop ---
+                Write-Host "" # Add a newline to move off the progress line
                 # This block now executes only if the loop finished (either by break or timeout)
                 if ($verificationSuccess) {
                     # Success was already determined and logged within the loop
