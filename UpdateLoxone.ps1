@@ -158,6 +158,7 @@ $script:IsAdminRun = $false # Assume not admin initially
 $global:IsElevatedInstance = $false # Global flag accessible by module
 # $global:LogFile = $null # Removed - Initialized earlier (line ~120) and should not be reset here
 $script:configUpdated = $false # Flag to track if Config update occurred
+$script:appUpdated = $false # Flag to track if App update occurred and verified
 # Check if running as SYSTEM by comparing SIDs (S-1-5-18)
 $script:isRunningAsSystem = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value -eq 'S-1-5-18'
 $script:CurrentWeight = 0 # Initialize overall progress weight counter
@@ -816,11 +817,36 @@ if ($appDetails -and -not $appDetails.Error) {
         $LoxoneWindowsInstallerFileName = Split-Path -Path $loxWindowsInstallerUrl -Leaf
         $LoxoneWindowsInstallerPath = Join-Path -Path $DownloadDir -ChildPath $LoxoneWindowsInstallerFileName
         Write-Log -Message "[App] Using original installer filename: '$LoxoneWindowsInstallerFileName'" -Level DEBUG
-        Write-Log -Message "[App] Downloading Loxone for Windows installer from '$loxWindowsInstallerUrl' to '$LoxoneWindowsInstallerPath'..." -Level INFO
-        if (-not (Test-Path -Path $DownloadDir -PathType Container)) { Write-Log -Message "[App] Download directory '$DownloadDir' not found. Creating..." -Level INFO; New-Item -Path $DownloadDir -ItemType Directory -Force | Out-Null }
+        $appDownloadStepName = "Downloading Loxone App" # Define step name
 
-        # Update Toast for App Download Start
-        $toastParamsAppDownloadStart = @{
+        # Check existing App installer using the generalized function
+        $skipAppDownload = $false
+        # Note: $latestLoxWindowsVersion is already normalized
+        $appInstallerCheckResult = Test-ExistingInstaller -InstallerPath $LoxoneWindowsInstallerPath -TargetVersion $latestLoxWindowsVersion -ComponentName "App"
+
+        if ($appInstallerCheckResult.IsValid) {
+            $skipAppDownload = $true
+            # No extraction step for App, so SkipExtraction is ignored
+            # Update Toast
+            $toastParamsAppSkipExisting = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Using Valid Existing App Installer"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsAppSkipExisting }
+            # Add weight for skipped download step
+            $script:CurrentWeight += Get-StepWeight -StepID 'DownloadApp'
+            Write-Log -Message "[App] Added weight for skipped download based on valid existing installer. Current weight: $($script:CurrentWeight)." -Level DEBUG
+        } elseif ($appInstallerCheckResult.Reason -ne "Not found") {
+            # Installer exists but is invalid
+            Write-Log -Message "[App] Existing installer '$LoxoneWindowsInstallerPath' is invalid ($($appInstallerCheckResult.Reason)). Removing and proceeding with download." -Level WARN
+            Remove-Item -Path $LoxoneWindowsInstallerPath -Force -ErrorAction SilentlyContinue
+        }
+        # If Reason is "Not found", proceed with download.
+
+        # Perform Download if not skipped
+        if (-not $skipAppDownload) {
+            Write-Log -Message "[App] Downloading Loxone for Windows installer from '$loxWindowsInstallerUrl' to '$LoxoneWindowsInstallerPath'..." -Level INFO
+            if (-not (Test-Path -Path $DownloadDir -PathType Container)) { Write-Log -Message "[App] Download directory '$DownloadDir' not found. Creating..." -Level INFO; New-Item -Path $DownloadDir -ItemType Directory -Force | Out-Null }
+
+            # Update Toast for App Download Start
+            $toastParamsAppDownloadStart = @{
             StepNumber       = $script:currentStep
             TotalSteps       = $script:totalSteps
             StepName         = "Downloading Loxone App"
@@ -854,8 +880,9 @@ if ($appDetails -and -not $appDetails.Error) {
         # $script:currentDownload += 1 # Increment before download - Incorrect, should be done once per download step
         $appDownloadSuccess = Invoke-LoxoneDownload @appDownloadParams
         if (-not $appDownloadSuccess) { throw "[App] Invoke-LoxoneDownload reported failure for Loxone App. Halting app update process." }
-        $script:CurrentWeight += 1 # Increment weight AFTER successful download
-        Write-Log -Message "[App] Loxone for Windows download completed successfully. Incremented weight to $($script:CurrentWeight)." -Level INFO
+            $script:CurrentWeight += Get-StepWeight -StepID 'DownloadApp' # Increment weight AFTER successful download
+            Write-Log -Message "[App] Loxone for Windows download completed successfully. Incremented weight to $($script:CurrentWeight)." -Level INFO
+        } # End if (-not $skipAppDownload)
 
         # --- Step: Install App ---
         $script:currentStep++
@@ -901,6 +928,7 @@ if ($appDetails -and -not $appDetails.Error) {
 
                      if ($verificationSuccess) {
                          Write-Log -Message "[App] Successfully updated Loxone App to FileVersion $($newAppDetails.FileVersion)." -Level INFO
+                         $script:appUpdated = $true # Set flag for successful app update
                          # Update Toast for App Update Complete
                          $toastParamsAppComplete = @{
                              StepNumber    = $script:currentStep # Keep same step number
@@ -1233,25 +1261,30 @@ try { # --- Start of Main Try Block ---
             exit 0 # Exit cleanly
         }
 
-        # Check existing installer
+        # Check existing Config installer using the generalized function
         $skipDownload = $false
-        if (Test-Path -Path $InstallerPath -PathType Leaf) {
-            Write-Log -Message "[Config] Existing installer found at '$InstallerPath'. Validating version..." -Level INFO; $existingVersion = (Get-Item -Path $InstallerPath -ErrorAction SilentlyContinue).VersionInfo.FileVersion; $normalizedExisting = Convert-VersionString $existingVersion; $versionMatch = $false # Removed unused $signatureValid assignment
-            if ($normalizedExisting) { Write-Log -Message "Existing installer version: $normalizedExisting. Target version: $LatestVersion." -Level DEBUG; if ($normalizedExisting -eq $LatestVersion) { $versionMatch = $true; Write-Log -Message "[Config] Existing installer version matches target version." -Level INFO } else { Write-Log -Message "[Config] Existing installer version ($normalizedExisting) does NOT match target version ($LatestVersion)." -Level WARN } } else { Write-Log -Message "[Config] Could not determine version for existing installer '$InstallerPath'." -Level WARN }
-            # Signature validation logic removed here - it's done after download/extraction now
-            if ($versionMatch) { # Simplified check: if version matches, skip download
-                 Write-Log -Message "[Config] Existing installer '$InstallerPath' matches target version. Skipping download." -Level INFO; $skipDownload = $true
-                 # Update Toast to reflect skipping download
-                 $toastParamsCfgSkipDownload = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Using Existing Config Installer"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
-                 if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgSkipDownload }
-                 $script:CurrentWeight += Get-StepWeight -StepID 'DownloadConfig' # Add weight even if skipped
-                 Write-Log -Message "[Config] Added weight for skipped download. Current weight: $($script:CurrentWeight)." -Level DEBUG
-            } else { Write-Log -Message "[Config] Existing installer '$InstallerPath' version mismatch. Removing and proceeding with download." -Level WARN; Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue }
-        } else { Write-Log -Message "[Config] No existing installer found at '$InstallerPath'. Proceeding with download." -Level INFO }
+        $skipExtraction = $false
+        $configInstallerCheckResult = Test-ExistingInstaller -InstallerPath $InstallerPath -TargetVersion $LatestVersion -ComponentName "Config"
+
+        if ($configInstallerCheckResult.IsValid) {
+            $skipDownload = $true
+            $skipExtraction = $true # Function sets this correctly for Config
+            # Update Toast
+            $toastParamsCfgSkipExisting = @{ StepNumber=$script:currentStep; TotalSteps=$script:totalSteps; StepName="Using Valid Existing Config Installer"; CurrentWeight=$script:CurrentWeight; TotalWeight=$script:TotalWeight }
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgSkipExisting }
+            # Add weights for skipped steps
+            $script:CurrentWeight += Get-StepWeight -StepID 'DownloadConfig'
+            $script:CurrentWeight += Get-StepWeight -StepID 'ExtractConfig'
+            Write-Log -Message "[Config] Added weight for skipped download and extraction based on valid existing installer. Current weight: $($script:CurrentWeight)." -Level DEBUG
+        } elseif ($configInstallerCheckResult.Reason -ne "Not found") {
+            # Installer exists but is invalid (version mismatch or bad signature)
+            Write-Log -Message "[Config] Existing installer '$InstallerPath' is invalid ($($configInstallerCheckResult.Reason)). Removing and proceeding with download." -Level WARN
+            Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue
+        }
+        # If Reason is "Not found", we just proceed with download naturally.
 
         # Perform Download if not skipped
         if (-not $skipDownload) {
-            if (-not (Test-Path -Path $DownloadDir -PathType Container)) { Write-Log -Message "[Config] Download directory '$DownloadDir' not found. Creating..." -Level INFO; New-Item -Path $DownloadDir -ItemType Directory -Force | Out-Null }
 
             # Update Toast for Config Download Start
             $toastParamsCfgDownloadStart = @{
@@ -1304,79 +1337,76 @@ try { # --- Start of Main Try Block ---
             if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgDownloadVerify }
         }
 
-        # --- Extract (Part of Download Step if download happened, otherwise part of Install step) ---
-        $extractStepName = "Extracting Config Installer"
-        Write-Log -Message "[Config] $extractStepName..." -Level INFO
-        $toastParamsCfgExtract = @{
-            StepNumber    = $script:currentStep # Still conceptually part of download or pre-install
-            TotalSteps    = $script:totalSteps
-            StepName      = $extractStepName
-            CurrentWeight = $script:CurrentWeight
-            TotalWeight   = $script:TotalWeight
+        # --- Extract (Only if not skipped) ---
+        if (-not $skipExtraction) {
+            $extractStepName = "Extracting Config Installer"
+            Write-Log -Message "[Config] $extractStepName..." -Level INFO
+            $toastParamsCfgExtract = @{
+                StepNumber    = $script:currentStep # Still conceptually part of download or pre-install
+                TotalSteps    = $script:totalSteps
+                StepName      = $extractStepName
+                CurrentWeight = $script:CurrentWeight
+                TotalWeight   = $script:TotalWeight
+            }
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgExtract }
+
+            # Ensure installer isn't present from a previous failed run (should have been removed earlier if invalid)
+            if (Test-Path $InstallerPath) {
+                 Write-Log -Level DEBUG -Message "Removing existing installer file before extraction: $InstallerPath"
+                 Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue
+            }
+
+            # Temporarily suppress Write-Progress to avoid console buffer errors in non-interactive sessions
+            $originalProgressPreference = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'
+            try {
+                Expand-Archive -Path $ZipFilePath -DestinationPath $DownloadDir -Force -ErrorAction Stop
+            } finally {
+                $ProgressPreference = $originalProgressPreference # Restore original preference
+            }
+
+            if (-not (Test-Path $InstallerPath)) { throw "Installer file '$InstallerPath' not found after extraction." }
+            Write-Log -Message "[Config] Installer extracted successfully to $InstallerPath." -Level INFO
+            # Add weight only if extraction actually happened (i.e., download wasn't skipped OR existing was invalid)
+            $script:CurrentWeight += Get-StepWeight -StepID 'ExtractConfig'
+            Write-Log -Message "[Config] Added weight for extraction. Current weight: $($script:CurrentWeight)." -Level DEBUG
+
+            # --- Verify Installer Signature (Only if extracted) ---
+            $verifySigStepName = "Verifying Config Installer Signature"
+            Write-Log -Message "[Config] $verifySigStepName (post-extraction)..." -Level INFO
+            $toastParamsCfgVerifySig = @{
+                StepNumber    = $script:currentStep # Still conceptually part of download or pre-install
+                TotalSteps    = $script:totalSteps
+                StepName      = $verifySigStepName
+                CurrentWeight = $script:CurrentWeight
+                TotalWeight   = $script:TotalWeight
+            }
+            if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgVerifySig }
+            # Use ExpectedXmlSignature fetched earlier
+            if ($ExpectedXmlSignature) {
+                 $sigCheckResult = Get-ExecutableSignature -ExePath $InstallerPath
+                 # Robust check: Ensure result exists and status is valid
+                 $validationFailed = $false
+                 $failureReason = ""
+                 if (-not $sigCheckResult) {
+                     $validationFailed = $true
+                     $failureReason = "Get-ExecutableSignature returned null."
+                 } elseif ($sigCheckResult.Status -ne 'Valid') {
+                     $validationFailed = $true
+                     $failureReason = "Signature status is '$($sigCheckResult.Status)' (Expected 'Valid')."
+                 }
+
+                 # Add a note that XML signature itself isn't checked here
+                 Write-Log -Level DEBUG -Message "Note: XML signature value ('$ExpectedXmlSignature') is present but not currently validated against the XML content."
+
+                 if ($validationFailed) {
+                     throw "CRITICAL: Extracted installer '$InstallerPath' failed signature validation. Reason: $failureReason"
+                 }
+                 Write-Log -Message "[Config] Extracted installer signature verified successfully." -Level INFO
+            } else { Write-Log -Message "[Config] XML Signature was missing. Skipping installer signature validation (post-extraction)." -Level WARN }
+        } else {
+             Write-Log -Message "[Config] Skipping extraction and post-extraction signature check because a valid existing installer was found." -Level INFO
         }
-        if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgExtract }
-        # Ensure installer isn't present from a previous failed run if download was skipped
-        if ($skipDownload -and (Test-Path $InstallerPath)) {
-            Write-Log -Level DEBUG -Message "Download skipped, removing potentially stale installer before extraction: $InstallerPath"
-            Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue
-        } elseif (-not $skipDownload -and (Test-Path $InstallerPath)) {
-             Write-Log -Level DEBUG -Message "Removing existing installer file before extraction: $InstallerPath"
-             Remove-Item -Path $InstallerPath -Force -ErrorAction SilentlyContinue
-        }
-        # Temporarily suppress Write-Progress to avoid console buffer errors in non-interactive sessions
-        $originalProgressPreference = $ProgressPreference
-        $ProgressPreference = 'SilentlyContinue'
-        try {
-            Expand-Archive -Path $ZipFilePath -DestinationPath $DownloadDir -Force -ErrorAction Stop
-        } finally {
-            $ProgressPreference = $originalProgressPreference # Restore original preference
-        }
-
-        if (-not (Test-Path $InstallerPath)) { throw "Installer file '$InstallerPath' not found after extraction." }
-        Write-Log -Message "[Config] Installer extracted successfully to $InstallerPath." -Level INFO
-        if (-not $skipDownload) { # Add weight only if download wasn't skipped
-             $script:CurrentWeight += Get-StepWeight -StepID 'ExtractConfig'
-             Write-Log -Message "[Config] Added weight for extraction. Current weight: $($script:CurrentWeight)." -Level DEBUG
-        }
-
-
-        # --- Verify Installer Signature (Part of Download/Pre-Install Step) ---
-        $verifySigStepName = "Verifying Config Installer Signature"
-        Write-Log -Message "[Config] $verifySigStepName..." -Level INFO
-        $toastParamsCfgVerifySig = @{
-            StepNumber    = $script:currentStep # Still conceptually part of download or pre-install
-            TotalSteps    = $script:totalSteps
-            StepName      = $verifySigStepName
-            CurrentWeight = $script:CurrentWeight
-            TotalWeight   = $script:TotalWeight
-        }
-        if ($script:IsInteractiveRun) { Update-PersistentToast @toastParamsCfgVerifySig }
-        # Use ExpectedXmlSignature fetched earlier
-        if ($ExpectedXmlSignature) {
-             $sigCheckResult = Get-ExecutableSignature -ExePath $InstallerPath
-             # Robust check: Ensure result exists, status is valid, thumbprint exists, and thumbprint matches
-             $validationFailed = $false
-             $failureReason = ""
-             if (-not $sigCheckResult) {
-                 $validationFailed = $true
-                 $failureReason = "Get-ExecutableSignature returned null."
-             } elseif ($sigCheckResult.Status -ne 'Valid') {
-                 $validationFailed = $true
-                 $failureReason = "Signature status is '$($sigCheckResult.Status)' (Expected 'Valid')."
-             } # Removed incorrect comparison between Authenticode Thumbprint and XML Signature
-             # elseif ([string]::IsNullOrEmpty($sigCheckResult.Thumbprint)) { ... } # Thumbprint presence is implicitly checked by Status being 'Valid'
-             # elseif ($sigCheckResult.Thumbprint -ne $ExpectedXmlSignature) { ... } # Incorrect comparison removed
-
-             # Add a note that XML signature itself isn't checked here
-             Write-Log -Level DEBUG -Message "Note: XML signature value ('$ExpectedXmlSignature') is present but not currently validated against the XML content."
-
-
-             if ($validationFailed) {
-                 throw "CRITICAL: Extracted installer '$InstallerPath' failed signature validation. Reason: $failureReason"
-             }
-             Write-Log -Message "[Config] Extracted installer signature verified successfully against XML signature." -Level INFO
-        } else { Write-Log -Message "[Config] XML Signature was missing. Skipping installer signature validation." -Level WARN }
-
 
         # --- Step: Install Config ---
         $script:currentStep++
@@ -1584,53 +1614,116 @@ Line Content: $lineContent
 } # Closing brace for the finally block
 
 # --- Final Exit Code Handling ---
-if ($script:ErrorOccurred -and -not $anyUpdatePerformed) {
-    Write-Log -Message "Script finished with errors AND no updates were performed. Exit Code: 1" -Level ERROR
+
+# Always attempt final notification; toast function handles context
+Write-Log -Message "Preparing final status notification." -Level DEBUG
+
+# --- Final Log Rotation (Moved Here) ---
+$logPathToShow = $null
+if ($global:LogFile) {
+    Write-Log -Level DEBUG -Message "Attempting final log rotation before success/summary toast..."
+    try {
+        $maxArchives = 24 # Default archive count
+        if ($PSBoundParameters.ContainsKey('MaxLogFileSizeMB')) { Write-Log -Level DEBUG -Message "Using default MaxArchiveCount: $maxArchives" }
+        $logPathToShow = Invoke-LogFileRotation -LogFilePath $global:LogFile -MaxArchiveCount $maxArchives -ErrorAction Stop
+        Write-Log -Level DEBUG -Message "Log rotation returned archive path: '$($logPathToShow)'"
+    } catch {
+        Write-Log -Level WARN -Message "Error during final log rotation: $($_.Exception.Message). Archive path might be null."
+    }
+} else {
+    Write-Log -Level WARN -Message "Skipping final log rotation as Global:LogFile is not set."
+}
+# --- End Final Log Rotation ---
+
+# --- Construct Final Summary Message ---
+Write-Log -Message "Constructing final summary notification message." -Level INFO
+$summaryLines = @()
+
+# Config Status
+$configVersionString = if ($script:InitialInstalledVersion) { $script:InitialInstalledVersion } else { "N/A" }
+if ($script:configUpdated) {
+    $summaryLines += "Config: Updated $NewInstalledVersion"
+} elseif ($script:InitialInstalledVersion -and $LatestVersion -eq (Convert-VersionString $script:InitialInstalledVersion)) {
+    $summaryLines += "Config: Up-to-date $configVersionString"
+} elseif ($script:InitialInstalledVersion) {
+    $summaryLines += "Config: Update skipped $LatestVersion (Installed: $configVersionString)"
+} else {
+    $summaryLines += "Config: Not Found"
+}
+
+# App Status
+if ($UpdateLoxoneApp) {
+    $appVersionString = if ($appDetails -and -not $appDetails.Error) { $appDetails.FileVersion } else { "N/A" }
+    if ($script:appUpdated) {
+        $summaryLines += "App ($selectedAppChannelName): Updated $newAppDetails.FileVersion"
+    } elseif ($appDetails -and -not $appDetails.Error -and -not $appUpdateNeeded) { # Already up-to-date
+        $summaryLines += "App ($selectedAppChannelName): Up-to-date $appVersionString"
+    } elseif ($appUpdateNeeded) { # Update was needed but failed or skipped
+        $summaryLines += "App ($selectedAppChannelName): Update failed/skipped $latestLoxWindowsVersion (Installed: $appVersionString)"
+    } elseif ($latestLoxWindowsVersion) { # App not found initially or error checking
+        $summaryLines += "App ($selectedAppChannelName): Not Found/Error checking"
+    } else { # XML details unavailable
+        $summaryLines += "App ($selectedAppChannelName): Check skipped (details unavailable)"
+    }
+} else {
+    $summaryLines += "App: Check disabled"
+}
+
+# Miniserver Status (Simplified)
+if (Test-Path $MSListPath) {
+    if ($miniserverCount -gt 0) {
+        if ($miniserversUpdated) {
+            $summaryLines += "Miniserver(s): Updated (Target: $LatestVersion)" # Check log for details
+        } else {
+            # Check if all initially checked servers were already up-to-date
+            $allMsUpToDate = $true
+            foreach ($msHost in $miniserverVersions.Keys) {
+                if ($miniserverVersions[$msHost] -ne "Error Connecting" -and $miniserverVersions[$msHost] -ne "Error Parsing XML") {
+                    if ((Convert-VersionString $miniserverVersions[$msHost]) -ne $LatestVersion) {
+                        $allMsUpToDate = $false; break
+                    }
+                } else {
+                    $allMsUpToDate = $false; break # Treat connection/parse errors as not up-to-date for summary
+                }
+            }
+            if ($allMsUpToDate) {
+                $summaryLines += "Miniserver(s): Up-to-date $LatestVersion"
+            } else {
+                 $summaryLines += "Miniserver(s): Check complete (Target: $LatestVersion)" # Indicates check ran, but not all were up-to-date initially or errors occurred
+            }
+        }
+    } else {
+        $summaryLines += "Miniserver(s): List empty"
+    }
+} else {
+    $summaryLines += "Miniserver(s): List not found"
+}
+
+# Sort the summary lines alphabetically before joining
+$summaryLines = $summaryLines | Sort-Object
+
+$finalMessage = $summaryLines -join "`n"
+$finalSuccess = (-not $script:ErrorOccurred)
+
+# Ensure weight is maxed out on success
+if ($finalSuccess -and $script:CurrentWeight -lt $script:TotalWeight) {
+    $script:CurrentWeight = $script:TotalWeight
+}
+
+# --- Show Final Toast ---
+# Show toast if interactive OR if an error occurred OR if an update was performed
+if ($script:IsInteractiveRun -or $script:ErrorOccurred -or $anyUpdatePerformed) {
+    Write-Log -Message "Showing final status toast (Interactive: $script:IsInteractiveRun, Error: $script:ErrorOccurred, Update: $anyUpdatePerformed)." -Level INFO
+    Show-FinalStatusToast -StatusMessage $finalMessage -Success $finalSuccess -LogFileToShow $logPathToShow
+} else {
+    Write-Log -Message "Skipping final status toast (Not interactive, no error, no update performed)." -Level INFO
+}
+
+# --- Determine Exit Code ---
+if ($script:ErrorOccurred) {
+    Write-Log -Message "Script finished with errors. Exit Code: 1" -Level ERROR
     Exit 1
 } else {
-    # Always attempt final notification; toast function handles context
-    Write-Log -Message "Preparing final status notification." -Level DEBUG
-    # REMOVED premature exit log message
- 
-    # --- Final Log Rotation (Moved Here) ---
-    $logPathToShow = $null
-    if ($global:LogFile) {
-        Write-Log -Level DEBUG -Message "Attempting final log rotation before success/summary toast..."
-        try {
-            $maxArchives = 24 # Default archive count
-            if ($PSBoundParameters.ContainsKey('MaxLogFileSizeMB')) { Write-Log -Level DEBUG -Message "Using default MaxArchiveCount: $maxArchives" }
-            $logPathToShow = Invoke-LogFileRotation -LogFilePath $global:LogFile -MaxArchiveCount $maxArchives -ErrorAction Stop
-            Write-Log -Level DEBUG -Message "Log rotation returned archive path: '$($logPathToShow)'"
-        } catch {
-            Write-Log -Level WARN -Message "Error during final log rotation: $($_.Exception.Message). Archive path might be null."
-        }
-    } else {
-        Write-Log -Level WARN -Message "Skipping final log rotation as Global:LogFile is not set."
-    }
-    # --- End Final Log Rotation ---
-
-    if (-not $anyUpdatePerformed) {
-        Write-Log -Message "No updates performed. Constructing CONCISE summary notification." -Level INFO; $summaryLines = @() # Removed "Update Check:" line
-        if (Test-Path $MSListPath) { try { $miniserverEntries = Get-Content $MSListPath -ErrorAction Stop | Where-Object { $_ -match '\S' -and $_.TrimStart()[0] -ne '#' }; if (($miniserverEntries | Measure-Object).Count -gt 0) { $summaryLines += "Miniserver(s): Up-to-date (v$($LatestVersion))" } else { $summaryLines += "Miniserver(s): List empty/not checked." } } catch { $summaryLines += "Miniserver(s): Error checking list." } } else { $summaryLines += "Miniserver(s): List not found." }
-        if ($InstalledExePath -and (Test-Path $InstalledExePath)) { if ($LatestVersion -ne $normalizedInstalled) { $summaryLines += "Config: Update available (v$($LatestVersion.ToString())) but skipped (Installed: v$($script:InitialInstalledVersion))." } else { $summaryLines += "Config: Up-to-date (v$($script:InitialInstalledVersion))" } } else { $summaryLines += "Config: Not Found." } # Removed dot
-        if ($UpdateLoxoneApp) { if ($appDetails -and -not $appDetails.Error) { if ($appUpdateNeeded) { $summaryLines += "App ($selectedAppChannelName): Update available (v$($latestLoxWindowsVersion)) but skipped/failed." } else { $summaryLines += "App ($selectedAppChannelName): Up-to-date (v$($appDetails.FileVersion))" } } elseif ($latestLoxWindowsVersion) { $summaryLines += "App ($selectedAppChannelName): Not Found/Error checking." } else { $summaryLines += "App ($selectedAppChannelName): Check skipped (details unavailable)." } } else { $summaryLines += "App: Check disabled." } # Removed dot
-        $summaryMessage = $summaryLines -join "`n"; $script:CurrentWeight = $script:TotalWeight
-        # Pass the rotated log path
-        # Show summary toast only if interactive run (as no update was performed)
-        if ($script:IsInteractiveRun) {
-            Write-Log -Message "Showing final status toast because script was run interactively (IsInteractiveRun=True) even though no update was performed." -Level INFO
-            Show-FinalStatusToast -StatusMessage $summaryMessage -Success:$true -LogFileToShow $logPathToShow
-        } else {
-            Write-Log -Message "Skipping final status toast because script was not run interactively (IsInteractiveRun=False) and no update was performed." -Level INFO
-        }
-    } else {
-        Write-Log -Message "Updates were performed successfully. Showing success notification." -Level INFO
-        if ($script:CurrentWeight -lt $script:TotalWeight) { $script:CurrentWeight = $script:TotalWeight }
-        $successMessages = @("Loxone update process finished successfully."); if ($script:configUpdated) { $successMessages += "Loxone Config updated to v$NewInstalledVersion." }; if ($miniserversUpdated) { $successMessages += "Miniserver(s) updated (check log for details)." }
-        $successMessage = $successMessages -join " "
-        # Pass the rotated log path
-        Show-FinalStatusToast -StatusMessage $successMessage -Success:$true -LogFileToShow $logPathToShow
-    }
     Write-Log -Level INFO -Message "Script finished successfully. Exit Code: 0"
     Exit 0
 }

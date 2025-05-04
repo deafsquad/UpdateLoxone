@@ -197,6 +197,101 @@ function Get-LoxoneExePath { # Renamed function
     }
 }
 #endregion Installation Helpers (Continued)
+function Test-ExistingInstaller {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$InstallerPath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$TargetVersion, # Expecting normalized version
+
+        [Parameter(Mandatory=$false)]
+        [string]$ComponentName = "Installer" # For logging purposes (e.g., "Config", "App")
+    )
+    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+
+    $result = @{
+        IsValid        = $false
+        Reason         = "Not found"
+        SkipDownload   = $false
+        SkipExtraction = $false # Primarily for Config, but included for consistency
+    }
+
+    try {
+        if (-not (Test-Path -Path $InstallerPath -PathType Leaf)) {
+            Write-Log -Message "[$ComponentName] Existing installer not found at '$InstallerPath'." -Level INFO
+            return $result # Return default (invalid, not found)
+        }
+
+        Write-Log -Message "[$ComponentName] Existing installer found at '$InstallerPath'. Validating..." -Level INFO
+
+        # 1. Check Version
+        $existingVersionRaw = $null
+        $normalizedExisting = $null
+        $versionMatch = $false
+        try {
+            $existingVersionRaw = (Get-Item -Path $InstallerPath -ErrorAction Stop).VersionInfo.FileVersion
+            $normalizedExisting = Convert-VersionString $existingVersionRaw -ErrorAction Stop
+            Write-Log -Message "[$ComponentName] Existing installer version: $normalizedExisting (Raw: '$existingVersionRaw'). Target version: $TargetVersion." -Level DEBUG
+            if ($normalizedExisting -eq $TargetVersion) {
+                $versionMatch = $true
+                Write-Log -Message "[$ComponentName] Existing installer version matches target." -Level INFO
+            } else {
+                Write-Log -Message "[$ComponentName] Existing installer version ($normalizedExisting) does NOT match target ($TargetVersion)." -Level WARN
+                $result.Reason = "Version mismatch (Found: $normalizedExisting, Expected: $TargetVersion)"
+                # Remove invalid file here? Or let the caller handle it? Let caller handle removal.
+                return $result
+            }
+        } catch {
+            Write-Log -Message "[$ComponentName] Could not determine or normalize version for existing installer '$InstallerPath': $($_.Exception.Message)" -Level WARN
+            $result.Reason = "Version check failed"
+            return $result
+        }
+
+        # 2. Check Signature (only if version matches)
+        Write-Log -Message "[$ComponentName] Version matches. Checking signature of existing installer '$InstallerPath'..." -Level DEBUG
+        $existingSignatureValid = $false
+        try {
+            # Assuming Get-ExecutableSignature is available in the scope
+            $sigCheckResult = Get-ExecutableSignature -ExePath $InstallerPath -ErrorAction Stop
+            if ($sigCheckResult -and $sigCheckResult.Status -eq 'Valid') {
+                $existingSignatureValid = $true
+                Write-Log -Message "[$ComponentName] Existing installer signature is valid." -Level INFO
+            } else {
+                $sigStatus = if ($sigCheckResult) { $sigCheckResult.Status } else { "Error checking" }
+                Write-Log -Message "[$ComponentName] Existing installer signature is NOT valid (Status: $sigStatus)." -Level WARN
+                $result.Reason = "Invalid signature (Status: $sigStatus)"
+                # Remove invalid file here? Or let the caller handle it? Let caller handle removal.
+                return $result
+            }
+        } catch {
+             Write-Log -Message "[$ComponentName] Error checking signature for existing installer '$InstallerPath': $($_.Exception.Message)" -Level WARN
+             $result.Reason = "Signature check failed"
+             return $result
+        }
+
+        # 3. If both checks passed
+        Write-Log -Message "[$ComponentName] Existing installer '$InstallerPath' is valid (Version & Signature)." -Level INFO
+        $result.IsValid = $true
+        $result.Reason = "Valid existing installer found"
+        $result.SkipDownload = $true
+        # Set SkipExtraction to true only if it's the Config component, as App doesn't have an extraction step
+        if ($ComponentName -eq "Config") {
+            $result.SkipExtraction = $true
+        }
+
+        return $result
+
+    } catch {
+        # Catch unexpected errors within the function itself
+        Write-Log -Message "[$ComponentName] Unexpected error during existing installer check for '$InstallerPath': $($_.Exception.Message)" -Level ERROR
+        $result.Reason = "Unexpected error during check"
+        return $result
+    } finally {
+        Exit-Function
+    }
+}
 
 #region Zip Extraction
 function Invoke-ZipFileExtraction {
@@ -229,5 +324,5 @@ function Invoke-ZipFileExtraction {
 #endregion Zip Extraction
 
 # Ensure functions are available (though NestedModules in PSD1 is the primary mechanism)
-Export-ModuleMember -Function Get-InstalledVersion, Start-LoxoneUpdateInstaller, Start-LoxoneForWindowsInstaller, Get-InstalledApplicationPath, Get-LoxoneExePath, Invoke-ZipFileExtraction
+Export-ModuleMember -Function Get-InstalledVersion, Start-LoxoneUpdateInstaller, Start-LoxoneForWindowsInstaller, Get-InstalledApplicationPath, Get-LoxoneExePath, Invoke-ZipFileExtraction, Test-ExistingInstaller
 # NOTE: Explicit Export-ModuleMember is required for the manifest to re-export with FunctionsToExport = '*'.
