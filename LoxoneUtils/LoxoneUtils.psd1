@@ -191,7 +191,7 @@ PrivateData = @{
             'Update-PersistentToast'          = 'User'   # UI related
             'Show-FinalStatusToast'           = 'User'   # UI related
         }
-    }
+    };
     # --- END: Context Metadata ---
 
     PSData = @{
@@ -209,6 +209,6 @@ PrivateData = @{
 
         # ReleaseNotes of this module
         # ReleaseNotes = ''
-    } # End of PSData hashtable
+    }; # End of PSData hashtable
 } # End of PrivateData hashtable
 }

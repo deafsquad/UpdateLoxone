@@ -260,7 +260,25 @@ function Show-FinalStatusToast {
         # 3. Define Buttons (Max 5 total with context items)
         $buttons = [System.Collections.Generic.List[object]]::new()
         $buttons.Add((New-BTButton -Dismiss -Content 'Close'))
-        if ($logPathForAction) { $buttons.Add((New-BTButton -Content 'Open Log' -Arguments $logPathForAction)) }
+        if ($logPathForAction) {
+            # Button to just open the log file locally
+            $buttons.Add((New-BTButton -Content 'Open Log' -Arguments $logPathForAction))
+
+            # Button to send the log file via Google Chat (only add if not successful)
+            if (-not $Success -and $buttons.Count -lt 5) {
+                $chatScriptPath = Join-Path $PSScriptRoot '..\Send-GoogleChat.ps1'
+                if (Test-Path -LiteralPath $chatScriptPath) {
+                    $quotedChatScriptPath = """$chatScriptPath"""
+                    $quotedLogPath = """$logPathForAction"""
+                    # Construct the command to be executed when the button is clicked
+                    $chatButtonCommand = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File $quotedChatScriptPath -LogFilePath $quotedLogPath"
+                    Write-Log -Level Debug -Message ("Adding 'Send Log via Chat' button with command: '{0}'" -f $chatButtonCommand)
+                    $buttons.Add((New-BTButton -Content 'Send Log via Chat' -Arguments $chatButtonCommand))
+                } else {
+                    Write-Log -Level Warning -Message "Chat script not found at '$chatScriptPath'. Cannot add 'Send Log via Chat' button."
+                }
+            }
+        }
         if ($LoxoneAppInstalled -and $buttons.Count -lt 5) { $buttons.Add((New-BTButton -Content 'APP' -Arguments 'loxone:/')) }
         if (-not [string]::IsNullOrEmpty($TeamsLink) -and $buttons.Count -lt 5) { $buttons.Add((New-BTButton -Content 'Team' -Arguments $TeamsLink)) }
         # Add Snooze button for persistence with Reminder scenario
@@ -276,46 +294,36 @@ function Show-FinalStatusToast {
         # 5. Define Actions
         $actions1 = New-BTAction -Buttons $buttons -ContextMenuItems $contextMenuItems
 
-        # 6. Define Launch Command
-        $launchCommand = $null
-        if ($logPathForAction -and (Test-Path -LiteralPath $chatScriptPath)) {
-            $quotedChatScriptPath = """$chatScriptPath"""
-            $quotedLogPath = """$logPathForAction"""
-            $launchCommand = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File $quotedChatScriptPath -LogFilePath $quotedLogPath"
-            Write-Log -Level Debug -Message ("Defined Launch Command: '{0}'" -f $launchCommand)
-        } elseif (-not (Test-Path -LiteralPath $chatScriptPath)) {
-             Write-Log -Level Warning -Message "Cannot define Launch Command: Chat script not found at '$chatScriptPath'."
-        } else {
-             Write-Log -Level Warning -Message "Cannot define Launch Command: Log path for action is not valid."
-        }
+        $actions1 = New-BTAction -Buttons $buttons -ContextMenuItems $contextMenuItems
+
+        # 6. Define Launch Command (REMOVED - Functionality moved to explicit button)
+        # $launchCommand = $null
+        # ... (Removed launch command definition logic) ...
 
         # 7. Define Content (with Reminder Scenario)
         $content = New-BTContent -Visual $visual1 -Actions $actions1 -Audio $audio -Scenario ([Microsoft.Toolkit.Uwp.Notifications.ToastScenario]::Reminder)
-        if ($launchCommand) {
-            $content.Launch = $launchCommand # Add Launch property if defined
-        }
-        Write-Log -Level Debug -Message "Defined Content. Scenario: Reminder, Launch set: $(!([string]::IsNullOrEmpty($content.Launch)))"
+        # REMOVED: if ($launchCommand) { $content.Launch = $launchCommand }
+        Write-Log -Level Debug -Message "Defined Content. Scenario: Reminder, Launch property is NOT set."
 
         # 8. Define Submit Parameters
         $SubmitParams = @{
-            Content = $content
-            ErrorAction = 'Stop'
+            Content          = $content
+            ErrorAction      = 'Stop'
             UniqueIdentifier = $ToastGUID # Use the persistent ID to replace progress toast
         }
         if (-not [string]::IsNullOrEmpty($script:ResolvedToastAppId)) {
             $SubmitParams['AppId'] = $script:ResolvedToastAppId
         }
+        # --- End Submit Parameter Definition ---
 
         # 9. Submit Notification
         Write-Log -Level Info -Message "Submitting final status toast via Submit-BTNotification. Params: $($SubmitParams | Out-String)"
         Submit-BTNotification @SubmitParams
         Write-Log -Level Info -Message "Final status toast submitted successfully via Submit-BTNotification (AppId used: $(if ($SubmitParams.ContainsKey('AppId')) {$SubmitParams['AppId']} else {'Default'}))."
 
-    } catch {
+    } catch { # Catch block for the main try starting at line 237
         Write-Log -Level Error -Message "An unexpected error occurred during final status toast generation/submission: ($($_ | Out-String))"
-    } finally {
+    } finally { # Finally block for the main try starting at line 237
         Exit-Function
     }
-}
-
-Export-ModuleMember -Function Initialize-LoxoneToastAppId, Update-PersistentToast, Show-FinalStatusToast
+} # Closing brace for the Show-FinalStatusToast function
