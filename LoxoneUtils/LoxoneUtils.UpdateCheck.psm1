@@ -41,7 +41,7 @@ function New-LoxoneComponentStatusObject {
         [PSCustomObject]$AppData = $null # Specific to App (currently unused for extra fields)
     )
 
-    LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] DEBUG (Before Create): Received ComponentType = '$ComponentType'"
+    Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] DEBUG (Before Create): Received ComponentType = '$ComponentType'"
     $statusObject = [PSCustomObject]@{
         ComponentType   = $ComponentType
         Identifier      = $Identifier
@@ -61,18 +61,18 @@ function New-LoxoneComponentStatusObject {
         ExpectedSize    = if ($ComponentType -eq 'Config') { $ConfigData?.FileSize } else { $null }
         # Add App specific fields here if needed in the future from $AppData
     }
-    LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] Created object properties: $(($statusObject | Get-Member -MemberType Properties | Select-Object -ExpandProperty Name) -join ', ')"
+    Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] Created object properties: $(($statusObject | Get-Member -MemberType Properties | Select-Object -ExpandProperty Name) -join ', ')"
     # Add Debugging AFTER object creation
-    LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] DEBUG (After Assignment): statusObject.ZipUrl = '$($statusObject?.ZipUrl)'"
-    LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] DEBUG (After Assignment): statusObject.ExpectedCRC = '$($statusObject?.ExpectedCRC)'"
-    LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] DEBUG (After Assignment): statusObject.ExpectedSize = '$($statusObject?.ExpectedSize)'"
+    Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] DEBUG (After Assignment): statusObject.ZipUrl = '$($statusObject?.ZipUrl)'"
+    Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] DEBUG (After Assignment): statusObject.ExpectedCRC = '$($statusObject?.ExpectedCRC)'"
+    Write-Log -Level DEBUG -Message "[New-LoxoneComponentStatusObject] DEBUG (After Assignment): statusObject.ExpectedSize = '$($statusObject?.ExpectedSize)'"
             # --- Start Moved Block (Adapted) ---
             # Explicitly set ShouldRun based on Status/UpdateNeeded
             if ($statusObject.Status -eq 'NotFound') {
-                LoxoneUtils.Logging\Write-Log -Level INFO -Message "[New-LoxoneComponentStatusObject] Component not installed (Status='NotFound'). Setting ShouldRun=True."
+                Write-Log -Level INFO -Message "[New-LoxoneComponentStatusObject] Component not installed (Status='NotFound'). Setting ShouldRun=True."
                 $statusObject.ShouldRun = $true
             } elseif ($statusObject.UpdateNeeded) {
-                 LoxoneUtils.Logging\Write-Log -Level INFO -Message "[New-LoxoneComponentStatusObject] Update required based on version (UpdateNeeded=True). Setting ShouldRun=True."
+                 Write-Log -Level INFO -Message "[New-LoxoneComponentStatusObject] Update required based on version (UpdateNeeded=True). Setting ShouldRun=True."
                  $statusObject.ShouldRun = $true # Ensure it's true if UpdateNeeded is true but status wasn't 'NotFound'
             } else {
                  # ShouldRun is already initialized to $false, but we can be explicit
@@ -107,32 +107,32 @@ function Get-UpdateStatusFromComparison {
             $status = "NotFound"
             $updateNeeded = $true # Assume update needed if not found
             # Removed duplicated lines 109-110
-            LoxoneUtils.Logging\Write-Log -Message "$ComponentLogPrefix Installation not found." -Level INFO
+            Write-Log -Message "$ComponentLogPrefix Installation not found." -Level INFO
         }
         "CheckSkipped (No Target)" {
             $status = "CheckSkipped (No Target)"
             $updateNeeded = $false
-            LoxoneUtils.Logging\Write-Log -Message "$ComponentLogPrefix Initial version found ($InstalledVersionString), but target version ('$TargetVersionString') is missing or invalid. Skipping check." -Level WARN
+            Write-Log -Message "$ComponentLogPrefix Initial version found ($InstalledVersionString), but target version ('$TargetVersionString') is missing or invalid. Skipping check." -Level WARN
         }
         "Up-to-date" {
             $status = "Up-to-date" # Explicitly set status
             $updateNeeded = $false
-            LoxoneUtils.Logging\Write-Log -Message "Is up-to-date ($InstalledVersionString)." -Level INFO
+            Write-Log -Message "Is up-to-date ($InstalledVersionString)." -Level INFO
         }
         "Outdated" {
             $status = "Outdated"
             $updateNeeded = $true # Explicitly set update needed
-            LoxoneUtils.Logging\Write-Log -Message "$ComponentLogPrefix Update required (Installed: $InstalledVersionString, Latest: $TargetVersionString)." -Level INFO
+            Write-Log -Message "$ComponentLogPrefix Update required (Installed: $InstalledVersionString, Latest: $TargetVersionString)." -Level INFO
         }
         "ComparisonError" {
             $status = "VersionCheckFailed" # Map comparison error to a check failure
             $updateNeeded = $false # Don't attempt update if comparison failed
-            LoxoneUtils.Logging\Write-Log -Message "$ComponentLogPrefix Failed to compare versions ($InstalledVersionString vs $TargetVersionString)." -Level WARN
+            Write-Log -Message "$ComponentLogPrefix Failed to compare versions ($InstalledVersionString vs $TargetVersionString)." -Level WARN
         }
         default {
             $status = "ErrorDeterminingStatus" # Unexpected status from Compare-LoxoneVersion
             $updateNeeded = $false
-            LoxoneUtils.Logging\Write-Log -Message "$ComponentLogPrefix Unexpected status '$ComparisonResult' received from Compare-LoxoneVersion." -Level ERROR
+            Write-Log -Message "$ComponentLogPrefix Unexpected status '$ComparisonResult' received from Compare-LoxoneVersion." -Level ERROR
         } # Added missing closing brace for switch
     } # End switch
 
@@ -162,7 +162,7 @@ function Invoke-MSCheckLogic {
     )
 
     # Assuming Get-RedactedPassword is available (from LoxoneUtils.Utility)
-    $redactedEntry = LoxoneUtils.Utility\Get-RedactedPassword $MSEntry
+    $redactedEntry = Get-RedactedPassword $MSEntry
     $msVersion = $null
     $msIdentifier = "UnknownHost" # Default identifier
     $statusResult = $null
@@ -174,13 +174,13 @@ function Invoke-MSCheckLogic {
         if ($MSEntry -match '^(?:https?://)?(?:[^:]+:[^@]+@)?(?<host>[^/:]+)(?::\d+)?') {
             $msIdentifier = $matches.host
         } else {
-             LoxoneUtils.Logging\Write-Log -Level WARN -Message "[MS Check Internal] Regex failed to extract host from '$redactedEntry'. Using URI fallback."
+             Write-Log -Level WARN -Message "[MS Check Internal] Regex failed to extract host from '$redactedEntry'. Using URI fallback."
              try { $msIdentifier = ([uri]$MSEntry).Host } catch {}
         }
         if ([string]::IsNullOrWhiteSpace($msIdentifier)) { $msIdentifier = "UnknownHost" } # Final fallback
-        LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "[MS Check Internal] Extracted Identifier '$msIdentifier' for entry '$redactedEntry'."
+        Write-Log -Level DEBUG -Message "[MS Check Internal] Extracted Identifier '$msIdentifier' for entry '$redactedEntry'."
     } catch {
-        LoxoneUtils.Logging\Write-Log -Level WARN -Message "[MS Check Internal] Could not parse entry '$redactedEntry' for identifier. Using fallback. Error: $($_.Exception.Message)"
+        Write-Log -Level WARN -Message "[MS Check Internal] Could not parse entry '$redactedEntry' for identifier. Using fallback. Error: $($_.Exception.Message)"
         try { $msIdentifier = $MSEntry.Split('@')[-1].Split('/')[0].Split(':')[0] } catch {} # Original fallback
         if ([string]::IsNullOrWhiteSpace($msIdentifier)) { $msIdentifier = "UnknownHost" } # Final fallback
     }
@@ -197,25 +197,25 @@ function Invoke-MSCheckLogic {
         }
         if ($DebugMode.IsPresent) { $getMSVersionParams.DebugMode = $true }
 
-        LoxoneUtils.Logging\Write-Log -Message "$logPrefix Calling Get-MSVersion..." -Level DEBUG
+        Write-Log -Message "$logPrefix Calling Get-MSVersion..." -Level DEBUG
         # IMPORTANT: Call Get-MSVersion directly as it's exported from the module
         $msVersion = Get-MSVersion @getMSVersionParams
-LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "$logPrefix Miniserver version check returned: '$msVersion'"
+Write-Log -Level DEBUG -Message "$logPrefix Miniserver version check returned: '$msVersion'"
 
         if ($msVersion) {
-            LoxoneUtils.Logging\Write-Log -Message "$logPrefix Version retrieved: $msVersion" -Level INFO
+            Write-Log -Message "$logPrefix Version retrieved: $msVersion" -Level INFO
             $normalizedCurrentMSVersionString = $null
             try {
-                $normalizedCurrentMSVersionString = LoxoneUtils.Utility\Convert-VersionString $msVersion # Normalize for logging comparison
+                $normalizedCurrentMSVersionString = Convert-VersionString $msVersion # Normalize for logging comparison
             } catch {
-                 LoxoneUtils.Logging\Write-Log -Message "$logPrefix Failed to normalize current version '$msVersion': $($_.Exception.Message)" -Level WARN
+                 Write-Log -Message "$logPrefix Failed to normalize current version '$msVersion': $($_.Exception.Message)" -Level WARN
             }
 
 
             # Compare versions using Compare-LoxoneVersion (from LoxoneUtils.Utility)
             # IMPORTANT: Call Compare-LoxoneVersion directly as it's exported from the module
-            $comparisonStatus = LoxoneUtils.Utility\Compare-LoxoneVersion -InstalledVersionString $msVersion -TargetVersionString $TargetVersionString
-            LoxoneUtils.Logging\Write-Log -Message "$logPrefix Compare-LoxoneVersion returned: '$comparisonStatus'" -Level DEBUG
+            $comparisonStatus = Compare-LoxoneVersion -InstalledVersionString $msVersion -TargetVersionString $TargetVersionString
+            Write-Log -Message "$logPrefix Compare-LoxoneVersion returned: '$comparisonStatus'" -Level DEBUG
 
             # Map comparison status using the other helper
             # IMPORTANT: Call Get-UpdateStatusFromComparison directly as it's now in the same module scope
@@ -229,13 +229,13 @@ LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "$logPrefix Miniserver versi
 
         } else { # This is the correct 'else' corresponding to 'if ($msVersion)'
             $errorMessage = "Could not retrieve version (Get-MSVersion returned null/empty)."
-            LoxoneUtils.Logging\Write-Log -Message "$logPrefix $errorMessage" -Level WARN
+            Write-Log -Message "$logPrefix $errorMessage" -Level WARN
             $statusResult = [PSCustomObject]@{ Status = "VersionCheckFailed"; UpdateNeeded = $false }
         } # Closing brace for the inner 'if ($msVersion)' / 'else' block
         } catch {
             # Catch errors specifically from Get-MSVersion or other issues in the outer try block
             $errorMessage = "Error retrieving/processing version: $($_.Exception.Message)."
-            LoxoneUtils.Logging\Write-Log -Message "$logPrefix $errorMessage" -Level WARN
+            Write-Log -Message "$logPrefix $errorMessage" -Level WARN
             $msVersion = $null # Ensure version is null on error
             $statusResult = [PSCustomObject]@{ Status = "VersionCheckFailed"; UpdateNeeded = $false }
         } # Closing brace for the catch block
@@ -288,7 +288,7 @@ function Test-UpdateNeeded {
 
     Write-Log -Level DEBUG -Message "Entering function $($MyInvocation.MyCommand.Name)" # Replaced Start-FunctionLog
     # --- Logic moved to UpdateLoxone.ps1 ---
-    LoxoneUtils.Logging\Write-Log -Message "[Update Check] Function Test-UpdateNeeded entered but logic is now integrated into UpdateLoxone.ps1. Returning empty list." -Level DEBUG
+    Write-Log -Message "[Update Check] Function Test-UpdateNeeded entered but logic is now integrated into UpdateLoxone.ps1. Returning empty list." -Level DEBUG
     Write-Log -Level DEBUG -Message "Exiting function $($MyInvocation.MyCommand.Name)" # Replaced Stop-FunctionLog
     return [System.Collections.Generic.List[PSCustomObject]]::new() # Return empty list
 }
@@ -319,7 +319,7 @@ function Test-LoxoneConfigComponent {
         if ($null -ne $ConfigData) {
             $latestVersion = $ConfigData.Version
         } else {
-            LoxoneUtils.Logging\Write-Log -Message "[Config Check] ConfigData parameter was null. Cannot determine latest version." -Level WARN
+            Write-Log -Message "[Config Check] ConfigData parameter was null. Cannot determine latest version." -Level WARN
             # Fall through, logic below handles null target version
         }
     
@@ -328,8 +328,8 @@ function Test-LoxoneConfigComponent {
         # Assign properties to local variables FIRST
         # Use Compare-LoxoneVersion to determine status
         # Ensure Compare-LoxoneVersion is available (should be via NestedModules in PSD1 later)
-        $comparisonStatus = LoxoneUtils.Utility\Compare-LoxoneVersion -InstalledVersionString $InstalledVersion -TargetVersionString $latestVersion
-    LoxoneUtils.Logging\Write-Log -Message "[Config Check] Compare-LoxoneVersion returned: '$comparisonStatus'" -Level DEBUG
+        $comparisonStatus = Compare-LoxoneVersion -InstalledVersionString $InstalledVersion -TargetVersionString $latestVersion
+    Write-Log -Message "[Config Check] Compare-LoxoneVersion returned: '$comparisonStatus'" -Level DEBUG
     # NOTE: The problematic 'if ($comparisonStatus -eq 'NotFound')' block is confirmed absent here.
 
     # Duplicate 'NotFound' block removed.
@@ -358,7 +358,7 @@ function Test-LoxoneConfigComponent {
    # Explicitly set ShouldRun if component not found, overriding initial value if necessary
    # [ShouldRun logic moved to New-LoxoneComponentStatusObject]
 
-   LoxoneUtils.Logging\Write-Log -Message "[Config Check] Status object created: $($configStatusObject | ConvertTo-Json -Depth 1 -Compress)" -Level DEBUG
+   Write-Log -Message "[Config Check] Status object created: $($configStatusObject | ConvertTo-Json -Depth 1 -Compress)" -Level DEBUG
    Write-Log -Level DEBUG -Message "Exiting function $($MyInvocation.MyCommand.Name)" # Replaced Stop-FunctionLog
    Write-Output $configStatusObject
 }
@@ -393,22 +393,22 @@ function Test-LoxoneAppComponent {
     if ($null -ne $AppData) {
         $latestAppVersion = $AppData.Version
     } else {
-        LoxoneUtils.Logging\Write-Log -Message "[App Check] AppData parameter was null. Cannot determine latest version." -Level WARN
+        Write-Log -Message "[App Check] AppData parameter was null. Cannot determine latest version." -Level WARN
         # Fall through, logic below handles null target version
     }
 
     $appStatusObject = $null # Initialize
 
     if ($CheckEnabled) {
-        LoxoneUtils.Logging\Write-Log -Message "[App Check] Check enabled. Proceeding..." -Level DEBUG
+        Write-Log -Message "[App Check] Check enabled. Proceeding..." -Level DEBUG
 
-        LoxoneUtils.Logging\Write-Log -Message "[App Check] Check enabled. Using passed InstalledAppVersion: '$InstalledAppVersion'" -Level DEBUG
+        Write-Log -Message "[App Check] Check enabled. Using passed InstalledAppVersion: '$InstalledAppVersion'" -Level DEBUG
 
         # Use the passed $InstalledAppVersion parameter directly
         # Removed call to Get-AppVersionFromRegistry
 
         # Use Compare-LoxoneVersion to determine status
-        $comparisonStatus = LoxoneUtils.Utility\Compare-LoxoneVersion -InstalledVersionString $InstalledAppVersion -TargetVersionString $latestAppVersion
+        $comparisonStatus = Compare-LoxoneVersion -InstalledVersionString $InstalledAppVersion -TargetVersionString $latestAppVersion
         # Map comparison status using helper
         # Call Get-UpdateStatusFromComparison directly (now in same module scope)
         $statusResult = Get-UpdateStatusFromComparison -ComparisonResult $comparisonStatus `
@@ -429,7 +429,7 @@ function Test-LoxoneAppComponent {
        # [ShouldRun logic moved to New-LoxoneComponentStatusObject]
 
    } else {
-       LoxoneUtils.Logging\Write-Log -Message "[App Check] Loxone App update check skipped by parameter." -Level INFO
+       Write-Log -Message "[App Check] Loxone App update check skipped by parameter." -Level INFO
 
        # Create Skipped App Status Object using helper
        # Call New-LoxoneComponentStatusObject directly (now in same module scope)
@@ -443,10 +443,10 @@ function Test-LoxoneAppComponent {
        # [ShouldRun logic moved to New-LoxoneComponentStatusObject]
    }
 
-   LoxoneUtils.Logging\Write-Log -Message "[App Check] Status object created: $($appStatusObject | ConvertTo-Json -Depth 1 -Compress)" -Level DEBUG
+   Write-Log -Message "[App Check] Status object created: $($appStatusObject | ConvertTo-Json -Depth 1 -Compress)" -Level DEBUG
 
    Write-Log -Level DEBUG -Message "Exiting function $($MyInvocation.MyCommand.Name)" # Replaced Stop-FunctionLog
-   LoxoneUtils.Logging\Write-Log -Level DEBUG -Message "[Test-LoxoneAppComponent] Object before Write-Output: $($appStatusObject | ConvertTo-Json -Depth 2 -Compress)" -SkipStackFrame
+   Write-Log -Level DEBUG -Message "[Test-LoxoneAppComponent] Object before Write-Output: $($appStatusObject | ConvertTo-Json -Depth 2 -Compress)" -SkipStackFrame
    Write-Output $appStatusObject # Then output the object
 } # Added missing closing brace for Test-LoxoneAppComponent
 
@@ -475,7 +475,7 @@ function Test-LoxoneMSComponents {
     # --- Logic moved to Test-UpdateNeeded ---
     # Keep the function signature but return an empty list immediately.
     # This avoids breaking the module export but bypasses the problematic code.
-    LoxoneUtils.Logging\Write-Log -Message "[MS Check] Function Test-LoxoneMSComponents entered but logic is now integrated into Test-UpdateNeeded. Returning empty list." -Level DEBUG
+    Write-Log -Message "[MS Check] Function Test-LoxoneMSComponents entered but logic is now integrated into Test-UpdateNeeded. Returning empty list." -Level DEBUG
 
     # Initialize empty list
     $msStatusObjects = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -484,11 +484,11 @@ function Test-LoxoneMSComponents {
     # Minimal finally block just for logging.
     finally {
         # This block ALWAYS executes to ensure logging stops correctly
-        LoxoneUtils.Logging\Write-Log -Message "[MS Check] Entering finally block for gutted function." -Level DEBUG
+        Write-Log -Message "[MS Check] Entering finally block for gutted function." -Level DEBUG
         Write-Log -Level DEBUG -Message "Exiting function $($MyInvocation.MyCommand.Name)" # Replaced Stop-FunctionLog
     }
     # Log count and return the empty list *after* the finally block
-    LoxoneUtils.Logging\Write-Log -Message "[MS Check] Function finished. Returning $($msStatusObjects.Count) MS status objects (should be 0)." -Level DEBUG
+    Write-Log -Message "[MS Check] Function finished. Returning $($msStatusObjects.Count) MS status objects (should be 0)." -Level DEBUG
     return $msStatusObjects
 }
 
@@ -538,13 +538,13 @@ function Get-LoxoneUpdateData {
     try {
         # --- Fetch XML ---
         # --- Fetch XML ---
-        LoxoneUtils.Logging\Write-Log -Message "Loading update XML from $UpdateXmlUrl" -Level INFO
+        Write-Log -Message "Loading update XML from $UpdateXmlUrl" -Level INFO
         $webClient = New-Object System.Net.WebClient
         try {
             $updateXmlString = $webClient.DownloadString($UpdateXmlUrl)
         } catch {
             $result.Error = "Failed to download update XML from '$UpdateXmlUrl'. Error: $($_.Exception.Message)."
-            LoxoneUtils.Logging\Write-Log -Message $result.Error -Level ERROR
+            Write-Log -Message $result.Error -Level ERROR
             Write-Log -Level DEBUG -Message "Exiting function $($MyInvocation.MyCommand.Name) due to error" # Replaced Stop-FunctionLog
             return $result # Return early with error
         }
@@ -555,7 +555,7 @@ function Get-LoxoneUpdateData {
         $updateNode = $updateXml.Miniserversoftware.$xmlNodeName
         if (-not $updateNode) {
             $result.Error = "Could not find update information for Config channel '$ConfigChannel' in the XML."
-            LoxoneUtils.Logging\Write-Log -Message $result.Error -Level ERROR
+            Write-Log -Message $result.Error -Level ERROR
             Write-Log -Level DEBUG -Message "Exiting function $($MyInvocation.MyCommand.Name) due to error" # Replaced Stop-FunctionLog
             return $result # Return early with error
         }
@@ -564,7 +564,7 @@ function Get-LoxoneUpdateData {
         $result.ConfigZipUrl = $updateNode.Path
         $expectedConfigSize = 0L
         if (-not ([long]::TryParse($updateNode.FileSize, [ref]$expectedConfigSize))) {
-            LoxoneUtils.Logging\Write-Log -Message "[Config] Could not parse FileSize ('$($updateNode.FileSize)') from XML for channel '$ConfigChannel'. Size check might be inaccurate." -Level WARN
+            Write-Log -Message "[Config] Could not parse FileSize ('$($updateNode.FileSize)') from XML for channel '$ConfigChannel'. Size check might be inaccurate." -Level WARN
             $expectedConfigSize = 0L
         }
         $result.ConfigExpectedZipSize = $expectedConfigSize
@@ -572,25 +572,25 @@ function Get-LoxoneUpdateData {
         if ($EnableCRC) {
             $result.ConfigExpectedCRC = $updateNode.crc32
             if ([string]::IsNullOrWhiteSpace($result.ConfigExpectedCRC)) {
-                LoxoneUtils.Logging\Write-Log -Message "[Config] CRC check enabled, but no CRC found in XML for channel '$ConfigChannel'. CRC check will be skipped for Config." -Level WARN
+                Write-Log -Message "[Config] CRC check enabled, but no CRC found in XML for channel '$ConfigChannel'. CRC check will be skipped for Config." -Level WARN
                 $result.ConfigExpectedCRC = $null # Ensure it's null if not found
             }
         }
 
         try {
-            $result.ConfigLatestVersion = LoxoneUtils.Utility\Convert-VersionString $rawConfigVersion
-            LoxoneUtils.Logging\Write-Log -Message "[Config] Latest Version (Channel: $ConfigChannel): $($result.ConfigLatestVersion) (Raw: $rawConfigVersion), Size: $($result.ConfigExpectedZipSize)B, URL: $($result.ConfigZipUrl)" -Level INFO
-            if ($result.ConfigExpectedCRC) { LoxoneUtils.Logging\Write-Log -Message "[Config] Expected CRC: $($result.ConfigExpectedCRC)" -Level INFO }
+            $result.ConfigLatestVersion = Convert-VersionString $rawConfigVersion
+            Write-Log -Message "[Config] Latest Version (Channel: $ConfigChannel): $($result.ConfigLatestVersion) (Raw: $rawConfigVersion), Size: $($result.ConfigExpectedZipSize)B, URL: $($result.ConfigZipUrl)" -Level INFO
+            if ($result.ConfigExpectedCRC) { Write-Log -Message "[Config] Expected CRC: $($result.ConfigExpectedCRC)" -Level INFO }
         } catch {
             $result.Error = "Failed to convert Config version string '$rawConfigVersion': $($_.Exception.Message)"
-            LoxoneUtils.Logging\Write-Log -Message $result.Error -Level ERROR
+            Write-Log -Message $result.Error -Level ERROR
             # Continue to App check if possible, but mark error
         }
 
         # --- Loxone for Windows (App) Update Info ---
         $result.SelectedAppChannelName = $AppChannelPreference # Store preference initially
         if ($CheckAppUpdate) {
-            LoxoneUtils.Logging\Write-Log -Message "[App] Fetching update details for 'Loxone for Windows' (Channel Preference: $AppChannelPreference) from XML..." -Level INFO
+            Write-Log -Message "[App] Fetching update details for 'Loxone for Windows' (Channel Preference: $AppChannelPreference) from XML..." -Level INFO
             try {
                 $loxWindowsBaseNode = $updateXml.SelectSingleNode("/Miniserversoftware/update[@Name='Loxone for Windows']")
                 if (-not $loxWindowsBaseNode) { throw "Could not find base node for 'Loxone for Windows' in XML." }
@@ -598,7 +598,7 @@ function Get-LoxoneUpdateData {
                 $loxWindowsUpdateNode = $null
 
                 if ($AppChannelPreference -eq 'Latest') {
-                    LoxoneUtils.Logging\Write-Log -Message "[App] Finding latest version across all channels..." -Level DEBUG
+                    Write-Log -Message "[App] Finding latest version across all channels..." -Level DEBUG
                     $allChannelNodes = $loxWindowsBaseNode.SelectNodes("*") # Select Test, Beta, Release, Internal, InternalV2 etc.
                     $latestNode = $null
                     $latestParsedVersion = [Version]"0.0.0.0"
@@ -612,32 +612,32 @@ function Get-LoxoneUpdateData {
 
                         if ($versionToConvert) {
                             try {
-                                $parsedVersion = LoxoneUtils.Utility\Convert-VersionString $versionToConvert
-                                LoxoneUtils.Logging\Write-Log -Message "[App] Parsed version '$parsedVersion' from channel '$channelName' (Raw: '$rawVersion')." -Level DEBUG
+                                $parsedVersion = Convert-VersionString $versionToConvert
+                                Write-Log -Message "[App] Parsed version '$parsedVersion' from channel '$channelName' (Raw: '$rawVersion')." -Level DEBUG
                                 if ([Version]$parsedVersion -gt $latestParsedVersion) {
                                     $latestParsedVersion = [Version]$parsedVersion
                                     $latestNode = $channelNode
                                     $result.SelectedAppChannelName = $channelName # Update selected channel name to the actual latest
-                                    LoxoneUtils.Logging\Write-Log -Message "[App] Found newer latest version: '$parsedVersion' in channel '$channelName'." -Level DEBUG
+                                    Write-Log -Message "[App] Found newer latest version: '$parsedVersion' in channel '$channelName'." -Level DEBUG
                                 }
                             } catch {
-                                LoxoneUtils.Logging\Write-Log -Message "[App] Error converting version '$versionToConvert' from channel '$channelName': $($_.Exception.Message). Skipping channel." -Level WARN
+                                Write-Log -Message "[App] Error converting version '$versionToConvert' from channel '$channelName': $($_.Exception.Message). Skipping channel." -Level WARN
                             }
                         } else {
-                            LoxoneUtils.Logging\Write-Log -Message "[App] Could not extract numerical version pattern from raw string '$rawVersion' for channel '$channelName'. Skipping channel." -Level WARN
+                            Write-Log -Message "[App] Could not extract numerical version pattern from raw string '$rawVersion' for channel '$channelName'. Skipping channel." -Level WARN
                         }
                     }
                     $loxWindowsUpdateNode = $latestNode
                     if ($loxWindowsUpdateNode) {
-                         LoxoneUtils.Logging\Write-Log -Message "[App] Selected latest version from channel '$($result.SelectedAppChannelName)'." -Level INFO
+                         Write-Log -Message "[App] Selected latest version from channel '$($result.SelectedAppChannelName)'." -Level INFO
                     } else {
-                         LoxoneUtils.Logging\Write-Log -Message "[App] Could not determine the latest version across channels." -Level WARN
+                         Write-Log -Message "[App] Could not determine the latest version across channels." -Level WARN
                     }
 
                 } else {
                     # Specific channel selected
                     $xpath = "/Miniserversoftware/update[@Name='Loxone for Windows']/$AppChannelPreference"
-                    LoxoneUtils.Logging\Write-Log -Message "[App] Selecting specific channel node using XPath: $xpath" -Level DEBUG
+                    Write-Log -Message "[App] Selecting specific channel node using XPath: $xpath" -Level DEBUG
                     $loxWindowsUpdateNode = $updateXml.SelectSingleNode($xpath)
                 }
 
@@ -646,35 +646,35 @@ function Get-LoxoneUpdateData {
                     $result.AppLatestVersionRaw = $loxWindowsUpdateNode.Version
                     $result.AppInstallerUrl = $loxWindowsUpdateNode.Path
                     $expectedAppSize = 0L
-                    if (-not ([long]::TryParse($loxWindowsUpdateNode.FileSize, [ref]$expectedAppSize))) { LoxoneUtils.Logging\Write-Log -Message "[App] Could not parse FileSize ('$($loxWindowsUpdateNode.FileSize)') for Loxone for Windows (Channel: $($result.SelectedAppChannelName)). Size check might be inaccurate." -Level WARN; $expectedAppSize = 0L }
+                    if (-not ([long]::TryParse($loxWindowsUpdateNode.FileSize, [ref]$expectedAppSize))) { Write-Log -Message "[App] Could not parse FileSize ('$($loxWindowsUpdateNode.FileSize)') for Loxone for Windows (Channel: $($result.SelectedAppChannelName)). Size check might be inaccurate." -Level WARN; $expectedAppSize = 0L }
                     $result.AppExpectedSize = $expectedAppSize
 
                     if ($EnableCRC) {
                         $result.AppExpectedCRC = $loxWindowsUpdateNode.crc32
-                        if ([string]::IsNullOrWhiteSpace($result.AppExpectedCRC)) { LoxoneUtils.Logging\Write-Log -Message "[App] CRC check enabled, but CRC missing for Loxone for Windows (Channel: $($result.SelectedAppChannelName)) in XML." -Level WARN; $result.AppExpectedCRC = $null }
+                        if ([string]::IsNullOrWhiteSpace($result.AppExpectedCRC)) { Write-Log -Message "[App] CRC check enabled, but CRC missing for Loxone for Windows (Channel: $($result.SelectedAppChannelName)) in XML." -Level WARN; $result.AppExpectedCRC = $null }
                     }
 
                     if ([string]::IsNullOrWhiteSpace($result.AppLatestVersionRaw) -or [string]::IsNullOrWhiteSpace($result.AppInstallerUrl)) {
-                        LoxoneUtils.Logging\Write-Log -Message "[App] Required attributes (Version, Path) missing for 'Loxone for Windows' (Channel: $($result.SelectedAppChannelName)) in XML. Cannot proceed with App update check." -Level WARN
+                        Write-Log -Message "[App] Required attributes (Version, Path) missing for 'Loxone for Windows' (Channel: $($result.SelectedAppChannelName)) in XML. Cannot proceed with App update check." -Level WARN
                         # Reset App fields
                         $result.AppLatestVersionRaw = $null; $result.AppInstallerUrl = $null; $result.AppExpectedCRC = $null; $result.AppExpectedSize = 0L; $result.AppLatestVersion = $null
                     } else {
                         $versionToConvert = $null
-                        LoxoneUtils.Logging\Write-Log -Message "[App] Raw version string from XML (Channel: $($result.SelectedAppChannelName)): '$($result.AppLatestVersionRaw)'" -Level DEBUG
+                        Write-Log -Message "[App] Raw version string from XML (Channel: $($result.SelectedAppChannelName)): '$($result.AppLatestVersionRaw)'" -Level DEBUG
                         if ($result.AppLatestVersionRaw -match '\(([\d.]+)\)') {
                             $versionToConvert = $matches[1]
-                            LoxoneUtils.Logging\Write-Log -Message "[App] Extracted date-based version from XML (Channel: $($result.SelectedAppChannelName)): '$versionToConvert'" -Level DEBUG
+                            Write-Log -Message "[App] Extracted date-based version from XML (Channel: $($result.SelectedAppChannelName)): '$versionToConvert'" -Level DEBUG
                         } else {
-                            LoxoneUtils.Logging\Write-Log -Message "[App] Could not extract numerical version pattern from raw string '$($result.AppLatestVersionRaw)' (Channel: $($result.SelectedAppChannelName)). Cannot determine latest app version." -Level WARN
+                            Write-Log -Message "[App] Could not extract numerical version pattern from raw string '$($result.AppLatestVersionRaw)' (Channel: $($result.SelectedAppChannelName)). Cannot determine latest app version." -Level WARN
                             $result.AppLatestVersionRaw = $null; $result.AppLatestVersion = $null; $result.AppInstallerUrl = $null; $result.AppExpectedCRC = $null; $result.AppExpectedSize = 0L
                         }
 
                         if ($versionToConvert) {
                             try {
-                                $result.AppLatestVersion = LoxoneUtils.Utility\Convert-VersionString $versionToConvert
-                                LoxoneUtils.Logging\Write-Log -Message "[App] Converted numerical version (Channel: $($result.SelectedAppChannelName)): '$($result.AppLatestVersion)'" -Level DEBUG
+                                $result.AppLatestVersion = Convert-VersionString $versionToConvert
+                                Write-Log -Message "[App] Converted numerical version (Channel: $($result.SelectedAppChannelName)): '$($result.AppLatestVersion)'" -Level DEBUG
                             } catch {
-                                 LoxoneUtils.Logging\Write-Log -Message "[App] Error converting extracted version '$versionToConvert' (Channel: $($result.SelectedAppChannelName)): $($_.Exception.Message). Cannot determine latest app version." -Level WARN
+                                 Write-Log -Message "[App] Error converting extracted version '$versionToConvert' (Channel: $($result.SelectedAppChannelName)): $($_.Exception.Message). Cannot determine latest app version." -Level WARN
                                  $result.AppLatestVersionRaw = $null; $result.AppLatestVersion = $null; $result.AppInstallerUrl = $null; $result.AppExpectedCRC = $null; $result.AppExpectedSize = 0L
                             }
                         }
@@ -683,26 +683,26 @@ function Get-LoxoneUpdateData {
                         if ($result.AppLatestVersion) {
                             $appUpdateInfoMsg = "[App] Latest Loxone for Windows (Channel: $($result.SelectedAppChannelName)): Version=$($result.AppLatestVersionRaw) ($($result.AppLatestVersion)), Size=$($result.AppExpectedSize)B, URL=$($result.AppInstallerUrl)"
                             if ($result.AppExpectedCRC) { $appUpdateInfoMsg += ", Expected CRC=$($result.AppExpectedCRC)" }
-                            LoxoneUtils.Logging\Write-Log -Message $appUpdateInfoMsg -Level INFO
+                            Write-Log -Message $appUpdateInfoMsg -Level INFO
                         }
                     }
                 } else {
-                    LoxoneUtils.Logging\Write-Log -Message "[App] Could not find 'Loxone for Windows' update information for channel '$($result.SelectedAppChannelName)' in the XML. Cannot perform App update check." -Level WARN
+                    Write-Log -Message "[App] Could not find 'Loxone for Windows' update information for channel '$($result.SelectedAppChannelName)' in the XML. Cannot perform App update check." -Level WARN
                 }
             } catch {
-                LoxoneUtils.Logging\Write-Log -Message "[App] Error parsing XML for Loxone for Windows details (Channel: $($result.SelectedAppChannelName)): $($_.Exception.Message). Cannot perform App update check." -Level ERROR
+                Write-Log -Message "[App] Error parsing XML for Loxone for Windows details (Channel: $($result.SelectedAppChannelName)): $($_.Exception.Message). Cannot perform App update check." -Level ERROR
                 # Reset App fields on error
                 $result.AppLatestVersionRaw = $null; $result.AppInstallerUrl = $null; $result.AppExpectedCRC = $null; $result.AppExpectedSize = 0L; $result.AppLatestVersion = $null
                 if (-not $result.Error) { $result.Error = "Error parsing App XML details." } # Set general error if not already set
             }
         } else {
-            LoxoneUtils.Logging\Write-Log -Message "[App] Skipping Loxone for Windows update check as CheckAppUpdate parameter was false." -Level INFO
+            Write-Log -Message "[App] Skipping Loxone for Windows update check as CheckAppUpdate parameter was false." -Level INFO
         }
 
     } catch {
         # Catch any unexpected errors during the whole process
         $result.Error = "Unexpected error in Get-LoxoneUpdateData: $($_.Exception.Message)"
-        LoxoneUtils.Logging\Write-Log -Message $result.Error -Level ERROR
+        Write-Log -Message $result.Error -Level ERROR
     } finally {
         Write-Log -Level DEBUG -Message "Exiting function $($MyInvocation.MyCommand.Name)" # Replaced Stop-FunctionLog
     }

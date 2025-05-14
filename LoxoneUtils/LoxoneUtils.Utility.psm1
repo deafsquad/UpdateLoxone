@@ -224,12 +224,27 @@ function Convert-VersionString {
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
     try {
-    if ($VersionString -and $VersionString -match "\.") {
-        $parts = $VersionString -split "\."
-        $normalizedParts = foreach ($part in $parts) { [int]$part }
-        return ($normalizedParts -join ".")
+    if ([string]::IsNullOrWhiteSpace($VersionString)) {
+        Write-Log -Message "Convert-VersionString: Input is null or empty, returning empty." -Level DEBUG
+        return ""
     }
-    return $VersionString # Return original if no dots found or empty
+    # Regex to extract up to 4 numeric parts, allowing for leading zeros but treating them as decimal.
+    # It also handles cases where versions might have fewer than 4 parts.
+    if ($VersionString -match '^(\d{1,4})(?:\.(\d{1,4}))?(?:\.(\d{1,4}))?(?:\.(\d{1,4}))?.*$') {
+        $major = if ($matches[1]) { [int]$matches[1] } else { 0 }
+        $minor = if ($matches[2]) { [int]$matches[2] } else { 0 }
+        $build = if ($matches[3]) { [int]$matches[3] } else { 0 }
+        $revision = if ($matches[4]) { [int]$matches[4] } else { 0 }
+        
+        # Return in a consistent format, e.g., "15.6.5.13"
+        # If a part was not present in the original string, it defaults to 0 here.
+        # This creates a System.Version compatible string if all parts are present.
+        $normalizedString = "$major.$minor.$build.$revision"
+        Write-Log -Message ("Convert-VersionString: Input '{0}' normalized to '{1}'" -f $VersionString, $normalizedString) -Level DEBUG
+        return $normalizedString
+    }
+    Write-Log -Message "Convert-VersionString: Input '{0}' did not match expected version pattern. Returning original." -Level WARN
+    return $VersionString # Return original if no match
     } finally {
         Exit-Function # Corrected function call
     }
@@ -493,5 +508,5 @@ function Get-CRC32 {
 #endregion CRC32 Logic
 
 # Ensure functions are available (though NestedModules in PSD1 is the primary mechanism)
-Export-ModuleMember -Function Get-ScriptSaveFolder, Get-ExecutableSignature, Format-TimeSpanFromSeconds, Convert-VersionString, Get-RedactedPassword, Initialize-CRC32Type, Get-CRC32, ConvertTo-Expression, Test-LoxoneXmlSignature, Get-AppVersionFromRegistry # Added Get-AppVersionFromRegistry
+Export-ModuleMember -Function Get-ScriptSaveFolder, Get-ExecutableSignature, Format-TimeSpanFromSeconds, Convert-VersionString, Get-RedactedPassword, Initialize-CRC32Type, Get-CRC32, ConvertTo-Expression, Get-AppVersionFromRegistry # Added Get-AppVersionFromRegistry
 # NOTE: Explicit Export-ModuleMember is now enabled to ensure functions are available for the manifest to re-export.

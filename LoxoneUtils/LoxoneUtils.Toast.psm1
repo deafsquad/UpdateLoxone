@@ -5,7 +5,10 @@
 if (-not (Test-Path variable:Global:PersistentToastId)) {
     $Global:PersistentToastId = "LoxoneUpdateStatusToast" # Default ID
 }
-# Removed PersistentToastInitialized - logic changed
+# Initialize PersistentToastInitialized flag
+if (-not (Test-Path variable:Global:PersistentToastInitialized)) {
+    $Global:PersistentToastInitialized = $false
+}
 if (-not (Test-Path variable:Global:PersistentToastData)) {
     # Initialize with expected keys for data binding
     $Global:PersistentToastData = [ordered]@{
@@ -99,9 +102,17 @@ function Update-PersistentToast {
             [Parameter(Mandatory=$false)][string]$DownloadSizeProgress, # e.g., "145/507 MB"
             # Overall Progress Info (Weight-based)
             [Parameter(Mandatory=$false)][double]$CurrentWeight,
-            [Parameter(Mandatory=$false)][double]$TotalWeight
+            [Parameter(Mandatory=$false)][double]$TotalWeight,
+            # Context Parameters (Used for logging/potential future logic)
+            [Parameter(Mandatory=$true)][bool]$IsInteractive, # Retaining for logging within this function
+            [Parameter(Mandatory=$true)][bool]$ErrorOccurred,
+            [Parameter(Mandatory=$true)][bool]$AnyUpdatePerformed,
+            # Parameters to pass context from the calling script
+            [Parameter(Mandatory=$false)][bool]$CallingScriptIsInteractive = $false,
+            [Parameter(Mandatory=$false)][bool]$CallingScriptIsSelfInvoked = $false
         )
-
+    # Add a small delay at the beginning to see if it helps with update visibility
+    Start-Sleep -Milliseconds 500
     $logMsg = "Updating persistent toast."
     if ($PSBoundParameters.ContainsKey('StepName')) { $logMsg += " Step: '$StepName' ($StepNumber/$TotalSteps)" }
     if ($PSBoundParameters.ContainsKey('DownloadFileName')) { $logMsg += " | Download: '$DownloadFileName' ($DownloadNumber/$TotalDownloads)" }
@@ -163,15 +174,24 @@ function Update-PersistentToast {
             Write-Log -Level Debug -Message "Updated OverallProgress to Status '$($Global:PersistentToastData['OverallProgressStatus'])' (Weight: $($Global:PersistentToastData['CurrentWeight'])/$($Global:PersistentToastData['TotalWeight'])) and Value '$($Global:PersistentToastData['OverallProgressValue'])'"
         }
 
-        # --- Create or Update using Data Binding ---
-        if (-not $Global:PersistentToastInitialized) {
+        # --- Always attempt Create or Update ---
+        # Defer initial toast creation for non-interactive self-invoked runs until an actual update is confirmed in the main script
+        $shouldDeferInitialToast = $false
+        if (-not $CallingScriptIsInteractive -and $CallingScriptIsSelfInvoked) {
+            $shouldDeferInitialToast = $true
+            Write-Log -Level Debug -Message "Update-PersistentToast: Deferring initial toast creation due to non-interactive self-invoked context."
+        }
+
+        if (-not $Global:PersistentToastInitialized -and -not $shouldDeferInitialToast) {
             # --- Create Toast on First Call using New-BurntToastNotification ---
-            Write-Log -Level Debug -Message "Persistent toast not initialized. Creating with New-BurntToastNotification."
+            Write-Log -Level Debug -Message "Persistent toast not initialized (and not deferred). Creating with New-BurntToastNotification."
             try {
                 # Define progress bars using the keys from the data binding hashtable
                 $localProgressBar = New-BTProgressBar -Status "ProgressBarStatus" -Value "ProgressBarValue" -Title "Task Progress" -ErrorAction SilentlyContinue
                 $localOverallProgressBar = New-BTProgressBar -Status "OverallProgressStatus" -Value "OverallProgressValue" -Title "Overall Progress" -ErrorAction SilentlyContinue
                 $AppLogoPath = (Join-Path $PSScriptRoot '..\ms.png')
+
+                # Define parameters for New-BurntToastNotification
                 $NewToastParams = @{
                     UniqueIdentifier = $Global:PersistentToastId
                     Text             = "StatusText" # Bind to the key in DataBinding
@@ -191,14 +211,16 @@ function Update-PersistentToast {
                 New-BurntToastNotification @NewToastParams
                 $Global:PersistentToastInitialized = $true # Set flag AFTER successful creation
                 Write-Log -Level INFO -Message "Persistent toast created successfully via New-BurntToastNotification (AppId used: $(if ($NewToastParams.ContainsKey('AppId')) {$NewToastParams['AppId']} else {'Default'}))."
+
             } catch { # Catch ANY error during creation
-                Write-Log -Level Error -Message "Error creating persistent toast on first update call: ($($_ | Out-String))" # Original log
+                Write-Log -Level Error -Message "Error creating persistent toast on first update call: ($($_ | Out-String))"
                 $Global:PersistentToastInitialized = $false # Reset flag on failure
             }
         } # <-- Closing brace for 'if (-not $Global:PersistentToastInitialized)'
         else {
-            # --- Update Existing Toast using Update-BTNotification and DataBinding ---
-            Write-Log -Level Debug -Message "Persistent toast initialized. Updating via Update-BTNotification with DataBinding."
+            # --- Update Existing Toast using Update-BTNotification (Only if dot-sourced) ---
+            # Use $script:IsInteractiveRun from the calling script scope as the reliable indicator - Condition removed for unconditional update
+            Write-Log -Level Debug -Message "Persistent toast initialized. Attempting update via Update-BTNotification with DataBinding."
             try {
                 $UpdateParams = @{
                     UniqueIdentifier = $Global:PersistentToastId
@@ -208,20 +230,60 @@ function Update-PersistentToast {
                 if (-not [string]::IsNullOrEmpty($script:ResolvedToastAppId)) { $UpdateParams['AppId'] = $script:ResolvedToastAppId }
 
                 # Log parameters before update
+                $dataBindingJson = $Global:PersistentToastData | ConvertTo-Json -Depth 5
+                Write-Log -Level Debug -Message "DataBinding Hashtable (JSON) BEFORE Update-BTNotification call:`n$dataBindingJson"
                 $updateParamsString = $UpdateParams | Format-List | Out-String
                 if ($DebugPreference -ne 'SilentlyContinue') { Write-Log -Level Info -Message "UpdateParams BEFORE Update-BTNotification call:`n$updateParamsString" }
 
                 Update-BTNotification @UpdateParams
                 Write-Log -Level INFO -Message "Persistent toast updated successfully via Update-BTNotification (AppId used: $(if ($UpdateParams.ContainsKey('AppId')) {$UpdateParams['AppId']} else {'Default'}))."
-            } catch {
-                Write-Log -Level Error -Message "Error updating persistent toast via Update-BTNotification: ($($_ | Out-String))"
+            } catch { # Catch for inner try
+                 Write-Log -Level Error -Message "Error updating persistent toast via Update-BTNotification: ($($_ | Out-String))"
             }
-        }
-    } catch { Write-Log -Level Error -Message "An unexpected error occurred during persistent toast update/creation logic: ($($_ | Out-String))" }
-    finally { Exit-Function }
-}
+        } # End else block for if(-not $Global:PersistentToastInitialized)
 
+    } catch { # Catch block for main try
+        Write-Log -Level Error -Message "An unexpected error occurred during persistent toast update/creation logic: ($($_ | Out-String))"
+    } finally { # Finally block for main try
+        Exit-Function
+    }
+} # Closing brace for the Update-PersistentToast function
 #endregion Progress Toast Function
+
+# --- Helper function for Pre-Check Toast Update ---
+function Update-PreCheckToast {
+    param(
+        [string]$CheckName,
+        [int]$CurrentCheckNum,
+        [int]$TotalChecks,
+        # Context Parameters
+        [Parameter(Mandatory=$true)][bool]$IsInteractive,
+        [Parameter(Mandatory=$true)][bool]$ErrorOccurred,
+        [Parameter(Mandatory=$true)][bool]$AnyUpdatePerformed,
+        # Weight Parameters (passed through to Update-PersistentToast)
+        [Parameter(Mandatory=$false)][double]$CurrentWeight,
+        [Parameter(Mandatory=$false)][double]$TotalWeight
+    )
+    if ($TotalChecks -le 0) { return } # Avoid division by zero
+    $progressPercent = ($CurrentCheckNum / $TotalChecks) * 100
+    $progressValue = $progressPercent / 100
+
+    # Update the global data binding hashtable for progress bar elements ONLY if interactive (dot-sourced)
+    # because Update-BTNotification (which reads these values) will only be called in that case.
+    # This prevents log confusion where data appears updated but isn't visually.
+    if ($script:IsInteractiveRun) {
+        $Global:PersistentToastData['ProgressBarStatus'] = $CheckName # Updates the "Download: -" text
+        $Global:PersistentToastData['ProgressBarValue']  = $progressValue # Updates the progress bar
+        Write-Log -Level DEBUG -Message "$CheckName ($CurrentCheckNum/$TotalChecks) - Updating Global Toast Data for Progress Bar (Interactive)"
+    } else {
+         Write-Log -Level DEBUG -Message "$CheckName ($CurrentCheckNum/$TotalChecks) - Skipping Global Toast Data update for Progress Bar (Non-Interactive)"
+    }
+
+    # REMOVED: Call Update-PersistentToast to attempt visual update during pre-checks
+    # Let the main script loop handle the visual updates at major step boundaries.
+    # Update-PersistentToast -IsInteractive $IsInteractive -ErrorOccurred $ErrorOccurred -AnyUpdatePerformed $AnyUpdatePerformed -CurrentWeight $CurrentWeight -TotalWeight $TotalWeight
+}
+# --- End Helper ---
 
 function Show-FinalStatusToast {
     [CmdletBinding()]
@@ -321,9 +383,9 @@ function Show-FinalStatusToast {
         Submit-BTNotification @SubmitParams
         Write-Log -Level Info -Message "Final status toast submitted successfully via Submit-BTNotification (AppId used: $(if ($SubmitParams.ContainsKey('AppId')) {$SubmitParams['AppId']} else {'Default'}))."
 
-    } catch { # Catch block for the main try starting at line 237
+    } catch { # Catch block for the main try starting at line 271
         Write-Log -Level Error -Message "An unexpected error occurred during final status toast generation/submission: ($($_ | Out-String))"
-    } finally { # Finally block for the main try starting at line 237
+    } finally { # Finally block for the main try starting at line 271
         Exit-Function
     }
 } # Closing brace for the Show-FinalStatusToast function

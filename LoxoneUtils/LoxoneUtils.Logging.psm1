@@ -57,17 +57,20 @@ function Exit-Function {
 [System.Collections.Generic.List[string]]$ValidLogLevels = @('INFO', 'DEBUG', 'WARN', 'ERROR')
 
 function Write-Log {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess=$false, PositionalBinding=$false)] # Add PositionalBinding=$false
     param(
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory=$true, Position=0)]
         [string]$Message,
 
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory=$false, Position=1)]
         [ValidateSet('INFO', 'DEBUG', 'WARN', 'ERROR')] # Enforce valid levels
         [string]$Level = 'INFO',
 
         [Parameter(Mandatory=$false)]
-        [switch]$SkipStackFrame # Switch to skip adding stack frame info
+        [switch]$SkipStackFrame, # Switch to skip adding stack frame info
+
+        [Parameter(ValueFromRemainingArguments=$true)]
+        [object[]]$RemainingArguments # Catchall for any unbound parameters
     )
 
     # --- Input Validation ---

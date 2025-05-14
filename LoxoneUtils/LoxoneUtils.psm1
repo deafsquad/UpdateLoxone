@@ -3,6 +3,9 @@
 # The manifest (LoxoneUtils.psd1) points to this file as the RootModule
 # and handles all exports via FunctionsToExport.
 
+# Dot-source utility functions to make them available within the module scope
+# . "$PSScriptRoot\LoxoneUtils.Utility.psm1" # Commented out for diagnostics
+
 # --- Script-Scoped Variables ---
 
 # Mutex is now handled solely within LoxoneUtils.Logging.psm1

@@ -1219,7 +1219,7 @@ if (-not ([System.Management.Automation.PSTypeName]'RunAsUser.ProcessExtensions'
     try {
         # Write-Log -Level DEBUG -Message "Attempting Add-Type. Logging details to $addTypeLogPath"
         # Add -PassThru and redirect all streams to log file
-            Add-Type -TypeDefinition $script:source -Language CSharp -ErrorAction Stop -Verbose -ReferencedAssemblies 'System.dll','System.Xml.dll','System.Core.dll'
+            Add-Type -TypeDefinition $script:source -Language CSharp -ErrorAction Stop -Verbose -ReferencedAssemblies 'System.dll','System.Xml.dll','System.Core.dll','System.Collections.dll','System.Console.dll','Microsoft.Win32.Primitives.dll','System.Xml.ReaderWriter.dll'
             # Write-Log -Level DEBUG -Message "Add-Type command finished (check $addTypeLogPath for details)    ." 
             # removed -ReferencedAssemblies 'mscorlib.dll','System.dll','System.Xml.dll','System.Core.dll','System.Collections.dll','System.Console.dll','Microsoft.Win32.Primitives.dll','System.Xml.ReaderWriter.dll'
         # Check if the type exists

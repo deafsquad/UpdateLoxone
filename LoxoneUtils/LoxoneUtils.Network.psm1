@@ -10,7 +10,9 @@ function Invoke-LoxoneDownload {
         [Parameter()][string]$ExpectedCRC32 = $null,
         [Parameter()][int64]$ExpectedFilesize = 0,
         [Parameter()][int]$MaxRetries = 1,
-        [Parameter()][switch]$IsSystem, # Added to pass context to Toast functions
+        [Parameter()][bool]$IsInteractive = $false, # Renamed from IsSystem and changed to bool for clarity
+        [Parameter()][bool]$ErrorOccurred = $false,       # ADDED for toast
+        [Parameter()][bool]$AnyUpdatePerformed = $false,  # ADDED for toast
         # Parameters for Toast Progress Reporting
         [Parameter()][int]$StepNumber = 0,
         [Parameter()][int]$TotalSteps = 1,
@@ -20,8 +22,8 @@ function Invoke-LoxoneDownload {
         [Parameter()][double]$CurrentWeight = 0, # For overall progress
         [Parameter()][double]$TotalWeight = 1    # For overall progress
     )
+    Write-Host "DEBUG: EXECUTING Invoke-LoxoneDownload from LoxoneUtils.Network.psm1 - VERSION WITH .NET COMPARE $(Get-Date)" -ForegroundColor Magenta
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-    # Ctrl+C handling is managed by the main script's trap handler
 
     try { # Main try block for the entire function scope
         Initialize-CRC32Type # Ensure CRC32 type is loaded
@@ -51,7 +53,42 @@ function Invoke-LoxoneDownload {
                     Write-Log -Level DEBUG -Message "Checking CRC32..."
                     try {
                         $localCRC32 = Get-CRC32 -InputFile $DestinationPath
-                        if ($localCRC32 -ne $ExpectedCRC32) {
+                        # --- BEGIN DETAILED CRC DEBUG ---
+                        Write-Log -Level DEBUG -Message "CRC DEBUG: PRE-DOWNLOAD CHECK"
+                        Write-Log -Level DEBUG -Message "CRC DEBUG: Raw localCRC32: '$localCRC32'"
+                        Write-Log -Level DEBUG -Message "CRC DEBUG: Raw ExpectedCRC32: '$ExpectedCRC32'"
+                        try { Write-Log -Level DEBUG -Message "CRC DEBUG: Type localCRC32: $($localCRC32.GetType().FullName)" } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Type localCRC32: Error getting type" }
+                        try { Write-Log -Level DEBUG -Message "CRC DEBUG: Type ExpectedCRC32: $($ExpectedCRC32.GetType().FullName)" } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Type ExpectedCRC32: Error getting type" }
+                        try { Write-Log -Level DEBUG -Message "CRC DEBUG: Length localCRC32: $($localCRC32.Length)" } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Length localCRC32: Error getting length" }
+                        try { Write-Log -Level DEBUG -Message "CRC DEBUG: Length ExpectedCRC32: $($ExpectedCRC32.Length)" } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Length ExpectedCRC32: Error getting length" }
+                        
+                        $processedLocalCRC_pre = "??"
+                        $processedExpectedCRC_pre = "??"
+                        try { $processedLocalCRC_pre = ([string]$localCRC32).Trim() } catch { $processedLocalCRC_pre = "ERROR Processing localCRC32: $($_.Exception.Message)"}
+                        try { $processedExpectedCRC_pre = ([string]$ExpectedCRC32).Trim() } catch { $processedExpectedCRC_pre = "ERROR Processing ExpectedCRC32: $($_.Exception.Message)"}
+                        Write-Log -Level DEBUG -Message "CRC DEBUG: Processed localCRC32 (pre-dl): '$processedLocalCRC_pre'"
+                        Write-Log -Level DEBUG -Message "CRC DEBUG: Processed ExpectedCRC32 (pre-dl): '$processedExpectedCRC_pre'"
+
+                        # Normalize CRC strings: If calculated is 8 chars starting with '0' and expected is 7 chars, strip leading '0'.
+                        if ($processedLocalCRC_pre.Length -eq 8 -and $processedLocalCRC_pre.StartsWith('0') -and $processedExpectedCRC_pre.Length -eq 7) {
+                            Write-Log -Level DEBUG -Message "CRC DEBUG: Normalizing (pre-dl) local CRC '$processedLocalCRC_pre' to '$($processedLocalCRC_pre.Substring(1))' due to length difference and leading zero."
+                            $processedLocalCRC_pre = $processedLocalCRC_pre.Substring(1)
+                        }
+
+                        try {
+                            $localRawBytes_pre = [System.Text.Encoding]::UTF8.GetBytes($localCRC32)
+                            Write-Log -Level DEBUG -Message "CRC DEBUG: localCRC32 Raw Bytes (UTF8, pre-dl): $($localRawBytes_pre -join ',')"
+                            $localProcessedBytes_pre = [System.Text.Encoding]::UTF8.GetBytes($processedLocalCRC_pre)
+                            Write-Log -Level DEBUG -Message "CRC DEBUG: localCRC32 Processed Bytes (UTF8, pre-dl): $($localProcessedBytes_pre -join ',')"
+                        } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Error getting bytes for localCRC32 (pre-dl): $($_.Exception.Message)"}
+                        try {
+                            $expectedRawBytes_pre = [System.Text.Encoding]::UTF8.GetBytes($ExpectedCRC32)
+                            Write-Log -Level DEBUG -Message "CRC DEBUG: ExpectedCRC32 Raw Bytes (UTF8, pre-dl): $($expectedRawBytes_pre -join ',')"
+                            $expectedProcessedBytes_pre = [System.Text.Encoding]::UTF8.GetBytes($processedExpectedCRC_pre)
+                            Write-Log -Level DEBUG -Message "CRC DEBUG: ExpectedCRC32 Processed Bytes (UTF8, pre-dl): $($expectedProcessedBytes_pre -join ',')"
+                        } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Error getting bytes for ExpectedCRC32 (pre-dl): $($_.Exception.Message)"}
+                        # --- END DETAILED CRC DEBUG ---
+                        if ([string]::Compare($processedLocalCRC_pre, $processedExpectedCRC_pre, [System.StringComparison]::OrdinalIgnoreCase) -ne 0) {
                             $crcMatch = $false
                             Write-Log -Level WARN -Message "CRC mismatch ($localCRC32 vs $ExpectedCRC32). Re-downloading."
                         } else { Write-Log -Level DEBUG -Message "CRC matches." }
@@ -72,10 +109,10 @@ function Invoke-LoxoneDownload {
                         $Global:PersistentToastData['DownloadFileName'] = ""
                         $Global:PersistentToastData['DownloadSpeed'] = ""
                         $Global:PersistentToastData['DownloadRemaining'] = ""
-                        Update-PersistentToast -NewStatus "$($ActivityName): Using existing valid file." 
+                        Update-PersistentToast -StepName "$($ActivityName): Using existing valid file." -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed
                     } catch { Write-Log -Level Warn -Message "Failed to update toast (skipped download): $($_.Exception.Message)" }
                     return $true # Indicate success (no download needed)
-                } else {
+                } else { 
                     Write-Log -Message "Local file '$DestinationPath' failed validation. Re-downloading." -Level WARN
                     Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue
                 }
@@ -120,7 +157,6 @@ function Invoke-LoxoneDownload {
                             
                             if ($null -ne $contentLengthHeader) {
                                 $contentLengthValue = $null
-                                # Handle potential array value (take the first element)
                                 if ($contentLengthHeader -is [array]) {
                                     if ($contentLengthHeader.Count -gt 0) {
                                         $contentLengthValue = $contentLengthHeader[0]
@@ -132,7 +168,6 @@ function Invoke-LoxoneDownload {
                                     $contentLengthValue = $contentLengthHeader
                                 }
 
-                                # Try converting the determined value
                                 if ($null -ne $contentLengthValue) {
                                     try {
                                         $totalBytes = [int64]::Parse($contentLengthValue)
@@ -150,7 +185,6 @@ function Invoke-LoxoneDownload {
                                         $totalBytes = -1
                                     }
                                 } else {
-                                     # This case handles if the header was an empty array
                                      Write-Log -Message "Could not determine a single value from Content-Length header." -Level WARN
                                      $totalBytes = -1
                                 }
@@ -160,275 +194,224 @@ function Invoke-LoxoneDownload {
                             }
                         } catch [System.Net.WebException] {
                             Write-Log -Message "HEAD request failed (WebException): $($_.Exception.Message). Status: $($_.Exception.Response.StatusCode | Out-String -Stream)" -Level WARN
-                            $totalBytes = -1 # Ensure it's -1 on HEAD failure
+                            $totalBytes = -1 
                         } catch {
                             Write-Log -Message "HEAD request failed (General Exception): $($_.Exception.Message)." -Level WARN
-                            $totalBytes = -1 # Ensure it's -1 on HEAD failure
+                            $totalBytes = -1 
                         }
                         
                         if ($totalBytes -le 0) {
                              Write-Log -Message "Could not determine file size via HEAD request. Progress calculations will be limited." -Level WARN
-                             $totalBytes = -1 # Ensure it's exactly -1 if unknown
+                             $totalBytes = -1 
                         }
-                    } # End of HEAD request block
+                    } 
 
                     # --- Invoke-WebRequest as Background Job ---
-                    $downloadProgress = $null # Ensure variable is clean
+                    $downloadProgress = $null 
                     $job = $null
                     $startTime = Get-Date
                     $lastBytes = 0
                     $lastTime = $startTime
-                    $iwrSuccess = $false # Reset flag for this attempt
-                    $downloadFileName = Split-Path -Path $DestinationPath -Leaf # Get filename for toast
+                    $iwrSuccess = $false 
+                    $downloadFileName = Split-Path -Path $DestinationPath -Leaf 
 
-                    # Helper to clear download data from toast global state
                     $clearDownloadToastData = {
                         Write-Log -Level Debug -Message "Clearing download-specific toast data."
                         $Global:PersistentToastData['DownloadFileName'] = ""
                         $Global:PersistentToastData['DownloadSpeed'] = ""
                         $Global:PersistentToastData['DownloadRemaining'] = ""
-                        # Don't trigger an update here, let the calling context do it if needed
                     }
 
                     try {
                         Write-Log -Message "Starting download job via Invoke-WebRequest..." -Level INFO
                         $scriptBlock = {
-                            param($Uri, $DestinationPath, $ProgressPreference, $JobLogPath) # Added JobLogPath parameter
+                            param($Uri, $DestinationPath, $ProgressPreference, $JobLogPath) 
                             
-                            # --- Start Job Internal Logging ---
                             $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
-                            # Use Out-File -Append for potentially better flushing
                             "[$Timestamp] JOB_START: Job started. DestinationPath = '$DestinationPath'" | Out-File -FilePath $JobLogPath -Append -Encoding UTF8 -NoNewline
-                            # --- End Job Internal Logging ---
-
-                            # Set preference within the job scope
-                            $ProgressPreference = 'SilentlyContinue' # Prevent default IWR progress bar inside job
                             
-                            # --- Job Internal IWR Try/Catch ---
+                            $ProgressPreference = 'SilentlyContinue' 
+                            
                             try {
                                 $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
                                 "[$Timestamp] JOB_IWR_START: Executing Invoke-WebRequest -Uri '$Uri' -OutFile '$DestinationPath'..." | Out-File -FilePath $JobLogPath -Append -Encoding UTF8 -NoNewline
                                 
-                                # Restore -ProgressAction to enable detailed progress reporting
-                                # Remove -ProgressAction as it causes file saving issues in job
                                 Invoke-WebRequest -Uri $Uri -OutFile $DestinationPath -UseBasicParsing -ErrorAction Stop
                                 
                                 $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
                                 "[$Timestamp] JOB_IWR_SUCCESS: Invoke-WebRequest completed without throwing." | Out-File -FilePath $JobLogPath -Append -Encoding UTF8 -NoNewline
                             } catch {
                                 $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
-                                # Try capturing error using $Error[0]
                                 $ErrorMessage = $Error[0].ToString()
                                 "[$Timestamp] JOB_IWR_ERROR: Invoke-WebRequest failed. Error: $ErrorMessage" | Out-File -FilePath $JobLogPath -Append -Encoding UTF8 -NoNewline
-                                # Re-throw the error so the job state becomes 'Failed' as expected
                                 throw $_
                             }
-                            # --- End Job Internal IWR Try/Catch ---
-
-                            # --- Job Internal File Check ---
+                            
                             $FileExistsAfterIWR = Test-Path -LiteralPath $DestinationPath -PathType Leaf
                             $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
                             "[$Timestamp] JOB_FILE_CHECK: Test-Path '$DestinationPath' after IWR returned: $FileExistsAfterIWR" | Out-File -FilePath $JobLogPath -Append -Encoding UTF8 -NoNewline
-                            # --- End Job Internal File Check ---
-                            
-                            # Note: Using $global:downloadProgress relies on the job running in the same process space or having access to it.
-                            # A more robust method might involve job messaging, but this is simpler for now.
                         }
-                        # Pass ProgressPreference explicitly if needed, otherwise rely on default/inherited
-                        # Define unique job log path
                         $jobLogFileName = "JobLog_$(Get-Date -Format 'yyyyMMddHHmmssfff')_$($PID).log"
                         $jobLogPath = Join-Path -Path $env:TEMP -ChildPath $jobLogFileName
                         Write-Log -Message "Starting download job. Internal job log will be at: '$jobLogPath'" -Level DEBUG
                         
-                        # Pass the log path to the job
                         $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $Url, $DestinationPath, $ProgressPreference, $jobLogPath -ErrorAction Stop
 
                         Write-Log -Message "Download job started (ID: $($job.Id)). Monitoring progress..." -Level DEBUG
 
-                        # --- Progress Monitoring Loop ---
                         while ($job.State -eq 'Running') {
-                            # Check for cancellation first
                             if ($script:cancelToken -ne $null -and $script:cancelToken.IsCancellationRequested) {
                                 Write-Log -Message "$($ActivityName): Cancellation requested. Stopping download job." -Level WARN
                                 Stop-Job -Job $job -ErrorAction SilentlyContinue
-                                # Wait briefly for job to enter stopped state
                                 Start-Sleep -Milliseconds 200
-                                # No need to throw here, the job state check after loop will handle it
-                                break # Exit monitoring loop
+                                break 
                             }
-# --- Progress Calculation based on File Size ---
-$currentBytes = 0
-# Check if the destination file exists and get its size
-if (Test-Path -LiteralPath $DestinationPath -PathType Leaf) {
-    try {
-        # Use -Force to potentially get size even if file is being written to
-        $fileItem = Get-Item -LiteralPath $DestinationPath -Force -ErrorAction Stop
-        $currentBytes = $fileItem.Length
-    } catch {
-        # Log error getting file size but continue loop
-        Write-Log -Message "Progress Loop: Error getting size of '$DestinationPath': $($_.Exception.Message)" -Level WARN
-    }
-} # else $currentBytes remains 0
+                            $currentBytes = 0
+                            if (Test-Path -LiteralPath $DestinationPath -PathType Leaf) {
+                                try {
+                                    $fileItem = Get-Item -LiteralPath $DestinationPath -Force -ErrorAction Stop
+                                    $currentBytes = $fileItem.Length
+                                } catch {
+                                    Write-Log -Message "Progress Loop: Error getting size of '$DestinationPath': $($_.Exception.Message)" -Level WARN
+                                }
+                            } 
+                            
+                            $percentComplete = 0
+                            if ($totalBytes -gt 0) {
+                                $percentComplete = [Math]::Min(100, [Math]::Floor(($currentBytes / $totalBytes) * 100))
+                            }
+                            
+                            $currentTime = Get-Date
+                            $elapsedTime = $currentTime - $startTime
+                            $timeDeltaSeconds = ($currentTime - $lastTime).TotalSeconds
+                            $bytesDelta = $currentBytes - $lastBytes
+                            
+                            $speedBytesPerSec = 0
+                            if ($timeDeltaSeconds -gt 0.1) { 
+                                $speedBytesPerSec = $bytesDelta / $timeDeltaSeconds
+                            }
+                            
+                            $remainingBytes = -1
+                            if ($totalBytes -gt 0) {
+                                $remainingBytes = $totalBytes - $currentBytes
+                                if ($remainingBytes -lt 0) { $remainingBytes = 0 }
+                            }
+                            
+                            $remainingTimeSeconds = -1
+                            if ($speedBytesPerSec -gt 0 -and $remainingBytes -ge 0) { 
+                                $remainingTimeSeconds = $remainingBytes / $speedBytesPerSec
+                            }
+                            
+                            $speedFormatted = "?? KB/s"
+                            if ($speedBytesPerSec -gt 0) {
+                                if ($speedBytesPerSec -ge 1MB) {
+                                    $speedFormatted = "{0:N2} MB/s" -f ($speedBytesPerSec / 1MB)
+                                } elseif ($speedBytesPerSec -ge 1KB) {
+                                    $speedFormatted = "{0:N1} KB/s" -f ($speedBytesPerSec / 1KB)
+                                } else {
+                                    $speedFormatted = "{0:N0} B/s" -f $speedBytesPerSec
+                                }
+                            }
+                            
+                            $remainingTimeFormatted = "--:--"
+                            if ($remainingTimeSeconds -ge 0) {
+                                $remainingTimeSpan = [TimeSpan]::FromSeconds($remainingTimeSeconds)
+                                if ($remainingTimeSpan.TotalHours -ge 1) {
+                                    $remainingTimeFormatted = "{0:hh\:mm\:ss}" -f $remainingTimeSpan
+                                } else {
+                                    $remainingTimeFormatted = "{0:mm\:ss}" -f $remainingTimeSpan
+                                }
+                            } elseif ($totalBytes -le 0) {
+                                 $remainingTimeFormatted = "Unknown" 
+                            }
+                            
+                            $sizeProgressFormatted = "--/-- MB"
+                            if ($totalBytes -gt 0) {
+                                $currentMB = $currentBytes / 1MB
+                                $totalMB = $totalBytes / 1MB
+                                $sizeProgressFormatted = "{0:N0}/{1:N0} MB" -f $currentMB, $totalMB
+                            } elseif ($currentBytes -ge 0) {
+                                $sizeProgressFormatted = "{0:N0} MB transferred" -f ($currentBytes / 1MB)
+                            }
+                            
+                            $statusMessage = if ($totalBytes -gt 0) {
+                                "{0}% ({1}) - Rem: {2} - Size: {3}" -f $percentComplete, $speedFormatted, $remainingTimeFormatted, $sizeProgressFormatted
+                            } else {
+                                "Downloading... ({0} transferred, {1})" -f (Format-Bytes $currentBytes), $speedFormatted
+                            }
+                            
+                            Write-Progress -Activity "Download: $($downloadFileName)" -Status $statusMessage -PercentComplete $percentComplete -CurrentOperation "Downloading..." -Id 2 
+                            
+                            $lastBytes = $currentBytes
+                            $lastTime = $currentTime
+                            
+                            try {
+                                $toastUpdateParams = @{
+                                    ProgressPercentage = $percentComplete
+                                    DownloadFileName = $downloadFileName 
+                                    DownloadSpeed = $speedFormatted
+                                    DownloadRemainingTime = $remainingTimeFormatted
+                                    DownloadSizeProgress = $sizeProgressFormatted
+                                    StepNumber       = $StepNumber
+                                    TotalSteps       = $TotalSteps
+                                    StepName         = $StepName 
+                                    DownloadNumber   = $DownloadNumber
+                                    TotalDownloads   = $TotalDownloads
+                                    CurrentWeight    = $CurrentWeight 
+                                    TotalWeight      = $TotalWeight
+                                    IsInteractive    = $IsInteractive
+                                    ErrorOccurred    = $false 
+                                    AnyUpdatePerformed = $AnyUpdatePerformed
+                                }
+                                Update-PersistentToast @toastUpdateParams
+                            } catch {
+                                Write-Log -Level Warn -Message "Failed to update toast during download progress: $($_.Exception.Message)"
+                            }
+                            
+                            Start-Sleep -Milliseconds 500 
+                        } 
 
-# Use $totalBytes determined earlier (from HEAD or parameter)
-$percentComplete = 0
-if ($totalBytes -gt 0) {
-    $percentComplete = [Math]::Min(100, [Math]::Floor(($currentBytes / $totalBytes) * 100))
-}
-# Removed fallback using $downloadProgress.TotalBytesToTransfer as $downloadProgress is no longer used
-
-$currentTime = Get-Date
-$elapsedTime = $currentTime - $startTime
-$timeDeltaSeconds = ($currentTime - $lastTime).TotalSeconds
-$bytesDelta = $currentBytes - $lastBytes
-
-$speedBytesPerSec = 0
-if ($timeDeltaSeconds -gt 0.1) { # Avoid division by zero or tiny intervals
-    $speedBytesPerSec = $bytesDelta / $timeDeltaSeconds
-}
-
-$remainingBytes = -1
-if ($totalBytes -gt 0) {
-    $remainingBytes = $totalBytes - $currentBytes
-    # Ensure remaining bytes isn't negative if file size check is slightly ahead
-    if ($remainingBytes -lt 0) { $remainingBytes = 0 }
-}
-
-$remainingTimeSeconds = -1
-if ($speedBytesPerSec -gt 0 -and $remainingBytes -ge 0) { # Check remainingBytes >= 0
-    $remainingTimeSeconds = $remainingBytes / $speedBytesPerSec
-}
-
-# Formatting
-$speedFormatted = "?? KB/s"
-if ($speedBytesPerSec -gt 0) {
-    if ($speedBytesPerSec -ge 1MB) {
-        $speedFormatted = "{0:N2} MB/s" -f ($speedBytesPerSec / 1MB)
-    } elseif ($speedBytesPerSec -ge 1KB) {
-        $speedFormatted = "{0:N1} KB/s" -f ($speedBytesPerSec / 1KB)
-    } else {
-        $speedFormatted = "{0:N0} B/s" -f $speedBytesPerSec
-    }
-}
-
-$remainingTimeFormatted = "--:--"
-if ($remainingTimeSeconds -ge 0) {
-    $remainingTimeSpan = [TimeSpan]::FromSeconds($remainingTimeSeconds)
-    if ($remainingTimeSpan.TotalHours -ge 1) {
-        $remainingTimeFormatted = "{0:hh\:mm\:ss}" -f $remainingTimeSpan
-    } else {
-        $remainingTimeFormatted = "{0:mm\:ss}" -f $remainingTimeSpan
-    }
-} elseif ($totalBytes -le 0) {
-     $remainingTimeFormatted = "Unknown" # If total size is unknown
-}
-
-# Format Size Progress (e.g., "145/507 MB")
-$sizeProgressFormatted = "--/-- MB"
-if ($totalBytes -gt 0) {
-    $currentMB = $currentBytes / 1MB
-    $totalMB = $totalBytes / 1MB
-    $sizeProgressFormatted = "{0:N0}/{1:N0} MB" -f $currentMB, $totalMB
-} elseif ($currentBytes -ge 0) {
-    # Show only current if total is unknown
-    $sizeProgressFormatted = "{0:N0} MB transferred" -f ($currentBytes / 1MB)
-}
-
-# Construct Status Message for Write-Progress (Console)
-$statusMessage = if ($totalBytes -gt 0) {
-    "{0}% ({1}) - Rem: {2} - Size: {3}" -f $percentComplete, $speedFormatted, $remainingTimeFormatted, $sizeProgressFormatted
-} else {
-    # Degraded status when total size is unknown
-    "Downloading... ({0} transferred, {1})" -f (Format-Bytes $currentBytes), $speedFormatted
-}
-
-# Update Progress Bar (Console)
-Write-Progress -Activity "Download: $($downloadFileName)" -Status $statusMessage -PercentComplete $percentComplete -CurrentOperation "Downloading..." -Id 2 # Explicitly set ID 2 and use filename in Activity
-
-# Update for next iteration
-$lastBytes = $currentBytes
-$lastTime = $currentTime
-
-# --- Update Toast Data ---
-try {
-    # Prepare parameters for Update-PersistentToast
-    $toastUpdateParams = @{
-        ProgressPercentage = $percentComplete
-        DownloadFileName = $downloadFileName # Used for ProgressBarStatus text
-        DownloadSpeed = $speedFormatted
-        DownloadRemainingTime = $remainingTimeFormatted
-        DownloadSizeProgress = $sizeProgressFormatted
-        # Pass through step/download info received by this function
-        StepNumber       = $StepNumber
-        TotalSteps       = $TotalSteps
-        StepName         = $StepName # Use the StepName passed to this function
-        DownloadNumber   = $DownloadNumber
-        TotalDownloads   = $TotalDownloads
-        CurrentWeight    = $CurrentWeight # Pass through overall weight
-        TotalWeight      = $TotalWeight
-    }
-    # Call Update-PersistentToast with detailed download info
-    Update-PersistentToast @toastUpdateParams
-} catch {
-    Write-Log -Level Warn -Message "Failed to update toast during download progress: $($_.Exception.Message)"
-}
-# --- End Update Toast Data ---
-# --- End Progress Calculation ---
-
-Start-Sleep -Milliseconds 500 # Update interval
-                        } # End while ($job.State -eq 'Running')
-
-                        # --- Handle Job Completion ---
                         Write-Log -Message "Download job finished with state: $($job.State)" -Level DEBUG
 
                         if ($job.State -eq 'Completed') {
-                            Receive-Job -Job $job -ErrorAction SilentlyContinue # Discard any output, just confirm completion
+                            Receive-Job -Job $job -ErrorAction SilentlyContinue 
                             Write-Log -Message "$($ActivityName): Invoke-WebRequest job completed successfully." -Level INFO
-                            $iwrSuccess = $true # Mark IWR as successful for verification step
-                            try { Update-PersistentToast -NewStatus "$($ActivityName): Download Complete" } catch { Write-Log -Level Warn -Message "Failed to update toast (Download Complete): $($_.Exception.Message)" }
+                            $iwrSuccess = $true 
+                            try { Update-PersistentToast -StepName "$($ActivityName): Download Complete" -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Download Complete): $($_.Exception.Message)" }
                             Write-Progress -Activity $ActivityName -Completed
-
                         } elseif ($job.State -eq 'Failed') {
-                            $jobError = $job.ChildJobs[0].Error # Get the first error record
+                            $jobError = $job.ChildJobs[0].Error 
                             $errorMessage = "$($ActivityName): Download job failed: $($jobError.Exception.Message)"
                             Write-Log -Message $errorMessage -Level ERROR
-                            try { Update-PersistentToast -NewStatus "$($ActivityName): FAILED (Job Error)"  } catch { Write-Log -Level Warn -Message "Failed to update toast (Job Error): $($_.Exception.Message)" }
+                            try { Update-PersistentToast -StepName "$($ActivityName): FAILED (Job Error)" -IsInteractive $IsInteractive -ErrorOccurred $true -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Job Error): $($_.Exception.Message)" }
                             Write-Progress -Activity $ActivityName -Completed
-                            throw $jobError.Exception # Re-throw the underlying exception
-
+                            throw $jobError.Exception 
                         } elseif ($job.State -eq 'Stopped') {
-                            # This state is usually reached due to Stop-Job (likely from cancellation)
                             $errorMessage = "$($ActivityName): Download cancelled by user (Job Stopped)."
                             Write-Log -Message $errorMessage -Level WARN
-                            try { Update-PersistentToast -NewStatus "$($ActivityName): Cancelled"  } catch { Write-Log -Level Warn -Message "Failed to update toast (Cancelled): $($_.Exception.Message)" }
+                            try { Update-PersistentToast -StepName "$($ActivityName): Cancelled" -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Cancelled): $($_.Exception.Message)" }
                             Write-Progress -Activity $ActivityName -Completed
-                            throw $errorMessage # Throw cancellation message
-
+                            throw $errorMessage 
                         } else {
-                            # Handle other potential states if necessary
                             $errorMessage = "$($ActivityName): Download job ended with unexpected state: $($job.State)."
                             Write-Log -Message $errorMessage -Level ERROR
-                            try { Update-PersistentToast -NewStatus "$($ActivityName): FAILED (Unknown State)"  } catch { Write-Log -Level Warn -Message "Failed to update toast (Unknown State): $($_.Exception.Message)" }
+                            try { Update-PersistentToast -StepName "$($ActivityName): FAILED (Unknown State)" -IsInteractive $IsInteractive -ErrorOccurred $true -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Unknown State): $($_.Exception.Message)" }
                             Write-Progress -Activity $ActivityName -Completed
                             throw $errorMessage
                         }
 
                     } catch [System.Management.Automation.PipelineStoppedException] {
-                        # This might still catch cancellation if it happens *before* the job starts or during job setup
                         $errorMessage = "$($ActivityName): Download cancelled by user (PipelineStoppedException)."
                         Write-Log -Message $errorMessage -Level WARN
-                        try { Update-PersistentToast -NewStatus "$($ActivityName): Cancelled"  } catch { Write-Log -Level Warn -Message "Failed to update toast (Cancelled Pipeline): $($_.Exception.Message)" }
+                        try { Update-PersistentToast -StepName "$($ActivityName): Cancelled" -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Cancelled Pipeline): $($_.Exception.Message)" }
                         Write-Progress -Activity $ActivityName -Completed
-                        throw $errorMessage # Re-throw cancellation
+                        throw $errorMessage 
                     } catch {
-                        # Catch any other errors during job start or monitoring setup
                         $errorMessage = "$($ActivityName): Download failed (General Error): $($_.Exception.Message)"
                         Write-Log -Message $errorMessage -Level ERROR
-                        try { Update-PersistentToast -NewStatus "$($ActivityName): FAILED (Error)"  } catch { Write-Log -Level Warn -Message "Failed to update toast (General Error): $($_.Exception.Message)" }
+                        try { Update-PersistentToast -StepName "$($ActivityName): FAILED (Error)" -IsInteractive $IsInteractive -ErrorOccurred $true -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (General Error): $($_.Exception.Message)" }
                         Write-Progress -Activity $ActivityName -Completed
                         
-                        # --- Retrieve Internal Job Log on Error ---
-                        # Moved here from finally block to increase chance of capture before script halts
                         if (Test-Path $jobLogPath) {
                             Write-Log -Message "Retrieving internal job log content from '$jobLogPath' due to error..." -Level DEBUG
                             $jobLogContent = Get-Content -Path $jobLogPath -Raw -ErrorAction SilentlyContinue
@@ -437,147 +420,154 @@ Start-Sleep -Milliseconds 500 # Update interval
                             } else {
                                 Write-Log -Message "Could not read internal job log content or file was empty (Error Path)." -Level WARN
                             }
-                            # Optionally remove the temp log file
-                            # Remove-Item -Path $jobLogPath -Force -ErrorAction SilentlyContinue
                         } else {
                             Write-Log -Message "Internal job log file '$jobLogPath' not found (Error Path)." -Level WARN
                         }
-                        # --- End Retrieve Internal Job Log ---
-
-                        throw $_ # Re-throw other errors
+                        throw $_ 
                     } finally {
-                        # Ensure job is always removed
-                        # Clear download-specific toast data regardless of job outcome
                         Invoke-Command $clearDownloadToastData
 
                         if ($job -ne $null) {
-                            # Log retrieval moved to the catch block above
-                            # Remove the job itself
                             Write-Log -Message "Removing job $($job.Id)..." -Level DEBUG
                             Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
                         }
-                        # Restore ProgressPreference just in case, although it's set in the job scope now
                         $ProgressPreference = 'Continue'
                     }
-                    # --- End Invoke-WebRequest ---
-
-                    # --- Post-Download Verification (only if IWR succeeded) ---
+                    
                     if ($iwrSuccess) {
                         Write-Log -Message "$($ActivityName): Download reported success. Verifying downloaded file (Attempt $attempt)..." -Level INFO
-                        try { Update-PersistentToast -NewStatus "$($ActivityName): Verifying download..."  } catch { Write-Log -Level Warn -Message "Failed to update toast (Verifying): $($_.Exception.Message)" }
+                        try { Update-PersistentToast -StepName "$($ActivityName): Verifying download..." -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Verifying): $($_.Exception.Message)" }
                         try {
                             Initialize-CRC32Type
                             if (-not (Test-Path $DestinationPath)) { throw "Downloaded file '$DestinationPath' missing." }
                             $downloadedFileItem = Get-Item $DestinationPath -ErrorAction Stop
                             $downloadedFileSize = $downloadedFileItem.Length
                             $sizeVerified = $true
-                            $crcVerified = $true
+                            $crcVerified = $true 
 
                             if ($ExpectedFilesize -gt 0) {
+                                Write-Log -Level DEBUG -Message "$($ActivityName): POST-DOWNLOAD Size Check: Expected: $ExpectedFilesize, Actual: $downloadedFileSize"
                                 if ($downloadedFileSize -ne $ExpectedFilesize) {
                                     $sizeVerified = $false
-                                    Write-Log -Level ERROR -Message "$($ActivityName): Size mismatch ($downloadedFileSize vs $ExpectedFilesize)."
-                                } else { Write-Log -Level DEBUG -Message "$($ActivityName): Size matches." }
-                            } else { Write-Log -Level DEBUG -Message "$($ActivityName): Skipping size check." }
+                                    Write-Log -Level ERROR -Message "$($ActivityName): Size mismatch POST-DOWNLOAD ($downloadedFileSize vs $ExpectedFilesize)."
+                                } else { Write-Log -Level DEBUG -Message "$($ActivityName): Size matches POST-DOWNLOAD." }
+                            } else { Write-Log -Level DEBUG -Message "$($ActivityName): Skipping size check POST-DOWNLOAD." }
+                            Write-Log -Level DEBUG -Message "$($ActivityName): POST-DOWNLOAD After size check, `$sizeVerified is: $sizeVerified"
 
                             if ($sizeVerified -and -not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) {
-                                Write-Log -Level DEBUG -Message "$($ActivityName): Checking CRC32..."
+                                Write-Log -Level DEBUG -Message "$($ActivityName): Checking CRC32 POST-DOWNLOAD..."
+                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: About to call Get-CRC32 for $DestinationPath"
                                 $localCRC32 = Get-CRC32 -InputFile $DestinationPath
-                                if ($localCRC32 -ne $ExpectedCRC32) {
-                                    $crcVerified = $false
+                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Get-CRC32 call completed. Raw localCRC32 is '$localCRC32'"
+                                # --- BEGIN DETAILED CRC DEBUG ---
+                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: POST-DOWNLOAD CHECK"
+                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Raw localCRC32: '$localCRC32'"
+                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Raw ExpectedCRC32: '$ExpectedCRC32'"
+                                try { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Type localCRC32: $($localCRC32.GetType().FullName)" } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Type localCRC32: Error getting type" }
+                                try { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Type ExpectedCRC32: $($ExpectedCRC32.GetType().FullName)" } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Type ExpectedCRC32: Error getting type" }
+                                try { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Length localCRC32: $($localCRC32.Length)" } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Length localCRC32: Error getting length" }
+                                try { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Length ExpectedCRC32: $($ExpectedCRC32.Length)" } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Length ExpectedCRC32: Error getting length" }
+                                
+                                $processedLocalCRC_post = "??"
+                                $processedExpectedCRC_post = "??"
+                                try { $processedLocalCRC_post = ([string]$localCRC32).Trim() } catch { $processedLocalCRC_post = "ERROR Processing localCRC32: $($_.Exception.Message)"}
+                                try { $processedExpectedCRC_post = ([string]$ExpectedCRC32).Trim() } catch { $processedExpectedCRC_post = "ERROR Processing ExpectedCRC32: $($_.Exception.Message)"}
+                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Processed localCRC32: '$processedLocalCRC_post'"
+                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Processed ExpectedCRC32: '$processedExpectedCRC_post'"
+
+                                # Normalize CRC strings: If calculated is 8 chars starting with '0' and expected is 7 chars, strip leading '0'.
+                                if ($processedLocalCRC_post.Length -eq 8 -and $processedLocalCRC_post.StartsWith('0') -and $processedExpectedCRC_post.Length -eq 7) {
+                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Normalizing local CRC '$processedLocalCRC_post' to '$($processedLocalCRC_post.Substring(1))' due to length difference and leading zero."
+                                    $processedLocalCRC_post = $processedLocalCRC_post.Substring(1)
+                                }
+
+                                try {
+                                    $localRawBytes_post = [System.Text.Encoding]::UTF8.GetBytes($localCRC32)
+                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: localCRC32 Raw Bytes (UTF8): $($localRawBytes_post -join ',')"
+                                    $localProcessedBytes_post = [System.Text.Encoding]::UTF8.GetBytes($processedLocalCRC_post)
+                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: localCRC32 Processed Bytes (UTF8): $($localProcessedBytes_post -join ',')"
+                                } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Error getting bytes for localCRC32: $($_.Exception.Message)"}
+                                try {
+                                    $expectedRawBytes_post = [System.Text.Encoding]::UTF8.GetBytes($ExpectedCRC32)
+                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: ExpectedCRC32 Raw Bytes (UTF8): $($expectedRawBytes_post -join ',')"
+                                    $expectedProcessedBytes_post = [System.Text.Encoding]::UTF8.GetBytes($processedExpectedCRC_post)
+                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: ExpectedCRC32 Processed Bytes (UTF8): $($expectedProcessedBytes_post -join ',')"
+                                } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Error getting bytes for ExpectedCRC32: $($_.Exception.Message)"}
+                                # --- END DETAILED CRC DEBUG ---
+                                if ([string]::Compare($processedLocalCRC_post, $processedExpectedCRC_post, [System.StringComparison]::OrdinalIgnoreCase) -ne 0) { 
+                                    $crcVerified = $false 
                                     Write-Log -Level ERROR -Message "$($ActivityName): CRC mismatch ($localCRC32 vs $ExpectedCRC32)."
-                                } else { Write-Log -Level DEBUG -Message "$($ActivityName): CRC matches." }
+                                } else { 
+                                    $crcVerified = $true 
+                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC matches." 
+                                }
                             } elseif (-not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) { Write-Log -Level DEBUG -Message "$($ActivityName): Size mismatch or CRC check skipped." }
                             else { Write-Log -Level DEBUG -Message "$($ActivityName): Skipping CRC verification." }
 
                             if ($sizeVerified -and $crcVerified) {
                                 Write-Log -Message "$($ActivityName): Verification successful (Attempt $attempt)." -Level INFO
-                                try { Update-PersistentToast -NewStatus "$($ActivityName): Download verified."  } catch { Write-Log -Level Warn -Message "Failed to update toast (Verified): $($_.Exception.Message)" }
-                                $currentAttemptSuccess = $true # Mark this attempt as fully successful
+                                try { Update-PersistentToast -StepName "$($ActivityName): Download verified." -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Verified): $($_.Exception.Message)" }
+                                $currentAttemptSuccess = $true 
                             } else {
                                 if (-not $sizeVerified) { throw "Incorrect file size." }
                                 if (-not $crcVerified) { throw "Incorrect checksum." }
                             }
-                        } catch { # Catch verification errors
+                        } catch { 
                             $errorMessage = "$($ActivityName): Verification failed for download attempt {0}: {1}" -f $attempt, $_.Exception.Message
                             Write-Log -Message $errorMessage -Level ERROR
-                            try { Update-PersistentToast -NewStatus "$($ActivityName): Verification FAILED."  } catch { Write-Log -Level Warn -Message "Failed to update toast (Verification FAILED): $($_.Exception.Message)" }
+                            try { Update-PersistentToast -StepName "$($ActivityName): Verification FAILED." -IsInteractive $IsInteractive -ErrorOccurred $true -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Verification FAILED): $($_.Exception.Message)" }
                             if (Test-Path $DestinationPath) { Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue }
-                            # Do not set $currentAttemptSuccess = true
-                            throw $_ # Re-throw verification error to be caught by the outer attempt's catch block
+                            throw $_ 
                         }
-                    } # End if ($iwrSuccess) for verification block
+                    } 
 
-                } catch { # Catch block for the entire attempt (outer try)
-                    # Log the error from IWR or Verification
+                } catch { 
                     Write-Log -Message "$($ActivityName): Download attempt $attempt failed: $($_.Exception.Message)" -Level ERROR
-                    $attemptFailed = $true # Mark attempt as failed for retry logic
+                    $attemptFailed = $true 
 
-                    # Check if it was a cancellation error - if so, re-throw to exit loop entirely via main catch
                     if ($_.Exception.Message -match "Download cancelled by user") {
                         throw $_
                     }
-                    # Otherwise, the error is logged, and the loop will continue to the retry logic below
                 }
-                # --- End Outer Try/Catch for the attempt ---
-
-
-                # --- Retry / Success Logic ---
+                
                 if ($currentAttemptSuccess) {
-                    # If download and verification succeeded, set overall success and exit the loop
                     $overallDownloadSuccess = $true
                     break
                 } elseif ($attemptFailed -and $attempt -lt $totalAttempts) {
-                    # If download or verification failed, and we haven't reached max attempts, wait and retry
                     Write-Log -Message "$($ActivityName): Download or verification failed on attempt $attempt. Waiting 5 seconds before retry..." -Level INFO
                     Start-Sleep -Seconds 5
                 } elseif ($attemptFailed -and $attempt -ge $totalAttempts) {
-                     # Max attempts reached after failure, throw final error (caught by main function's catch)
                      Write-Log -Message "$($ActivityName): Maximum download/verification attempts reached. Download failed." -Level ERROR
                      throw "$($ActivityName): Download and verification failed after $totalAttempts attempts."
                 }
-                # If $currentAttemptSuccess is false but $attemptFailed is also false (e.g., IWR succeeded but verification skipped/failed silently - shouldn't happen), loop continues.
 
-            } # End For loop
+            } 
 
-            # After loop, check overall status
             if (-not $overallDownloadSuccess) {
-                 # This path is taken if loop finished without break (i.e., max retries reached and failed)
-                 # The actual error causing failure was already thrown inside the loop.
-                 # We might need to return $false here if the throw doesn't exit the function.
                  Write-Log -Message "$($ActivityName): Download process did not complete successfully after all retries." -Level WARN
-                 return $false # Explicitly return false if loop completes without success
+                 return $false 
             } else {
-                # Loop was broken due to success
                 return $true
             }
 
-        } # End if ($needsDownload)
+        } 
         else {
-             # This case handles when $needsDownload was false initially (file existed and was valid)
-             # Ensure download data is cleared if we didn't enter the download loop
-             try { Invoke-Command $clearDownloadToastData } catch {} # Use try-catch as $clearDownloadToastData might not be defined if script errored early
+             try { Invoke-Command $clearDownloadToastData } catch {} 
              return $true
         }
 
-    } # End main try block for the function
+    } 
     catch {
-        # Catch errors thrown from within the main try block (e.g., cancellation, max retries failed)
         Write-Log -Message "Error in Invoke-LoxoneDownload: $($_.Exception.Message)" -Level ERROR
-        # Potentially update toast for final failure state if not already handled (e.g., cancellation)
         if ($_.Exception.Message -notmatch "Download cancelled by user") {
-            try { Update-PersistentToast -NewStatus "$($ActivityName): FAILED - Check Logs"  } catch { Write-Log -Level Warn -Message "Failed to update toast (Main Catch): $($_.Exception.Message)" }
+            try { Update-PersistentToast -StepName "$($ActivityName): FAILED - Check Logs" -IsInteractive $IsInteractive -ErrorOccurred $true -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Main Catch): $($_.Exception.Message)" }
         }
-        # Ensure progress bar is cleared on any function-level error exit
         try { Write-Progress -Activity $ActivityName -Completed -ErrorAction SilentlyContinue } catch {}
-        # Do not re-throw; let the function return $false to indicate failure to the caller
         return $false
-    } # End main catch block
+    } 
     finally {
-        # Final cleanup if needed (e.g., restore global settings)
-        # Ensure ProgressPreference is restored if somehow an error bypassed the inner finally
         $ProgressPreference = 'Continue'
-    } # End main finally block
+    } 
 
 } # End function Invoke-LoxoneDownload
 #endregion Unified Download Function
