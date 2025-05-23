@@ -91,7 +91,7 @@ function Get-ExecutableSignature { # Renamed from TestExecutableSignature
         if ($result.Status -eq 'Valid') {
             Write-Log -Message "Signature VALID: Authenticode status for '$ExePath' is 'Valid'." -Level INFO
             # Extract Thumbprint only if valid
-            if ($signatureInfo.SignerCertificate -ne $null) {
+            if ($null -ne $signatureInfo.SignerCertificate) {
                 $result.Thumbprint = $signatureInfo.SignerCertificate.Thumbprint
                 Write-Log -Message "Thumbprint: $($result.Thumbprint)" -Level DEBUG
             } else {
@@ -284,14 +284,14 @@ function Get-AppVersionFromRegistry {
 
         # Check for specific values
         # Check for specific values using parameters
-        if ($regProperties -ne $null -and $regProperties.PSObject.Properties.Name -contains $AppNameValueName) {
+        if ($null -ne $regProperties -and $regProperties.PSObject.Properties.Name -contains $AppNameValueName) {
             $output.ShortcutName = $regProperties.$AppNameValueName # Use parameter variable for property access
             Write-Verbose "Found ${AppNameValueName}: $($output.ShortcutName)"
         } else {
             Write-Warning "Registry value '$AppNameValueName' not found at $RegistryPath."
             # Continue, but ShortcutName remains $null
         }
-        if ($regProperties -ne $null -and $regProperties.PSObject.Properties.Name -contains $InstallPathValueName) {
+        if ($null -ne $regProperties -and $regProperties.PSObject.Properties.Name -contains $InstallPathValueName) {
             $output.InstallLocation = $regProperties.$InstallPathValueName # Use parameter variable for property access
             Write-Verbose "Found ${InstallPathValueName}: $($output.InstallLocation)"
         } else {
@@ -322,7 +322,7 @@ function Get-AppVersionFromRegistry {
                             Write-Verbose "Attempting to get file version for: $($output.InstallLocation)"
                             $fileItem = Get-Item -Path $output.InstallLocation -ErrorAction Stop # Re-add ErrorAction Stop
                             Start-Sleep -Millis 100 # Small delay before accessing properties
-                            if ($fileItem -ne $null -and $fileItem.VersionInfo -ne $null) {
+                            if ($null -ne $fileItem -and $null -ne $fileItem.VersionInfo) {
                                 if (-not ([string]::IsNullOrWhiteSpace($fileItem.VersionInfo.FileVersion))) {
                                      $output.FileVersion = $fileItem.VersionInfo.FileVersion
                                      Write-Verbose "Found FileVersion: $($output.FileVersion)"
@@ -357,7 +357,7 @@ function Get-AppVersionFromRegistry {
                     Write-Verbose "Attempting to get file version for: $($output.InstallLocation)"
                     $fileItem = Get-Item -Path $output.InstallLocation -ErrorAction Stop # Re-add ErrorAction Stop
                     Start-Sleep -Millis 100 # Small delay before accessing properties
-                    if ($fileItem -ne $null -and $fileItem.VersionInfo -ne $null) {
+                    if ($null -ne $fileItem -and $null -ne $fileItem.VersionInfo) {
                         if (-not ([string]::IsNullOrWhiteSpace($fileItem.VersionInfo.FileVersion))) {
                              $output.FileVersion = $fileItem.VersionInfo.FileVersion
                              Write-Verbose "Found FileVersion: $($output.FileVersion)"
@@ -506,7 +506,107 @@ function Get-CRC32 {
     }
 }
 #endregion CRC32 Logic
+#endregion CRC32 Logic
+
+function Get-InvocationTrace {
+    [CmdletBinding()]
+    param()
+    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    try {
+        $stack   = Get-PSCallStack         # always safe
+        $self    = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+        $parentProcessId = if ($self) { $self.ParentProcessId } else { $null }
+        $parent  = if ($parentProcessId) { Get-CimInstance Win32_Process -Filter "ProcessId=$parentProcessId" -ErrorAction SilentlyContinue } else { $null }
+        
+        $thisProcessCLI = if ($self) { $self.CommandLine } else { "PID $PID not found or CommandLine unavailable" }
+        $parentProcessCLI = if ($parent) { $parent.CommandLine } elseif ($parentProcessId) { "Parent PID $parentProcessId not found or CommandLine unavailable" } else { "Parent process ID not available"}
+
+        [pscustomobject]@{
+            CallStack       = $stack.Command
+            ThisProcessCLI  = $thisProcessCLI
+            ParentProcessCLI= $parentProcessCLI
+        }
+    }
+    catch {
+        Write-Log -Message "While collecting invocation info: $($_.Exception.Message)" -Level WARN
+        # Return an object with empty/error values so the calling code doesn't break
+        [pscustomobject]@{
+            CallStack       = @("Error collecting call stack: $($_.Exception.Message)")
+            ThisProcessCLI  = "Error collecting this process CLI: $($_.Exception.Message)"
+            ParentProcessCLI= "Error collecting parent process CLI: $($_.Exception.Message)"
+        }
+    } finally {
+        Exit-Function
+    }
+}
+
+function Test-ExistingFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory=$false)]
+        [string]$ExpectedCRC,
+
+        [Parameter(Mandatory=$false)]
+        [long]$ExpectedSize, # Changed to long to match file sizes
+
+        [Parameter(Mandatory=$false)]
+        [bool]$EnableCRC = $true # Default to true as per original script logic
+    )
+
+    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    Write-Log -Message "Test-ExistingFile: Validating '$FilePath'. EnableCRC: $EnableCRC, ExpectedSize: $ExpectedSize, ExpectedCRC: $ExpectedCRC" -Level DEBUG
+
+    try {
+        if (-not (Test-Path -Path $FilePath -PathType Leaf)) {
+            Write-Log -Message "Test-ExistingFile: File not found at '$FilePath'." -Level INFO
+            return $false
+        }
+
+        $fileInfo = Get-Item -Path $FilePath -ErrorAction Stop
+
+        # Size Check (always perform if ExpectedSize is provided and greater than 0)
+        if ($PSBoundParameters.ContainsKey('ExpectedSize') -and $ExpectedSize -gt 0) {
+            if ($fileInfo.Length -ne $ExpectedSize) {
+                Write-Log -Message "Test-ExistingFile: Size mismatch for '$FilePath'. Expected: $ExpectedSize, Actual: $($fileInfo.Length)." -Level WARN
+                return $false
+            }
+            Write-Log -Message "Test-ExistingFile: Size check PASSED for '$FilePath'." -Level DEBUG
+        } else {
+            Write-Log -Message "Test-ExistingFile: Skipping size check (ExpectedSize not provided or not positive)." -Level DEBUG
+        }
+
+        # CRC Check (only if EnableCRC is true and ExpectedCRC is provided)
+        if ($EnableCRC -and $PSBoundParameters.ContainsKey('ExpectedCRC') -and -not ([string]::IsNullOrWhiteSpace($ExpectedCRC))) {
+            Write-Log -Message "Test-ExistingFile: Performing CRC check for '$FilePath'." -Level DEBUG
+            Initialize-CRC32Type # Ensure CRC32 type is loaded
+            $actualCRC = Get-CRC32 -InputFile $FilePath -ErrorAction SilentlyContinue
+            if ($null -eq $actualCRC) {
+                Write-Log -Message "Test-ExistingFile: Get-CRC32 returned null for '$FilePath'. CRC check failed." -Level WARN
+                return $false
+            }
+            if ($actualCRC.Trim().ToUpperInvariant() -ne $ExpectedCRC.Trim().ToUpperInvariant()) {
+                Write-Log -Message "Test-ExistingFile: CRC mismatch for '$FilePath'. Expected: '$ExpectedCRC', Actual: '$actualCRC'." -Level WARN
+                return $false
+            }
+            Write-Log -Message "Test-ExistingFile: CRC check PASSED for '$FilePath'." -Level DEBUG
+        } else {
+            Write-Log -Message "Test-ExistingFile: Skipping CRC check (EnableCRC is false or ExpectedCRC not provided)." -Level DEBUG
+        }
+
+        Write-Log -Message "Test-ExistingFile: All checks passed for '$FilePath'." -Level INFO
+        return $true
+
+    } catch {
+        Write-Log -Message "Test-ExistingFile: Error during validation of '$FilePath': $($_.Exception.Message)" -Level ERROR
+        return $false
+    } finally {
+        Exit-Function
+    }
+}
 
 # Ensure functions are available (though NestedModules in PSD1 is the primary mechanism)
-Export-ModuleMember -Function Get-ScriptSaveFolder, Get-ExecutableSignature, Format-TimeSpanFromSeconds, Convert-VersionString, Get-RedactedPassword, Initialize-CRC32Type, Get-CRC32, ConvertTo-Expression, Get-AppVersionFromRegistry # Added Get-AppVersionFromRegistry
+Export-ModuleMember -Function Get-ScriptSaveFolder, Get-ExecutableSignature, Format-TimeSpanFromSeconds, Convert-VersionString, Get-RedactedPassword, Initialize-CRC32Type, Get-CRC32, ConvertTo-Expression, Get-AppVersionFromRegistry, Get-InvocationTrace, Test-ExistingFile # Added Get-AppVersionFromRegistry and Test-ExistingFile
 # NOTE: Explicit Export-ModuleMember is now enabled to ensure functions are available for the manifest to re-export.

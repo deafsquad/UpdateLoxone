@@ -376,8 +376,23 @@ function Invoke-LoxoneDownload {
                         if ($job.State -eq 'Completed') {
                             Receive-Job -Job $job -ErrorAction SilentlyContinue 
                             Write-Log -Message "$($ActivityName): Invoke-WebRequest job completed successfully." -Level INFO
-                            $iwrSuccess = $true 
-                            try { Update-PersistentToast -StepName "$($ActivityName): Download Complete" -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Download Complete): $($_.Exception.Message)" }
+                            $iwrSuccess = $true
+                            # Ensure final toast shows 100%
+                            $toastParamsComplete = @{
+                                StepNumber         = $StepNumber
+                                TotalSteps         = $TotalSteps
+                                StepName           = "Downloads Complete" # Specific name for 100% logic in Toast module
+                                ProgressPercentage = 100 # Correct parameter for Update-PersistentToast
+                                DownloadFileName   = $downloadFileName
+                                DownloadNumber     = $DownloadNumber
+                                TotalDownloads     = $TotalDownloads
+                                CurrentWeight      = $CurrentWeight # This might need adjustment if download has its own weight contribution
+                                TotalWeight        = $TotalWeight
+                                IsInteractive      = $IsInteractive
+                                ErrorOccurred      = $false
+                                AnyUpdatePerformed = $AnyUpdatePerformed
+                            }
+                            try { Update-PersistentToast @toastParamsComplete } catch { Write-Log -Level Warn -Message "Failed to update toast (Download 100% Complete): $($_.Exception.Message)" }
                             Write-Progress -Activity $ActivityName -Completed
                         } elseif ($job.State -eq 'Failed') {
                             $jobError = $job.ChildJobs[0].Error 

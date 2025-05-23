@@ -38,22 +38,9 @@ NestedModules = @(
     '.\LoxoneUtils.Miniserver.psm1',
     '.\LoxoneUtils.RunAsUser.psm1',
     '.\LoxoneUtils.System.psm1',
-    '.\LoxoneUtils.UpdateCheck.psm1'
+    '.\LoxoneUtils.UpdateCheck.psm1',
+    '.\LoxoneUtils.WorkflowSteps.psm1'
 )
-
-# Scripts to dot-source on import. Functions/variables are directly added to the module scope.
-# ScriptsToProcess = @( # Reverted: Use NestedModules for .psm1 files
-#     '.\LoxoneUtils.Utility.psm1',
-#     '.\LoxoneUtils.Logging.psm1',
-#     '.\LoxoneUtils.Toast.psm1',
-#     '.\LoxoneUtils.Network.psm1',
-#     '.\LoxoneUtils.ErrorHandling.psm1',
-#     '.\LoxoneUtils.Installation.psm1',
-#     '.\LoxoneUtils.Miniserver.psm1',
-#     '.\LoxoneUtils.RunAsUser.psm1',
-#     '.\LoxoneUtils.System.psm1',
-#     '.\LoxoneUtils.UpdateCheck.psm1'
-# )
 # Functions to export from this module
 FunctionsToExport = @(
     # ErrorHandling
@@ -113,6 +100,8 @@ FunctionsToExport = @(
     'ConvertTo-Expression',
     'Get-RegistryValue',          # Added missing utility function
     'Format-StatusLine',          # Added missing utility function for status reporting
+    'Get-InvocationTrace',        # Added utility function
+    'Test-ExistingFile',          # Added utility function
     # UpdateCheck
     'Test-ExistingInstaller',         # Added
     'Test-UpdateNeeded',
@@ -122,7 +111,19 @@ FunctionsToExport = @(
     # Helper functions from UpdateCheck
     'New-LoxoneComponentStatusObject',
     'Get-UpdateStatusFromComparison',
-    'Invoke-MiniserverCheckLogic'
+    'Invoke-MiniserverCheckLogic',
+    # WorkflowSteps
+    'Initialize-ScriptWorkflow',
+    'Get-LoxoneUpdatePrerequisites',
+    'Get-StepWeight',
+    'Invoke-DownloadLoxoneConfig',
+    'Invoke-ExtractLoxoneConfig',
+    'Invoke-InstallLoxoneConfig',
+    'Invoke-DownloadLoxoneApp',
+    'Invoke-InstallLoxoneApp',
+    'Invoke-CheckMiniserverVersions',
+    'Invoke-UpdateMiniserversInBulk',
+    'Initialize-UpdatePipelineData'
 )
 # Cmdlets to export from this module
 CmdletsToExport = @() # Explicitly export no cmdlets

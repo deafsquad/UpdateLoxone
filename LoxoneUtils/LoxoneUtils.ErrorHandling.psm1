@@ -26,7 +26,10 @@ function Invoke-ScriptErrorHandling {
     Write-Log -Message "Full command line: ${fullCommandLine}" -Level ERROR
     Write-Log -Message "Local variables in scope:`n${localVars}" -Level ERROR
 
-    Update-PersistentToast -NewStatus "FAILED: $($ErrorRecord.Exception.Message) (Cmd: $command, Line: $lineNumber)"
+    $Global:PersistentToastData['StatusText'] = "FAILED: $($ErrorRecord.Exception.Message) (Cmd: $command, Line: $lineNumber)"
+    # Ensure all mandatory parameters for Update-PersistentToast are provided.
+    # AnyUpdatePerformed defaults to $false in the function, but explicit here for clarity.
+    Update-PersistentToast -IsInteractive $true -ErrorOccurred $true -AnyUpdatePerformed $false -CallingScriptIsInteractive $true -CallingScriptIsSelfInvoked $false
 
     # Log comprehensive error details
     Write-Log -Message "-------------------- SCRIPT ERROR DETAILS --------------------" -Level ERROR

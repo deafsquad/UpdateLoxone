@@ -249,35 +249,70 @@ function Invoke-LogFileRotation {
         # Rotation logic moved outside the size check - runs every time if file exists
         Write-Host "INFO: Log file exists. Rotating..." -ForegroundColor Cyan
         $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $archiveName = "$($logFileName -replace '\.[^.]+$','_')_$timestamp$([System.IO.Path]::GetExtension($logFileName))" # Insert timestamp before extension
+        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        # Use System.IO.Path for cleaner filename manipulation and ensure single underscore
+        $baseLogFileName = [System.IO.Path]::GetFileNameWithoutExtension($logFileName)
+        $logExtension = [System.IO.Path]::GetExtension($logFileName)
+        $archiveName = "${baseLogFileName}_${timestamp}${logExtension}"
         $archivePath = Join-Path -Path $logDir -ChildPath $archiveName
 
-        $retryCount = 0
-        $maxRetries = 3
-        $renameSuccess = $false
-        while ($retryCount -lt $maxRetries -and -not $renameSuccess) {
-            $retryCount++
-            # Corrected variable expansion
-            Write-Host "INFO: Attempt ${retryCount}: Renaming $logFileName > $archiveName" -ForegroundColor Cyan
-            try {
-                # Ensure file is closed before renaming - Add-Content/Out-File should do this, but maybe explicitly?
-                # No direct way to close Add-Content/Out-File handle easily. Relying on OS.
-                Rename-Item -LiteralPath $LogFilePath -NewName $archiveName -ErrorAction Stop
-                # Corrected variable expansion
-                Write-Host "INFO: Attempt ${retryCount}: Successfully renamed log file to '$archiveName'." -ForegroundColor Cyan
-                $renameSuccess = $true
-            } catch {
-                # Corrected variable expansion
-                Write-Warning "Invoke-LogFileRotation: Attempt ${retryCount}: Failed to rename log file. Error: $($_.Exception.Message). Retrying in 1 second..."
-                Start-Sleep -Seconds 1
+        $renameSuccess = $false # Initialize rename success flag
+
+        # Pre-check for existing recent archive to handle rapid re-execution
+        if (Test-Path -LiteralPath $archivePath) {
+            $existingArchive = Get-Item -LiteralPath $archivePath -ErrorAction SilentlyContinue
+            if ($existingArchive) {
+                $timeSinceCreation = (Get-Date) - $existingArchive.CreationTime
+                $timeSinceWrite = (Get-Date) - $existingArchive.LastWriteTime
+                
+                # If file was created or written very recently (e.g. < 5s), assume rotation happened.
+                if ($timeSinceCreation.TotalSeconds -lt 5 -or $timeSinceWrite.TotalSeconds -lt 5) {
+                    Write-Host "INFO: Target archive '$archiveName' already exists and was modified recently (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Assuming rotation already completed." -ForegroundColor Yellow
+                    Write-Log -Level INFO -Message "Log rotation for '$logFileName' to '$archiveName' appears to have already occurred recently. Skipping rename attempt."
+                    $renameSuccess = $true # Mark as "successful" as the desired state (rotated file) exists
+                } else {
+                    Write-Host "INFO: Target archive '$archiveName' already exists but is older (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Normal rename attempt will proceed." -ForegroundColor Cyan
+                }
+            }
+        }
+
+        if (-not $renameSuccess) { # Only attempt rename if pre-check didn't confirm recent rotation
+            $retryCount = 0
+            $maxRetries = 3
+            # $renameSuccess is already $false here
+            while ($retryCount -lt $maxRetries -and -not $renameSuccess) {
+                $retryCount++
+                Write-Host "INFO: Attempt ${retryCount}: Renaming '$logFileName' to '$archiveName'" -ForegroundColor Cyan
+                try {
+                    Rename-Item -LiteralPath $LogFilePath -NewName $archiveName -ErrorAction Stop
+                    Write-Host "INFO: Attempt ${retryCount}: Successfully renamed log file to '$archiveName'." -ForegroundColor Cyan
+                    $renameSuccess = $true
+                } catch {
+                    $errorMessage = $_.Exception.Message
+                    Write-Warning "Invoke-LogFileRotation: Attempt ${retryCount}: Failed to rename log file. Error: $errorMessage"
+                    # Specific check for "file already exists" which might occur if created between pre-check and now
+                    if ($errorMessage -match "Cannot create a file when that file already exists") {
+                        Write-Host "WARN: Rename failed because target '$archiveName' now exists. This might be due to concurrent rotation." -ForegroundColor Yellow
+                        # Potentially set $renameSuccess = $true here if we consider this a "handled" case,
+                        # but for now, let retries exhaust or succeed. The pre-check should catch most.
+                    }
+                    if ($retryCount -lt $maxRetries) {
+                        Write-Host "INFO: Retrying in 1 second..." -ForegroundColor DarkYellow
+                        Start-Sleep -Seconds 1
+                    }
+                }
             }
         }
 
         if (-not $renameSuccess) {
-             Write-Warning "Invoke-LogFileRotation: Failed to rotate log file '$logFileName' after $maxRetries attempts."
-             return $null # Return null if rename fails
+             Write-Warning "Invoke-LogFileRotation: Failed to rotate log file '$logFileName' to '$archiveName' after $maxRetries attempts."
+             if (-not (Test-Path -LiteralPath $LogFilePath) -and (Test-Path -LiteralPath $archivePath)) {
+                 Write-Log -Level INFO -Message "Original log '$LogFilePath' is gone and archive '$archivePath' exists. Rotation likely succeeded despite earlier errors."
+             } else {
+                Write-Log -Level ERROR -Message "Rotation of '$LogFilePath' to '$archivePath' definitively failed."
+             }
+             return $null # Return null if rename fails or couldn't be confirmed
         }
-
         # --- Cleanup Old Archives ---
         Write-Host "INFO: Starting cleanup of old archives in '$logDir' (Max: $MaxArchiveCount)." -ForegroundColor Cyan
         try {

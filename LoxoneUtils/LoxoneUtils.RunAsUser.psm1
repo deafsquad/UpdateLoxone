@@ -1379,7 +1379,7 @@ function Invoke-AsCurrentUser {
     } finally {
         # Clean up temp script file if it was created
         if ($tempScriptPath -and (Test-Path -LiteralPath $tempScriptPath -PathType Leaf)) {
-            Write-Log -Level DEBUG -Message "Removing temp script file: $tempScriptPath"
+            # Write-Log -Level DEBUG -Message "Removing temp script file: $tempScriptPath" # Commented out to prevent potential redundant log rotation for UpdateLoxone_SYSTEM.log if already handled by the calling SYSTEM context script.
             Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue
         }
     }

@@ -106,22 +106,76 @@ function Update-PersistentToast {
             # Context Parameters (Used for logging/potential future logic)
             [Parameter(Mandatory=$true)][bool]$IsInteractive, # Retaining for logging within this function
             [Parameter(Mandatory=$true)][bool]$ErrorOccurred,
-            [Parameter(Mandatory=$true)][bool]$AnyUpdatePerformed,
+            [Parameter(Mandatory=$true)][bool]$AnyUpdatePerformed = $false,
             # Parameters to pass context from the calling script
             [Parameter(Mandatory=$false)][bool]$CallingScriptIsInteractive = $false,
             [Parameter(Mandatory=$false)][bool]$CallingScriptIsSelfInvoked = $false
         )
     # Add a small delay at the beginning to see if it helps with update visibility
-    Start-Sleep -Milliseconds 500
-    $logMsg = "Updating persistent toast."
+    Start-Sleep -Milliseconds 50 # Reduced sleep duration
+    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+# Detailed Parameter Logging
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name)) --- Update-PersistentToast: RECEIVED PARAMETER VALUES ---"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   StepNumber: $($PSBoundParameters['StepNumber']) (Bound: $($PSBoundParameters.ContainsKey('StepNumber')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   TotalSteps: $($PSBoundParameters['TotalSteps']) (Bound: $($PSBoundParameters.ContainsKey('TotalSteps')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   StepName: '$($PSBoundParameters['StepName'])' (Bound: $($PSBoundParameters.ContainsKey('StepName')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadFileName: '$($PSBoundParameters['DownloadFileName'])' (Bound: $($PSBoundParameters.ContainsKey('DownloadFileName')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadNumber: $($PSBoundParameters['DownloadNumber']) (Bound: $($PSBoundParameters.ContainsKey('DownloadNumber')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   TotalDownloads: $($PSBoundParameters['TotalDownloads']) (Bound: $($PSBoundParameters.ContainsKey('TotalDownloads')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   ProgressPercentage: $($PSBoundParameters['ProgressPercentage']) (Bound: $($PSBoundParameters.ContainsKey('ProgressPercentage')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadSpeed: '$($PSBoundParameters['DownloadSpeed'])' (Bound: $($PSBoundParameters.ContainsKey('DownloadSpeed')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadRemainingTime: '$($PSBoundParameters['DownloadRemainingTime'])' (Bound: $($PSBoundParameters.ContainsKey('DownloadRemainingTime')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadSizeProgress: '$($PSBoundParameters['DownloadSizeProgress'])' (Bound: $($PSBoundParameters.ContainsKey('DownloadSizeProgress')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   CurrentWeight: $($PSBoundParameters['CurrentWeight']) (Bound: $($PSBoundParameters.ContainsKey('CurrentWeight')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   TotalWeight: $($PSBoundParameters['TotalWeight']) (Bound: $($PSBoundParameters.ContainsKey('TotalWeight')))"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   IsInteractive (param): $($IsInteractive)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   ErrorOccurred (param): $($ErrorOccurred)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   AnyUpdatePerformed (param): $($AnyUpdatePerformed)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   CallingScriptIsInteractive (param): $($CallingScriptIsInteractive)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   CallingScriptIsSelfInvoked (param): $($CallingScriptIsSelfInvoked)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name)) --- Update-PersistentToast: GLOBAL STATE (ON ENTRY) ---"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   Global:PersistentToastInitialized (on entry): $($Global:PersistentToastInitialized)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   Global:PersistentToastId (on entry): '$($Global:PersistentToastId)'"
+    Write-Log -Level DEBUG -Message ("($($MyInvocation.MyCommand.Name))   Global:PersistentToastData (on entry, JSON): " + ($Global:PersistentToastData | ConvertTo-Json -Depth 5 -Compress))
+# Detailed Parameter Logging
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name)) --- Update-PersistentToast: PARAMETER VALUES ---"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   StepNumber: $($StepNumber)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   TotalSteps: $($TotalSteps)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   StepName: '$($StepName)'"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadFileName: '$($DownloadFileName)'"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadNumber: $($DownloadNumber)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   TotalDownloads: $($TotalDownloads)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   ProgressPercentage: $($ProgressPercentage)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadSpeed: '$($DownloadSpeed)'"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadRemainingTime: '$($DownloadRemainingTime)'"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   DownloadSizeProgress: '$($DownloadSizeProgress)'"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   CurrentWeight: $($CurrentWeight)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   TotalWeight: $($TotalWeight)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   IsInteractive (param): $($IsInteractive)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   ErrorOccurred (param): $($ErrorOccurred)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   AnyUpdatePerformed (param): $($AnyUpdatePerformed)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   CallingScriptIsInteractive (param): $($CallingScriptIsInteractive)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   CallingScriptIsSelfInvoked (param): $($CallingScriptIsSelfInvoked)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name)) --- Update-PersistentToast: GLOBAL STATE (BEFORE UPDATE) ---"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   Global:PersistentToastInitialized: $($Global:PersistentToastInitialized)"
+    Write-Log -Level DEBUG -Message "($($MyInvocation.MyCommand.Name))   Global:PersistentToastId: '$($Global:PersistentToastId)'"
+    Write-Log -Level DEBUG -Message ("($($MyInvocation.MyCommand.Name))   Global:PersistentToastData (JSON): " + ($Global:PersistentToastData | ConvertTo-Json -Depth 5 -Compress))
+    Write-Log -Level DEBUG -Message "Update-PersistentToast CALLED. IsInteractive: $IsInteractive, ErrorOccurred: $ErrorOccurred, AnyUpdatePerformed: $AnyUpdatePerformed, CallingScriptIsInteractive: $CallingScriptIsInteractive, CallingScriptIsSelfInvoked: $CallingScriptIsSelfInvoked"
+    Write-Log -Level DEBUG -Message ("Update-PersistentToast PARAMS: " + ($PSBoundParameters | Out-String))
+    Write-Log -Level DEBUG -Message ("Update-PersistentToast Initial Global:PersistentToastInitialized: $Global:PersistentToastInitialized")
+    Write-Log -Level DEBUG -Message ("Update-PersistentToast Initial Global:PersistentToastData: " + ($Global:PersistentToastData | ConvertTo-Json -Depth 3 -Compress))
+
+
+    $logMsg = "Updating persistent toast." # Original log message construction can be kept if desired or integrated
     if ($PSBoundParameters.ContainsKey('StepName')) { $logMsg += " Step: '$StepName' ($StepNumber/$TotalSteps)" }
     if ($PSBoundParameters.ContainsKey('DownloadFileName')) { $logMsg += " | Download: '$DownloadFileName' ($DownloadNumber/$TotalDownloads)" }
     if ($PSBoundParameters.ContainsKey('ProgressPercentage')) { $logMsg += " | Download Progress: $ProgressPercentage%" }
     if ($PSBoundParameters.ContainsKey('CurrentWeight')) { $logMsg += " | Overall Weight: $CurrentWeight/$TotalWeight" }
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    # Write-Log -Level DEBUG -Message $logMsg # Can log this constructed message too
 
     try {
         # --- Update Global Data Bindings ---
+        Write-Log -Level DEBUG -Message "Update-PersistentToast: Updating global data bindings..."
         $baseStatusText = ""
         if ($PSBoundParameters.ContainsKey('StepNumber') -and $PSBoundParameters.ContainsKey('TotalSteps') -and $PSBoundParameters.ContainsKey('StepName')) {
             $Global:PersistentToastData['StepNumber'] = $StepNumber
@@ -182,10 +236,13 @@ function Update-PersistentToast {
             Write-Log -Level Debug -Message "Update-PersistentToast: Deferring initial toast creation due to non-interactive self-invoked context."
         }
 
+        Write-Log -Level DEBUG -Message "Update-PersistentToast: Before Create/Update decision. Global:PersistentToastInitialized = $Global:PersistentToastInitialized, shouldDeferInitialToast = $shouldDeferInitialToast"
+
         if (-not $Global:PersistentToastInitialized -and -not $shouldDeferInitialToast) {
             # --- Create Toast on First Call using New-BurntToastNotification ---
-            Write-Log -Level Debug -Message "Persistent toast not initialized (and not deferred). Creating with New-BurntToastNotification."
+            Write-Log -Level DEBUG -Message "Persistent toast not initialized (and not deferred). Attempting to CREATE with New-BurntToastNotification."
             try {
+                Write-Log -Level DEBUG -Message ("Update-PersistentToast CREATE: Current Global:PersistentToastData before New-BTProgressBar: " + ($Global:PersistentToastData | ConvertTo-Json -Depth 3 -Compress))
                 # Define progress bars using the keys from the data binding hashtable
                 $localProgressBar = New-BTProgressBar -Status "ProgressBarStatus" -Value "ProgressBarValue" -Title "Task Progress" -ErrorAction SilentlyContinue
                 $localOverallProgressBar = New-BTProgressBar -Status "OverallProgressStatus" -Value "OverallProgressValue" -Title "Overall Progress" -ErrorAction SilentlyContinue
@@ -207,20 +264,24 @@ function Update-PersistentToast {
                 # Safely log parameters
                 $newToastParamsString = $NewToastParams | Format-List | Out-String
                 if ($DebugPreference -ne 'SilentlyContinue') { Write-Log -Level Info -Message "NewToastParams BEFORE New-BurntToastNotification call:`n$newToastParamsString" }
-
+                Write-Log -Level DEBUG -Message ("Update-PersistentToast CREATE: Params for New-BurntToastNotification: " + ($NewToastParams | Out-String))
+                Write-Log -Level DEBUG -Message "Update-PersistentToast CREATE: State before New-BurntToastNotification: PersistentToastInitialized = $Global:PersistentToastInitialized"
+                Write-Log -Level DEBUG -Message ("Update-PersistentToast CREATE: State before New-BurntToastNotification: PersistentToastData (JSON) = " + ($Global:PersistentToastData | ConvertTo-Json -Depth 3 -Compress))
                 New-BurntToastNotification @NewToastParams
                 $Global:PersistentToastInitialized = $true # Set flag AFTER successful creation
                 Write-Log -Level INFO -Message "Persistent toast created successfully via New-BurntToastNotification (AppId used: $(if ($NewToastParams.ContainsKey('AppId')) {$NewToastParams['AppId']} else {'Default'}))."
+                Write-Log -Level DEBUG -Message ("Update-PersistentToast CREATE SUCCEEDED. Global:PersistentToastInitialized is now: $Global:PersistentToastInitialized")
 
             } catch { # Catch ANY error during creation
                 Write-Log -Level Error -Message "Error creating persistent toast on first update call: ($($_ | Out-String))"
                 $Global:PersistentToastInitialized = $false # Reset flag on failure
+                Write-Log -Level DEBUG -Message ("Update-PersistentToast CREATE FAILED. Global:PersistentToastInitialized is now: $Global:PersistentToastInitialized")
             }
         } # <-- Closing brace for 'if (-not $Global:PersistentToastInitialized)'
         else {
             # --- Update Existing Toast using Update-BTNotification (Only if dot-sourced) ---
             # Use $script:IsInteractiveRun from the calling script scope as the reliable indicator - Condition removed for unconditional update
-            Write-Log -Level Debug -Message "Persistent toast initialized. Attempting update via Update-BTNotification with DataBinding."
+            Write-Log -Level Debug -Message "Persistent toast already initialized or creation deferred. Attempting to UPDATE via Update-BTNotification with DataBinding."
             try {
                 $UpdateParams = @{
                     UniqueIdentifier = $Global:PersistentToastId
@@ -234,17 +295,23 @@ function Update-PersistentToast {
                 Write-Log -Level Debug -Message "DataBinding Hashtable (JSON) BEFORE Update-BTNotification call:`n$dataBindingJson"
                 $updateParamsString = $UpdateParams | Format-List | Out-String
                 if ($DebugPreference -ne 'SilentlyContinue') { Write-Log -Level Info -Message "UpdateParams BEFORE Update-BTNotification call:`n$updateParamsString" }
-
+                Write-Log -Level DEBUG -Message ("Update-PersistentToast UPDATE: Params for Update-BTNotification: " + ($UpdateParams | Out-String))
+                Write-Log -Level DEBUG -Message "Update-PersistentToast UPDATE: State before Update-BTNotification: PersistentToastInitialized = $Global:PersistentToastInitialized"
+                # PersistentToastData is already logged as JSON at line 247 before this call, which is sufficient.
                 Update-BTNotification @UpdateParams
                 Write-Log -Level INFO -Message "Persistent toast updated successfully via Update-BTNotification (AppId used: $(if ($UpdateParams.ContainsKey('AppId')) {$UpdateParams['AppId']} else {'Default'}))."
+                Write-Log -Level DEBUG -Message ("Update-PersistentToast UPDATE SUCCEEDED.")
             } catch { # Catch for inner try
                  Write-Log -Level Error -Message "Error updating persistent toast via Update-BTNotification: ($($_ | Out-String))"
+                 Write-Log -Level DEBUG -Message ("Update-PersistentToast UPDATE FAILED.")
             }
         } # End else block for if(-not $Global:PersistentToastInitialized)
 
     } catch { # Catch block for main try
         Write-Log -Level Error -Message "An unexpected error occurred during persistent toast update/creation logic: ($($_ | Out-String))"
+        Write-Log -Level DEBUG -Message ("Update-PersistentToast: Main try-catch caught error. Global:PersistentToastInitialized before Exit-Function: $Global:PersistentToastInitialized")
     } finally { # Finally block for main try
+        Write-Log -Level DEBUG -Message ("Update-PersistentToast: In finally block. Global:PersistentToastInitialized before Exit-Function: $Global:PersistentToastInitialized")
         Exit-Function
     }
 } # Closing brace for the Update-PersistentToast function
