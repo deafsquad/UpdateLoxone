@@ -9,27 +9,26 @@ if (-not (Test-Path variable:Global:PersistentToastId)) {
 if (-not (Test-Path variable:Global:PersistentToastInitialized)) {
     $Global:PersistentToastInitialized = $false
 }
-if (-not (Test-Path variable:Global:PersistentToastData)) {
-    # Initialize with expected keys for data binding
-    $Global:PersistentToastData = [ordered]@{
-        StatusText            = "Initializing..."
-        ProgressBarStatus     = "Download: -"
-        ProgressBarValue      = 0.0
-        OverallProgressStatus = "Overall: 0%"
-        OverallProgressValue  = 0.0
-        StepNumber            = 0
-        TotalSteps            = 1
-        StepName              = "Initializing..."
-        DownloadFileName      = ""
-        DownloadNumber        = 0
-        TotalDownloads        = 0
-        CurrentWeight         = 0
-        TotalWeight           = 1
-        # Keys for multi-line details (can be empty strings)
-        DownloadSpeedLine     = ""
-        DownloadTimeLine      = ""
-        DownloadSizeLine      = ""
-    }
+# Initialize with expected keys for data binding
+# Unconditionally initialize to ensure fresh state per module load in a session
+$Global:PersistentToastData = [ordered]@{
+    StatusText            = "Initializing..."
+    ProgressBarStatus     = "Download: -"
+    ProgressBarValue      = 0.0
+    OverallProgressStatus = "Overall: 0%"
+    OverallProgressValue  = 0.0
+    StepNumber            = 0
+    TotalSteps            = 1
+    StepName              = "Initializing..."
+    DownloadFileName      = ""
+    DownloadNumber        = 0
+    TotalDownloads        = 0
+    CurrentWeight         = 0
+    TotalWeight           = 1
+    # Keys for multi-line details (can be empty strings)
+    DownloadSpeedLine     = ""
+    DownloadTimeLine      = ""
+    DownloadSizeLine      = ""
 }
 #endregion Global Variables
 
@@ -231,16 +230,23 @@ function Update-PersistentToast {
         # --- Always attempt Create or Update ---
         # Defer initial toast creation for non-interactive self-invoked runs until an actual update is confirmed in the main script
         $shouldDeferInitialToast = $false
-        if (-not $CallingScriptIsInteractive -and $CallingScriptIsSelfInvoked) {
-            $shouldDeferInitialToast = $true
-            Write-Log -Level Debug -Message "Update-PersistentToast: Deferring initial toast creation due to non-interactive self-invoked context."
+        # If the calling script identifies itself as a self-invoked (scheduled) run,
+        # then this function should defer creating an initial toast if one isn't already initialized.
+        # The main script's logic is responsible for the very first initialization if appropriate for that context.
+        if ($CallingScriptIsSelfInvoked) {
+            $shouldDeferInitialToast = $true # Defer if self-invoked, regardless of $CallingScriptIsInteractive here
+            Write-Log -Level Debug -Message "Update-PersistentToast: Potential deferral: CallingScriptIsSelfInvoked is TRUE. shouldDeferInitialToast set to TRUE."
+        } else {
+            Write-Log -Level Debug -Message "Update-PersistentToast: Potential deferral: CallingScriptIsSelfInvoked is FALSE. shouldDeferInitialToast remains FALSE."
         }
 
         Write-Log -Level DEBUG -Message "Update-PersistentToast: Before Create/Update decision. Global:PersistentToastInitialized = $Global:PersistentToastInitialized, shouldDeferInitialToast = $shouldDeferInitialToast"
 
+        # Create toast only if not already initialized AND (it's not a deferred scenario OR it is deferred but something else already initialized it)
+        # The main condition is: if not initialized AND we are NOT in a scenario that should defer.
         if (-not $Global:PersistentToastInitialized -and -not $shouldDeferInitialToast) {
             # --- Create Toast on First Call using New-BurntToastNotification ---
-            Write-Log -Level DEBUG -Message "Persistent toast not initialized (and not deferred). Attempting to CREATE with New-BurntToastNotification."
+            Write-Log -Level DEBUG -Message "Persistent toast not initialized AND not deferred. Attempting to CREATE with New-BurntToastNotification."
             try {
                 Write-Log -Level DEBUG -Message ("Update-PersistentToast CREATE: Current Global:PersistentToastData before New-BTProgressBar: " + ($Global:PersistentToastData | ConvertTo-Json -Depth 3 -Compress))
                 # Define progress bars using the keys from the data binding hashtable
