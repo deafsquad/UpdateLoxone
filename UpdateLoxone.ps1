@@ -507,7 +507,7 @@ $scriptGlobalState.totalDownloads = $script:totalDownloads
 $steps = @(
     @{
         Name      = "Download Loxone Config"
-        ShouldRun = { ($UpdateTargetsInfo | Where-Object {$_.Type -eq "Config" -and $_.UpdateNeeded}).Count -gt 0 }
+        ShouldRun = { param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg) ($UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Config" -and $_.UpdateNeeded}).Count -gt 0 }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef)
             $cfgTarget = $targets | Where-Object {$_.Type -eq "Config"} | Select-Object -First 1
@@ -517,7 +517,7 @@ $steps = @(
     },
     @{
         Name      = "Extract Loxone Config"
-        ShouldRun = { ($UpdateTargetsInfo | Where-Object {$_.Type -eq "Config" -and $_.UpdateNeeded -and $_.Status -ne "UpdateFailed (Download)"}).Count -gt 0 } 
+        ShouldRun = { param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg) ($UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Config" -and $_.UpdateNeeded -and $_.Status -ne "UpdateFailed (Download)"}).Count -gt 0 }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef)
             $globalStateRef.Value.currentStep++
