@@ -228,15 +228,14 @@ function Invoke-LogFileRotation {
 
     $logFileName = Split-Path -Path $LogFilePath -Leaf
     $logDir = Split-Path -Path $LogFilePath -Parent
-    # Use Write-Host for initial message to avoid log lock issues during rotation start
-    Write-Host "INFO: Starting log rotation check for '$logFileName'." -ForegroundColor Cyan
+    Write-Log -Level INFO -Message "Starting log rotation check for '$logFileName'."
 
     $mutexAcquired = $false
     try {
         # Acquire Mutex at the beginning
         $mutexAcquired = $script:LogMutex.WaitOne(10000) # Wait longer for rotation
         if (-not $mutexAcquired) {
-            Write-Warning "Invoke-LogFileRotation: Could not acquire mutex. Skipping rotation."
+            Write-Log -Level WARN -Message "Invoke-LogFileRotation: Could not acquire mutex. Skipping rotation for '$logFileName'."
             return $null # Return null if mutex fails
         }
 
@@ -247,13 +246,12 @@ function Invoke-LogFileRotation {
         }
 
         # Rotation logic moved outside the size check - runs every time if file exists
-        Write-Host "INFO: Log file exists. Rotating..." -ForegroundColor Cyan
-        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-        # Use System.IO.Path for cleaner filename manipulation and ensure single underscore
-        $baseLogFileName = [System.IO.Path]::GetFileNameWithoutExtension($logFileName)
+        Write-Log -Level INFO -Message "Log file '$logFileName' exists. Rotating..."
+        $rotationTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss' # Renamed for clarity
+        
+        $baseLogFileNameForArchive = [System.IO.Path]::GetFileNameWithoutExtension($logFileName) # Base name of the current log for creating the archive name
         $logExtension = [System.IO.Path]::GetExtension($logFileName)
-        $archiveName = "${baseLogFileName}_${timestamp}${logExtension}"
+        $archiveName = "${baseLogFileNameForArchive}_${rotationTimestamp}${logExtension}" # e.g., UpdateLoxone_SYSTEM_20230101_120000_20230101_120500.log
         $archivePath = Join-Path -Path $logDir -ChildPath $archiveName
 
         $renameSuccess = $false # Initialize rename success flag
@@ -265,39 +263,33 @@ function Invoke-LogFileRotation {
                 $timeSinceCreation = (Get-Date) - $existingArchive.CreationTime
                 $timeSinceWrite = (Get-Date) - $existingArchive.LastWriteTime
                 
-                # If file was created or written very recently (e.g. < 5s), assume rotation happened.
                 if ($timeSinceCreation.TotalSeconds -lt 5 -or $timeSinceWrite.TotalSeconds -lt 5) {
-                    Write-Host "INFO: Target archive '$archiveName' already exists and was modified recently (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Assuming rotation already completed." -ForegroundColor Yellow
-                    Write-Log -Level INFO -Message "Log rotation for '$logFileName' to '$archiveName' appears to have already occurred recently. Skipping rename attempt."
-                    $renameSuccess = $true # Mark as "successful" as the desired state (rotated file) exists
+                    Write-Log -Level INFO -Message "Target archive '$archiveName' already exists and was modified recently (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Assuming rotation for '$logFileName' already completed."
+                    $renameSuccess = $true
                 } else {
-                    Write-Host "INFO: Target archive '$archiveName' already exists but is older (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Normal rename attempt will proceed." -ForegroundColor Cyan
+                    Write-Log -Level INFO -Message "Target archive '$archiveName' already exists but is older (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Normal rename attempt for '$logFileName' will proceed."
                 }
             }
         }
 
-        if (-not $renameSuccess) { # Only attempt rename if pre-check didn't confirm recent rotation
+        if (-not $renameSuccess) {
             $retryCount = 0
             $maxRetries = 3
-            # $renameSuccess is already $false here
             while ($retryCount -lt $maxRetries -and -not $renameSuccess) {
                 $retryCount++
-                Write-Host "INFO: Attempt ${retryCount}: Renaming '$logFileName' to '$archiveName'" -ForegroundColor Cyan
+                Write-Log -Level INFO -Message "Attempt ${retryCount}: Renaming '$logFileName' to '$archiveName'"
                 try {
                     Rename-Item -LiteralPath $LogFilePath -NewName $archiveName -ErrorAction Stop
-                    Write-Host "INFO: Attempt ${retryCount}: Successfully renamed log file to '$archiveName'." -ForegroundColor Cyan
+                    Write-Log -Level INFO -Message "Attempt ${retryCount}: Successfully renamed log file '$logFileName' to '$archiveName'."
                     $renameSuccess = $true
                 } catch {
                     $errorMessage = $_.Exception.Message
-                    Write-Warning "Invoke-LogFileRotation: Attempt ${retryCount}: Failed to rename log file. Error: $errorMessage"
-                    # Specific check for "file already exists" which might occur if created between pre-check and now
+                    Write-Log -Level WARN -Message "Invoke-LogFileRotation: Attempt ${retryCount}: Failed to rename log file '$logFileName'. Error: $errorMessage"
                     if ($errorMessage -match "Cannot create a file when that file already exists") {
-                        Write-Host "WARN: Rename failed because target '$archiveName' now exists. This might be due to concurrent rotation." -ForegroundColor Yellow
-                        # Potentially set $renameSuccess = $true here if we consider this a "handled" case,
-                        # but for now, let retries exhaust or succeed. The pre-check should catch most.
+                        Write-Log -Level WARN -Message "Rename of '$logFileName' failed because target '$archiveName' now exists. This might be due to concurrent rotation."
                     }
                     if ($retryCount -lt $maxRetries) {
-                        Write-Host "INFO: Retrying in 1 second..." -ForegroundColor DarkYellow
+                        Write-Log -Level INFO -Message "Retrying rename of '$logFileName' in 1 second..."
                         Start-Sleep -Seconds 1
                     }
                 }
@@ -305,59 +297,81 @@ function Invoke-LogFileRotation {
         }
 
         if (-not $renameSuccess) {
-             Write-Warning "Invoke-LogFileRotation: Failed to rotate log file '$logFileName' to '$archiveName' after $maxRetries attempts."
+             Write-Log -Level ERROR -Message "Invoke-LogFileRotation: Failed to rotate log file '$logFileName' to '$archiveName' after $maxRetries attempts."
              if (-not (Test-Path -LiteralPath $LogFilePath) -and (Test-Path -LiteralPath $archivePath)) {
-                 Write-Log -Level INFO -Message "Original log '$LogFilePath' is gone and archive '$archivePath' exists. Rotation likely succeeded despite earlier errors."
+                 Write-Log -Level INFO -Message "Original log '$LogFilePath' is gone and archive '$archivePath' exists. Rotation for '$logFileName' likely succeeded despite earlier errors."
              } else {
                 Write-Log -Level ERROR -Message "Rotation of '$LogFilePath' to '$archivePath' definitively failed."
              }
-             return $null # Return null if rename fails or couldn't be confirmed
+             return $null
         }
+        
         # --- Cleanup Old Archives ---
-        Write-Host "INFO: Starting cleanup of old archives in '$logDir' (Max: $MaxArchiveCount)." -ForegroundColor Cyan
+        Write-Log -Level INFO -Message "Starting cleanup of old archives in '$logDir' for series related to '$logFileName' (Max kept: $MaxArchiveCount)."
         try {
-            $baseName = $logFileName -replace '\.[^.]+$','_' # Base name for archive matching
-            $extension = [System.IO.Path]::GetExtension($logFileName)
-            # Get archives, sort by creation time (oldest first), skip the newest $MaxArchiveCount
-            $archivesToDelete = Get-ChildItem -Path $logDir -Filter "$baseName*$extension" |
-                                Where-Object { $_.Name -match "$baseName\d{8}_\d{6}$extension" } | # Ensure it matches the timestamp pattern
+            # Determine the series prefix for finding related archives
+            $seriesPrefixForCleanup = ""
+            if ($logFileName -match "^(UpdateLoxone_SYSTEM_).*") {
+                $seriesPrefixForCleanup = $matches[1] # e.g., "UpdateLoxone_SYSTEM_"
+            } elseif ($logFileName -match "^(UpdateLoxone_USER_[^_]+_).*") { # For UpdateLoxone_USER_Username_datetime.log
+                $seriesPrefixForCleanup = $matches[1] # e.g., "UpdateLoxone_USER_Username_"
+            } elseif ($logFileName -match "^(UpdateLoxone_USER_).*") { # For UpdateLoxone_USER_datetime.log
+                $seriesPrefixForCleanup = $matches[1] # e.g., "UpdateLoxone_USER_"
+            } elseif ($logFileName -match "^(UpdateLoxone_).*") { # For UpdateLoxone_datetime.log or UpdateLoxone.log (if it becomes UpdateLoxone_archiveTS.log)
+                $seriesPrefixForCleanup = $matches[1] # e.g., "UpdateLoxone_"
+            } else {
+                # Fallback: use the part before the first underscore, or the whole name if no underscore
+                $seriesPrefixForCleanup = ($logFileName.Split('_')[0])
+                if (-not $seriesPrefixForCleanup.EndsWith("_")) { $seriesPrefixForCleanup += "_" }
+                Write-Log -Level WARN -Message "Could not determine specific series prefix for '$logFileName', using fallback: '$seriesPrefixForCleanup'"
+            }
+
+            # Regex to match archived files: SeriesPrefix + (OriginalTimestamp_)? + ArchiveTimestamp + Extension
+            # OrigTS is \d{8}_\d{6}_ (optional)
+            # ArchiveTS is \d{8}_\d{6}
+            $escapedSeriesPrefix = [regex]::Escape($seriesPrefixForCleanup)
+            $escapedLogExtension = [regex]::Escape($logExtension)
+            $archivePatternRegex = "^${escapedSeriesPrefix}(\d{8}_\d{6}_)?\d{8}_\d{6}${escapedLogExtension}$"
+
+            Write-Log -Level DEBUG -Message "Cleanup: seriesPrefixForCleanup='$seriesPrefixForCleanup', archivePatternRegex='$archivePatternRegex', logExtension='$logExtension'"
+
+            $allPotentialArchives = Get-ChildItem -Path $logDir -Filter "${seriesPrefixForCleanup}*${logExtension}" -File -ErrorAction SilentlyContinue
+            Write-Log -Level DEBUG -Message "Found $($allPotentialArchives.Count) potential archives with filter '${seriesPrefixForCleanup}*${logExtension}'."
+
+            $archivesToDelete = $allPotentialArchives |
+                                Where-Object { $_.Name -match $archivePatternRegex } |
                                 Sort-Object CreationTime |
                                 Select-Object -SkipLast $MaxArchiveCount
+            
+            Write-Log -Level DEBUG -Message "After regex filter and sorting, $($archivesToDelete.Count) archives selected for deletion."
 
             $deletedCount = 0
             foreach ($archive in $archivesToDelete) {
-                Write-Log -Level DEBUG -Message "Deleting old archive: $($archive.Name)"
+                Write-Log -Level DEBUG -Message "Deleting old archive: $($archive.FullName)"
                 try {
                     Remove-Item -LiteralPath $archive.FullName -Force -ErrorAction Stop
                     $deletedCount++
                 } catch {
-                    Write-Warning "Invoke-LogFileRotation: Error deleting archive '$($archive.Name)': $($_.Exception.Message)"
+                    Write-Log -Level WARN -Message "Invoke-LogFileRotation: Error deleting archive '$($archive.FullName)': $($_.Exception.Message)"
                 }
             }
-            Write-Host "INFO: Log rotation and cleanup finished for '$logFileName'." -ForegroundColor Cyan
-            if ($deletedCount -gt 0) {
-                Write-Host "INFO: $deletedCount deleted [$($archivesToDelete.Name -join ';')]" -ForegroundColor Cyan
-            }
+            Write-Log -Level INFO -Message "Log rotation and cleanup finished for series related to '$logFileName'. $deletedCount archive(s) deleted."
         } catch {
-             Write-Warning "Invoke-LogFileRotation: Error during archive cleanup: $($_.Exception.Message)"
+             Write-Log -Level WARN -Message "Invoke-LogFileRotation: Error during archive cleanup for '$logFileName': $($_.Exception.Message)"
         }
         # --- End Cleanup ---
-        # Removed the 'else' block for size check
-
-        # Return the path of the created archive
-        Write-Log -Level DEBUG -Message "Invoke-LogFileRotation returning archive path: $archivePath"
+        
+        Write-Log -Level DEBUG -Message "Invoke-LogFileRotation for '$logFileName' returning archive path: $archivePath"
         return $archivePath
 
     } catch {
-        # Use Write-Host/Warning here as Write-Log might be the source of the problem
-        Write-Warning "Invoke-LogFileRotation: An error occurred during log rotation: $($_.Exception.Message)"
+        Write-Log -Level ERROR -Message "Invoke-LogFileRotation: An unhandled error occurred during log rotation for '$LogFilePath': $($_.Exception.Message)"
+        Write-Log -Level DEBUG -Message "Full error record for Invoke-LogFileRotation: ($($_ | Out-String))"
     } finally {
-        # Release Mutex at the very end
         if ($mutexAcquired) {
             $script:LogMutex.ReleaseMutex()
-            Write-Log -Level DEBUG -Message "Log rotation mutex released."
+            Write-Log -Level DEBUG -Message "Log rotation mutex released for '$logFileName'."
         }
-        # Do not call Exit-Function here
     }
 }
 

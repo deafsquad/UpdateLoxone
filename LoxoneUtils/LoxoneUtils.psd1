@@ -123,7 +123,8 @@ FunctionsToExport = @(
     'Invoke-InstallLoxoneApp',
     'Invoke-CheckMiniserverVersions',
     'Invoke-UpdateMiniserversInBulk',
-    'Initialize-UpdatePipelineData'
+    'Initialize-UpdatePipelineData',
+    'Test-PipelineStepShouldRun'
 )
 # Cmdlets to export from this module
 CmdletsToExport = @() # Explicitly export no cmdlets

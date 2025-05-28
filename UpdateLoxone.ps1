@@ -392,9 +392,12 @@ if (-not $anySoftwareUpdateNeeded -and -not $anyMSPotentiallyNeedingUpdate -and 
     exit 0
 }
 
-if ($anySoftwareUpdateNeeded -or $anyMSPotentiallyNeedingUpdate) {
-    Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) ENTERING initial toast display block. anySoftwareUpdateNeeded: $anySoftwareUpdateNeeded, anyMSPotentiallyNeedingUpdate: $anyMSPotentiallyNeedingUpdate, IsRunningAsSystem: $($scriptContext.IsRunningAsSystem)"
-    if (-not $scriptContext.IsRunningAsSystem) { 
+if (
+    ($scriptContext.IsSelfInvokedForUpdateCheck -and $anySoftwareUpdateNeeded) -or # For self-invoked (scheduled task), only if software update is needed
+    (-not $scriptContext.IsSelfInvokedForUpdateCheck -and ($anySoftwareUpdateNeeded -or $anyMSPotentiallyNeedingUpdate)) # For non-self-invoked (e.g. direct run), if any update or MS check is pending
+) {
+    Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) ENTERING initial toast display block. Conditions met: IsSelfInvokedForUpdateCheck=$($scriptContext.IsSelfInvokedForUpdateCheck), anySoftwareUpdateNeeded=$anySoftwareUpdateNeeded, anyMSPotentiallyNeedingUpdate=$anyMSPotentiallyNeedingUpdate, IsRunningAsSystem=$($scriptContext.IsRunningAsSystem)"
+    if (-not $scriptContext.IsRunningAsSystem) {
         Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) Not running as SYSTEM. Proceeding with Initialize-LoxoneToastAppId and initial toast."
         Initialize-LoxoneToastAppId 
         Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) Initialize-LoxoneToastAppId CALLED. ResolvedToastAppId: $($script:ResolvedToastAppId)"
@@ -509,14 +512,10 @@ $steps = @(
         Name      = "Download Loxone Config"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            $foundConfigTargetNeedingUpdate = $false
-            foreach ($targetItem in $UpdateTargetsInfoArg) {
-                if ($targetItem.Type -eq "Config" -and ($targetItem.UpdateNeeded -eq $true -or $targetItem.UpdateNeeded -eq "True")) {
-                    $foundConfigTargetNeedingUpdate = $true
-                    break
-                }
+            Test-PipelineStepShouldRun -TargetsInfo $UpdateTargetsInfoArg -ExpectedType "Config" -ConditionBlock {
+                param($item) # This $item corresponds to $targetItem in the original loop
+                ($item.UpdateNeeded -eq $true -or $item.UpdateNeeded -eq "True")
             }
-            return $foundConfigTargetNeedingUpdate
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef)
@@ -529,14 +528,10 @@ $steps = @(
         Name      = "Extract Loxone Config"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            $foundConfigTargetForExtract = $false
-            foreach ($targetItem in $UpdateTargetsInfoArg) {
-                if ($targetItem.Type -eq "Config" -and ($targetItem.UpdateNeeded -eq $true -or $targetItem.UpdateNeeded -eq "True") -and $targetItem.Status -ne "UpdateFailed (Download)") {
-                    $foundConfigTargetForExtract = $true
-                    break
-                }
+            Test-PipelineStepShouldRun -TargetsInfo $UpdateTargetsInfoArg -ExpectedType "Config" -ConditionBlock {
+                param($item)
+                ($item.UpdateNeeded -eq $true -or $item.UpdateNeeded -eq "True") -and $item.Status -ne "UpdateFailed (Download)"
             }
-            return $foundConfigTargetForExtract
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef)
@@ -550,14 +545,10 @@ $steps = @(
         Name      = "Install Loxone Config"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            $foundConfigTargetForInstall = $false
-            foreach ($targetItem in $UpdateTargetsInfoArg) {
-                if ($targetItem.Type -eq "Config" -and ($targetItem.UpdateNeeded -eq $true -or $targetItem.UpdateNeeded -eq "True") -and $targetItem.Status -ne "UpdateFailed (Download)" -and $targetItem.Status -ne "UpdateFailed (Extraction)") {
-                    $foundConfigTargetForInstall = $true
-                    break
-                }
+            Test-PipelineStepShouldRun -TargetsInfo $UpdateTargetsInfoArg -ExpectedType "Config" -ConditionBlock {
+                param($item)
+                ($item.UpdateNeeded -eq $true -or $item.UpdateNeeded -eq "True") -and $item.Status -ne "UpdateFailed (Download)" -and $item.Status -ne "UpdateFailed (Extraction)"
             }
-            return $foundConfigTargetForInstall
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef)
@@ -596,25 +587,31 @@ $steps = @(
             Name      = "Install Loxone App"
             ShouldRun = {
                 param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-                $appTarget = $null
-                foreach ($item_app_install in $UpdateTargetsInfoArg) {
-                    if ($item_app_install.Type -eq "App") {
-                        $appTarget = $item_app_install
+
+                if (-not $prerequisitesArg.AppUpdateNeeded) {
+                    return $false
+                }
+
+                # Check if any "App" target exists
+                $appTargetExists = $false
+                foreach ($targetItemCheck in $UpdateTargetsInfoArg) {
+                    if ($targetItemCheck.Type -eq "App") {
+                        $appTargetExists = $true
                         break
                     }
                 }
-                # Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - InstallApp] AppUpdateNeeded: '$($prerequisitesArg.AppUpdateNeeded)', AppTarget Status: '$($appTarget.Status)'"
-                $shouldRunInstall = $false
-                if ($prerequisitesArg.AppUpdateNeeded) {
-                    if ($appTarget) {
-                        if ($appTarget.Status -notlike "*Failed*" -or $appTarget.Status -eq "DownloadSkippedExistingValid") {
-                            $shouldRunInstall = $true
-                        }
-                    } else { # App not initially present, but update is flagged as needed
-                        $shouldRunInstall = $true
-                    }
+
+                if (-not $appTargetExists) {
+                    # If AppUpdateNeeded is true and no App target exists (fresh install), then run.
+                    return $true
                 }
-                return $shouldRunInstall
+
+                # If AppUpdateNeeded is true AND an App target exists, use Test-PipelineStepShouldRun
+                $shouldRunBasedOnTest = Test-PipelineStepShouldRun -TargetsInfo $UpdateTargetsInfoArg -ExpectedType "App" -ConditionBlock {
+                    param($item)
+                    ($item.Status -notlike "*Failed*" -or $item.Status -eq "DownloadSkippedExistingValid")
+                }
+                return $shouldRunBasedOnTest
             }
             Run       = {
                 param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
@@ -629,14 +626,10 @@ $steps = @(
         Name      = "Check Miniserver Versions"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            $foundMiniserver = $false
-            foreach ($item_ms_check in $UpdateTargetsInfoArg) {
-                if ($item_ms_check.Type -eq "Miniserver") {
-                    $foundMiniserver = $true
-                    break
-                }
+            Test-PipelineStepShouldRun -TargetsInfo $UpdateTargetsInfoArg -ExpectedType "Miniserver" -ConditionBlock {
+                param($item)
+                $true # Condition is simply that an item of Type "Miniserver" exists
             }
-            return $foundMiniserver
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef, $prereqs)
@@ -648,14 +641,10 @@ $steps = @(
         Name      = "Update Miniservers"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            $foundMiniserverNeedingUpdate = $false
-            foreach ($item_ms_update in $UpdateTargetsInfoArg) {
-                if ($item_ms_update.Type -eq "Miniserver" -and ($item_ms_update.UpdateNeeded -eq $true -or $item_ms_update.UpdateNeeded -eq "True")) {
-                    $foundMiniserverNeedingUpdate = $true
-                    break
-                }
+            Test-PipelineStepShouldRun -TargetsInfo $UpdateTargetsInfoArg -ExpectedType "Miniserver" -ConditionBlock {
+                param($item)
+                ($item.UpdateNeeded -eq $true -or $item.UpdateNeeded -eq "True")
             }
-            return $foundMiniserverNeedingUpdate
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef, $prereqs)

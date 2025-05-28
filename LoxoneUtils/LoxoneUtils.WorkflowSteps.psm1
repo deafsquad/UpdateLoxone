@@ -575,7 +575,7 @@ Write-Log -Message "($FunctionName) INVOKE-DOWNLOADLOXONECONFIG: Logging before 
         $progressValueForLog = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
         Write-Log -Message "($FunctionName)   Calculated ProgressValue (percentage) = $progressValueForLog %" -Level DEBUG
         try {
-            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-DownloadLoxoneConfig) called successfully."
         }
         catch {
@@ -679,7 +679,7 @@ Write-Log -Message "($FunctionName) INVOKE-EXTRACTLOXONECONFIG: Logging before U
         $progressValueForLog = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
         Write-Log -Message "($FunctionName)   Calculated ProgressValue (percentage) = $progressValueForLog %" -Level DEBUG
         try {
-            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-ExtractLoxoneConfig) called successfully."
         }
         catch {
@@ -746,7 +746,7 @@ Write-Log -Message "($FunctionName) INVOKE-EXTRACTLOXONECONFIG: Logging before U
         $progressValueForLogSig = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
         Write-Log -Message "($FunctionName)   Calculated ProgressValue (Sig percentage) = $progressValueForLogSig %" -Level DEBUG
         try {
-            Update-PersistentToast @toastParamsSig -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+            Update-PersistentToast @toastParamsSig -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-ExtractLoxoneConfig - Signature) called successfully."
         }
         catch {
@@ -846,7 +846,7 @@ function Invoke-InstallLoxoneConfig {
                 TotalWeight   = $ScriptGlobalState.Value.TotalWeight
             }
             try {
-                Update-PersistentToast @toastParamsSkip -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+                Update-PersistentToast @toastParamsSkip -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             } catch {
                 Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call (Skip): $($_.Exception.ToString())"
             }
@@ -857,7 +857,7 @@ function Invoke-InstallLoxoneConfig {
             Write-Log -Message "($FunctionName) Closing Loxone applications as -CloseApplications was specified..." -Level INFO
             $toastParamsClose = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="Closing Loxone Apps"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
             try {
-                Update-PersistentToast @toastParamsClose -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+                Update-PersistentToast @toastParamsClose -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             } catch {
                 Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call (Close Apps): $($_.Exception.ToString())"
             }
@@ -869,7 +869,7 @@ function Invoke-InstallLoxoneConfig {
             Write-Log -Message "($FunctionName) Loxone processes are running, but -CloseApplications not specified. Installation might fail or require user intervention." -Level WARN
             $toastParamsWarn = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="WARN: Loxone Processes Running"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
             try {
-                Update-PersistentToast @toastParamsWarn -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+                Update-PersistentToast @toastParamsWarn -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             } catch {
                 Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call (Warn Processes): $($_.Exception.ToString())"
             }
@@ -883,7 +883,7 @@ function Invoke-InstallLoxoneConfig {
             TotalWeight   = $ScriptGlobalState.Value.TotalWeight
         }
         try {
-            Update-PersistentToast @toastParamsInstall -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+            Update-PersistentToast @toastParamsInstall -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
         } catch {
             Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call (Install): $($_.Exception.ToString())"
         }
@@ -947,7 +947,7 @@ function Invoke-InstallLoxoneConfig {
         Write-Log -Message "($FunctionName) Verifying Loxone Config installation..." -Level INFO
         $toastParamsVerify = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="Verifying Loxone Config Installation"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
         try {
-            Update-PersistentToast @toastParamsVerify -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+            Update-PersistentToast @toastParamsVerify -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
         } catch {
             Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call (Verify): $($_.Exception.ToString())"
         }
@@ -968,7 +968,7 @@ function Invoke-InstallLoxoneConfig {
             $ScriptGlobalState.Value.CurrentWeight += Get-StepWeight -StepID 'VerifyConfig'
             $toastParamsSuccess = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="Config Update Complete (v$newlyInstalledVersion)"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
             try {
-                Update-PersistentToast @toastParamsSuccess -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed $true
+                Update-PersistentToast @toastParamsSuccess -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed $true -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             } catch {
                 Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call (Success): $($_.Exception.ToString())"
             }
@@ -1073,7 +1073,7 @@ Write-Log -Message "($FunctionName) INVOKE-DOWNLOADLOXONEAPP: Logging before Upd
         $progressValueForLogAppDownload = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
         Write-Log -Message "($FunctionName)   Calculated ProgressValue (App Download percentage) = $progressValueForLogAppDownload %" -Level DEBUG
         try {
-            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-DownloadLoxoneApp) called successfully."
         }
         catch {
@@ -1182,7 +1182,7 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
                 Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-InstallLoxoneApp - Stop App): toastParamsStopApp='$($toastParamsStopApp | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
                 Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
                 try {
-                    Update-PersistentToast @toastParamsStopApp -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+                    Update-PersistentToast @toastParamsStopApp -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
                     Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-InstallLoxoneApp - Stop App) called successfully."
                 }
                 catch {
@@ -1224,7 +1224,7 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
     Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-InstallLoxoneApp - Install): toastParamsInstall='$($toastParamsInstall | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
     Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
     try {
-        Update-PersistentToast @toastParamsInstall -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+        Update-PersistentToast @toastParamsInstall -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
         Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-InstallLoxoneApp - Install) called successfully."
     }
     catch {
@@ -1293,7 +1293,7 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
         Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-InstallLoxoneApp - Verify): toastParamsVerify='$($toastParamsVerify | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
         Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
         try {
-            Update-PersistentToast @toastParamsVerify -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+            Update-PersistentToast @toastParamsVerify -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-InstallLoxoneApp - Verify) called successfully."
         }
         catch {
@@ -1317,7 +1317,7 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
                 Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-InstallLoxoneApp - Success): toastParamsSuccess='$($toastParamsSuccess | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$true'")
                 Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
                 try {
-                    Update-PersistentToast @toastParamsSuccess -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed $true
+                    Update-PersistentToast @toastParamsSuccess -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed $true -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
                     Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-InstallLoxoneApp - Success) called successfully."
                 }
                 catch {
@@ -1515,7 +1515,7 @@ Write-Log -Message "($FunctionName) INVOKE-UPDATEMINISERVERSINBULK: Logging befo
     Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-CheckMiniserverVersions - Loop Start): toastParamsMSLoop='$($toastParamsMSLoop | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
     Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
     try {
-        Update-PersistentToast @toastParamsMSLoop -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+        Update-PersistentToast @toastParamsMSLoop -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
         Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-CheckMiniserverVersions - Loop Start) called successfully."
     }
     catch {
@@ -1590,7 +1590,7 @@ $ScriptGlobalState.Value.currentStep++ # Increment UI step before showing "Check
     Write-Log -Message "($FunctionName)   Calculated ProgressValue (Post MS Check percentage) = $progressValueForLogPostMS %" -Level DEBUG
     
     try {
-        Update-PersistentToast @toastParamsPostMSCheck -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+        Update-PersistentToast @toastParamsPostMSCheck -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
         Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Post MS Check Loop) called successfully."
     }
     catch {
@@ -1655,7 +1655,7 @@ function Invoke-UpdateMiniserversInBulk {
     Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-UpdateMiniserversInBulk - Update Start): toastParamsMSUpdateStart='$($toastParamsMSUpdateStart | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
     Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
     try {
-        Update-PersistentToast @toastParamsMSUpdateStart -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed)
+        Update-PersistentToast @toastParamsMSUpdateStart -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
         Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-UpdateMiniserversInBulk - Update Start) called successfully."
     }
     catch {
@@ -2031,4 +2031,27 @@ Write-Log -Level INFO -Message "($FunctionName) End Calculating TotalSteps for U
     Write-Log -Message "($FunctionName) Finished initializing update pipeline data." -Level INFO
     return $pipelineData
 }
-Export-ModuleMember -Function Initialize-ScriptWorkflow, Get-LoxoneUpdatePrerequisites, Invoke-DownloadLoxoneConfig, Invoke-ExtractLoxoneConfig, Invoke-InstallLoxoneConfig, Invoke-DownloadLoxoneApp, Invoke-InstallLoxoneApp, Invoke-CheckMiniserverVersions, Invoke-UpdateMiniserversInBulk, Initialize-UpdatePipelineData, Get-StepWeight
+function Test-PipelineStepShouldRun {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [System.Collections.ArrayList]$TargetsInfo,
+
+        [Parameter(Mandatory=$true)]
+        [string]$ExpectedType,
+
+        [Parameter(Mandatory=$true)]
+        [System.Management.Automation.ScriptBlock]$ConditionBlock
+    )
+
+    foreach ($item in $TargetsInfo) {
+        if ($item.Type -eq $ExpectedType) {
+            # Invoke the custom condition scriptblock, passing the current item
+            if (Invoke-Command -ScriptBlock $ConditionBlock -ArgumentList $item) {
+                return $true # Condition met for at least one item of the expected type
+            }
+        }
+    }
+    return $false # No item of the expected type met the condition
+}
+Export-ModuleMember -Function Initialize-ScriptWorkflow, Get-LoxoneUpdatePrerequisites, Invoke-DownloadLoxoneConfig, Invoke-ExtractLoxoneConfig, Invoke-InstallLoxoneConfig, Invoke-DownloadLoxoneApp, Invoke-InstallLoxoneApp, Invoke-CheckMiniserverVersions, Invoke-UpdateMiniserversInBulk, Initialize-UpdatePipelineData, Get-StepWeight, Test-PipelineStepShouldRun
