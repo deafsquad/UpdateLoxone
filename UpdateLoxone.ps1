@@ -596,27 +596,24 @@ $steps = @(
             Name      = "Install Loxone App"
             ShouldRun = {
                 param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-                $appTarget = $UpdateTargetsInfoArg | Where-Object {$_.Type -eq "App"} | Select-Object -First 1
-                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun Write-Host - InstallApp] Entered ShouldRun. PrerequisitesArg.AppUpdateNeeded: '$($prerequisitesArg.AppUpdateNeeded)'. AppTarget.Status: '$($appTarget.Status)'"
+                $appTarget = $null
+                foreach ($item_app_install in $UpdateTargetsInfoArg) {
+                    if ($item_app_install.Type -eq "App") {
+                        $appTarget = $item_app_install
+                        break
+                    }
+                }
+                # Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - InstallApp] AppUpdateNeeded: '$($prerequisitesArg.AppUpdateNeeded)', AppTarget Status: '$($appTarget.Status)'"
                 $shouldRunInstall = $false
                 if ($prerequisitesArg.AppUpdateNeeded) {
                     if ($appTarget) {
-                        # Allow install if status is not failed OR if it's a skipped download (meaning valid file exists)
                         if ($appTarget.Status -notlike "*Failed*" -or $appTarget.Status -eq "DownloadSkippedExistingValid") {
                             $shouldRunInstall = $true
-                        } else {
-                            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun Write-Host - InstallApp] AppTarget status ('$($appTarget.Status)') prevents install despite AppUpdateNeeded being true."
                         }
-                    } else {
-                        # This case implies AppUpdateNeeded is true, but no App target was found in UpdateTargetsInfo.
-                        # This could happen if the app wasn't initially installed, so no entry was created,
-                        # but prerequisites determined an update is available. The download step should have run.
-                        # We should allow the install step to proceed to try and install the downloaded app.
-                        Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun Write-Host - InstallApp] AppUpdateNeeded is true, but no App Target Found in UpdateTargetsInfoArg. Assuming download step ran, allowing install attempt."
+                    } else { # App not initially present, but update is flagged as needed
                         $shouldRunInstall = $true
                     }
                 }
-                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun Write-Host - InstallApp] Result of ShouldRun: $shouldRunInstall"
                 return $shouldRunInstall
             }
             Run       = {
@@ -632,7 +629,14 @@ $steps = @(
         Name      = "Check Miniserver Versions"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            ($UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Miniserver"}).Count -gt 0
+            $foundMiniserver = $false
+            foreach ($item_ms_check in $UpdateTargetsInfoArg) {
+                if ($item_ms_check.Type -eq "Miniserver") {
+                    $foundMiniserver = $true
+                    break
+                }
+            }
+            return $foundMiniserver
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef, $prereqs)
@@ -644,7 +648,14 @@ $steps = @(
         Name      = "Update Miniservers"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            ($UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Miniserver" -and $_.UpdateNeeded}).Count -gt 0
+            $foundMiniserverNeedingUpdate = $false
+            foreach ($item_ms_update in $UpdateTargetsInfoArg) {
+                if ($item_ms_update.Type -eq "Miniserver" -and ($item_ms_update.UpdateNeeded -eq $true -or $item_ms_update.UpdateNeeded -eq "True")) {
+                    $foundMiniserverNeedingUpdate = $true
+                    break
+                }
+            }
+            return $foundMiniserverNeedingUpdate
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef, $prereqs)
