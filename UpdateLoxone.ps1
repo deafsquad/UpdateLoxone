@@ -516,7 +516,7 @@ $steps = @(
                 Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Item #$itemIndex - Type: $($item.Type), UpdateNeeded: $($item.UpdateNeeded), Name: $($item.Name)"
                 $itemIndex++
             }
-            $filteredTargets = $UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Config" -and $_.UpdateNeeded}
+            $filteredTargets = $UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Config" -and ($_.UpdateNeeded -eq $true -or $_.UpdateNeeded -eq "True")}
             Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Filtered Config Targets Count: $($filteredTargets.Count)"
             if ($filteredTargets.Count -gt 0) {
                 Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Filtered Config Target Details:"
