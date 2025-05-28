@@ -1,115 +1,161 @@
 # Loxone Auto Update Script (UpdateLoxone.ps1)
 
-This PowerShell script automates the process of checking for, downloading, and installing updates for Loxone Config software. It can also trigger updates on configured Loxone Miniservers based on the installed Loxone Config version.
+This PowerShell script automates the process of checking for, downloading, and installing updates for Loxone Config software and the Loxone App. It orchestrates the entire update workflow, including handling parameters, managing execution context (re-launching as the current user if initially run as SYSTEM), and registering a scheduled task for regular execution. The script can also trigger updates on configured Loxone Miniservers based on the installed Loxone Config version. It relies on a suite of `LoxoneUtils` modules for specific functionalities like logging, network operations, and installation tasks.
 
+## Execution Flow Diagram
+
+```mermaid
+graph TD
+    A[UpdateLoxone.ps1 Start] --> B(Parse Script Parameters);
+    B --> C{Initial Run as SYSTEM?};
+    C -- Yes --> D("Relaunch as Current User <br/> (LoxoneUtils.RunAsUser) <br/> with admin privileges <br/> if initially elevated");
+    C -- No / Subsequent Run --> E(Import LoxoneUtils Modules);
+    D --> E;
+    E --> F("Initialize Workflow Context <br/> Paths, Logging, Versions <br/> (LoxoneUtils.Utility, <br/> LoxoneUtils.Logging)");
+    F --> G{'-RegisterTask' Parameter?};
+    G -- Yes --> H("Register/Update Sched. Task <br/> Runs as SYSTEM (highest priv.) <br/> (LoxoneUtils.System)");
+    H --> ZTask["Exit (Task Registered)"];
+    G -- No --> I("Fetch Update Prerequisites <br/> Check Loxone XML (local vs. remote) <br/> Uses -Channel and <br/> -UpdateLoxoneAppChannel <br/> (LoxoneUtils.UpdateCheck)");
+    I --> J("Initialize Update Pipeline Data <br/> Targets: Config, App, Miniservers");
+    J --> K_ExecutePipeline["Execute Update Pipeline <br/> (LoxoneUtils.WorkflowSteps)"];
+
+    K_ExecutePipeline --> S1;
+
+    subgraph pipeline_steps [Update Pipeline Steps]
+        S1("S1: Download Loxone Config <br/> Get .zip; Verify CRC, <br/> filesize, cert (uses -EnableCRC, <br/> -SkipCertificateCheck) <br/> (LoxoneUtils.Network)") --> S2("S2: Extract Loxone Config <br/> Unzip archive <br/> (LoxoneUtils.Installation)");
+        S2 --> S3("S3: Install Loxone Config <br/> Run with -InstallMode <br/> (LoxoneUtils.Installation)");
+        S3 --> S4("S4: Download Loxone App <br/> Get .exe/.msi (if -UpdateLoxoneApp) <br/> Verify CRC, filesize, cert <br/> (uses -EnableCRC, -SkipCertCheck) <br/> (LoxoneUtils.Network)");
+        S4 --> S5("S5: Install Loxone App <br/> Run with -InstallMode <br/> (LoxoneUtils.Installation)");
+        S5 --> S6("S6: Check Miniserver Versions <br/> Compare installed Config ver. <br/> with MS firmware <br/> (LoxoneUtils.Miniserver)");
+        S6 --> S7("S7: Update Miniservers <br/> Trigger if new Config ver. <br/> compatible and newer <br/> (LoxoneUtils.Miniserver)");
+    end
+
+    S7 --> L_Ops("Post-Pipeline Operations <br/> Error Handling, Logging, <br/> Notifications (LoxoneUtils.ErrorHandling, <br/> .Logging, .Toast)");
+    L_Ops --> ZEnd["Exit (Workflow Complete)"];
+```
 ## Features
 
-*   **Automatic Update Checks:** Regularly checks `update.loxone.com` for new versions based on selected channel (Release, Beta, Test).
-*   **Silent Installation:** Installs Loxone Config updates silently using `/verysilent` or `/silent` modes.
-*   **Miniserver Updates:** Can trigger updates on Loxone Miniservers listed in `UpdateLoxoneMSList.txt`. Checks Miniserver version against the *just installed/verified* Loxone Config version and initiates update if necessary. Includes reachability checks before and after update attempts.
-*   **Interactive Miniserver Setup:** If run interactively and `UpdateLoxoneMSList.txt` is missing, prompts the user to configure the first Miniserver.
-*   **Channel Selection:** Choose between Release, Beta, or Test update channels.
+*   **Orchestration (`UpdateLoxone.ps1`):**
+    *   Manages the overall update process.
+    *   Parses command-line parameters.
+    *   Handles execution context, including re-launching as the current user if started as SYSTEM for the initial run.
+    *   Supports task registration for automated execution.
+*   **Modular Design (`LoxoneUtils`):** Utilizes a collection of specialized modules for various tasks:
+    *   **`LoxoneUtils.WorkflowSteps`:** Defines and executes the individual steps of the update pipeline (Download Config, Install App, Update Miniservers, etc.).
+    *   **`LoxoneUtils.UpdateCheck`:** Fetches the latest update information (versions for Config/App) from Loxone's official XML feed.
+    *   **`LoxoneUtils.Network`:** Handles file downloads with progress indicators and verification.
+    *   **`LoxoneUtils.Installation`:** Manages installer execution (silent/verysilent), version retrieval of installed software, finding installation paths, and ZIP file extraction.
+    *   **`LoxoneUtils.Miniserver`:** Checks Miniserver versions and triggers updates on them.
+    *   **`LoxoneUtils.Logging`:** Provides robust logging capabilities with automatic log rotation.
+    *   **`LoxoneUtils.ErrorHandling`:** Implements detailed error logging to aid in troubleshooting.
+    *   **`LoxoneUtils.Toast`:** Delivers desktop toast notifications for status updates and errors using the `BurntToast` module.
+    *   **`LoxoneUtils.Utility`:** Contains general helper functions for path manipulation, software signature checks, string and version formatting, CRC checksums, and registry interactions.
+    *   **`LoxoneUtils.System`:** Manages system processes and Windows Scheduled Tasks.
+    *   **`LoxoneUtils.RunAsUser`:** Facilitates running processes as the currently interactive user, primarily used for the initial re-launch from SYSTEM context.
+*   **Automatic Update Checks:** Regularly checks `update.loxone.com` for new versions based on the selected channel.
+*   **Silent Installation:** Installs Loxone Config and App updates silently.
+*   **Miniserver Updates:** Can trigger updates on Loxone Miniservers listed in `UpdateLoxoneMSList.txt`.
+*   **Channel Selection:** Allows choosing between Release, Beta, or Test update channels for Loxone Config and the Loxone App.
 *   **CRC Checksum Verification:** Optionally verifies the CRC32 checksum of downloaded installers.
 *   **Process Handling:** Optionally closes running Loxone Config instances before updating or skips updates if Loxone Config is running.
-*   **Desktop Notifications:** Provides desktop notifications (using BurntToast module) for update status and errors to logged-in interactive users.
-*   **Scheduled Task Integration:** Can automatically create/update a Windows Scheduled Task (`LoxoneUpdateTask`) to run the script periodically as the SYSTEM user with highest privileges.
-*   **Robust Logging:** Creates detailed log files (`UpdateLoxone.log`) with automatic rotation (keeps the last 24 archives by default, named `UpdateLoxone_yyyyMMdd_HHmmss.log`). Log lines include Process ID and elevation status (e.g., `[PID:1234|Elevated:True]`).
-*   **Error Handling:** Includes detailed error logging (command, line number, variables) and sends notifications on failure before exiting.
-*   **Debug Mode:** Provides verbose logging for troubleshooting.
-*   **Loxone Monitor Testing:** Includes a `-TestMonitor` mode to test starting the Loxone Monitor process and watching/moving its log files.
+*   **Scheduled Task Integration:** Can create/update a Windows Scheduled Task for periodic execution.
+*   **Debug Mode:** Offers verbose logging for troubleshooting.
 
 ## Prerequisites
 
-*   **PowerShell:** Version 5.1 or higher recommended.
-*   **BurntToast Module:** Required for desktop notifications. If not installed, the script will attempt to install it for the *current user* when run interactively, or when sending a notification via the scheduled task method (requires internet access and permissions). Run `Install-Module BurntToast -Scope CurrentUser` if needed for interactive use or ensure it's available for the SYSTEM user if relying on task-based notifications.
-*   **Administrator Privileges:** Required to install software and manage scheduled tasks. The script attempts to self-elevate if not run as admin during initial setup.
-*   **Internet Access:** Required to check for updates, download installers, and potentially install BurntToast.
-*   **Network Access:** Required to communicate with Loxone Miniservers for version checks and updates.
+*   **PowerShell:** Version 5.1 or higher.
+*   **`BurntToast` Module:** Required for desktop notifications. The script may attempt to install it if missing and run interactively or by the scheduled task.
+*   **Windows OS:** Designed for Windows environments.
+*   **Administrator Privileges:** Required for software installation and scheduled task management.
+*   **Internet Access:** Necessary for downloading updates and the `BurntToast` module.
+*   **`LoxoneUtils` Modules:** The `LoxoneUtils` directory containing all required `.psm1` module files must be present in the same directory as `UpdateLoxone.ps1`.
 
 ## Script Files
 
-*   **`UpdateLoxone.ps1`:** The main script to be executed or scheduled. Handles parameter parsing, update checks, downloads, installation, and calls functions from the utility module.
-*   **`UpdateLoxoneUtils.psm1`:** A PowerShell module containing all the helper functions used by the main script (logging, version checks, network operations, task management, etc.). This file must be present in the same directory as `UpdateLoxone.ps1`.
-*   **`Run-UpdateLoxoneTests.ps1`:** A script for testing the functions within `UpdateLoxoneUtils.psm1`. See "Testing" section below.
+*   **`UpdateLoxone.ps1`:** The main orchestration script.
+*   **`LoxoneUtils/` (Directory):** Contains the suite of PowerShell modules (`.psm1` files) that provide the core functionalities:
+    *   `LoxoneUtils.ErrorHandling.psm1`
+    *   `LoxoneUtils.Installation.psm1`
+    *   `LoxoneUtils.Logging.psm1`
+    *   `LoxoneUtils.Miniserver.psm1`
+    *   `LoxoneUtils.Network.psm1`
+    *   `LoxoneUtils.psd1` (Module manifest)
+    *   `LoxoneUtils.psm1` (Main module file that likely loads others or acts as a wrapper)
+    *   `LoxoneUtils.RunAsUser.psm1`
+    *   `LoxoneUtils.System.psm1`
+    *   `LoxoneUtils.Toast.psm1`
+    *   `LoxoneUtils.UpdateCheck.psm1`
+    *   `LoxoneUtils.Utility.psm1`
+    *   `LoxoneUtils.WorkflowSteps.psm1`
+*   **`Run-UpdateLoxoneTests.ps1`:** (If still present and used) A script for testing functions within the `LoxoneUtils` modules.
 
 ## Configuration Files
 
-*(Place these files in the same directory as the scripts)*
+*(Place these files in the directory specified by `-ScriptSaveFolder`, which defaults to the script's own directory)*
 
-*   **`UpdateLoxoneMSList.txt`:** (Optional) A text file containing the connection URLs for Loxone Miniservers to be updated, one per line.
+*   **`UpdateLoxoneMSList.txt`:** (Optional) A text file containing connection details for Loxone Miniservers to be updated, one entry per line.
     *   Format: `http://username:password@ip-address-or-hostname` or `https://username:password@ip-address-or-hostname`.
-    *   **Security Warning:** Passwords are stored in plain text. Use with caution.
-    *   If this file is missing when the script runs interactively, you will be prompted to create it with the first entry. If missing when run via scheduled task, Miniserver updates will be skipped (logged as a warning).
+    *   **Security Warning:** Passwords are stored in plain text. Ensure appropriate file permissions.
+    *   If missing, Miniserver updates will be skipped.
 *   **`UpdateLoxoneMSList.txt.example`:** An example file showing the format for `UpdateLoxoneMSList.txt`.
-*   **`TrustedCertThumbprint.txt`:** (Optional) This file is currently **not used**. Signature verification compares the thumbprint of the downloaded installer against the thumbprint of the currently installed `LoxoneConfig.exe` (if found).
+*   **Loxone Update XML:** The script fetches update information from `https://update.loxone.com/updatecheck.xml`.
 
 ## Parameters
 
-*   `-Channel`: (Optional) Update channel to check. Options: `Release`, `Beta`, `Test`. Default: `Test`.
-*   `-DebugMode`: (Optional) Enable verbose debug logging to console and log file. Default: `$false`.
-*   `-EnableCRC`: (Optional) Enable CRC32 checksum verification of downloaded Loxone Config installers. Default: `$true`.
-*   `-InstallMode`: (Optional) Installer mode for Loxone Config. Options: `silent`, `verysilent`. Default: `verysilent`.
-*   `-CloseApplications`: (Optional) Force close running `LoxoneConfig.exe` processes before attempting update. Default: `$false`.
-*   `-ScriptSaveFolder`: (Optional) Directory to store logs, downloads, and potentially the script itself (used for scheduled task path). Default: The script's own directory.
-*   `-MaxLogFileSizeMB`: (Optional) Maximum size in MB before the main log file (`UpdateLoxone.log`) is rotated. Default: `1`.
-*   `-ScheduledTaskIntervalMinutes`: (Optional) Interval in minutes for the scheduled task recurrence. Default: `10`.
-*   `-SkipUpdateIfAnyProcessIsRunning`: (Optional) Skip the Loxone Config update if `LoxoneConfig.exe` is detected running. Default: `$false`.
-*   `-TestNotifications`: (Optional) Run in a mode that only tests sending start/end notifications. Default: `$false`.
-*   `-MonitorLogWatchTimeoutMinutes`: (Optional) Timeout in minutes for watching Loxone Monitor logs (used only with `-TestMonitor`). Default: `240`.
-*   `-TestMonitor`: (Optional) Run in a mode that tests starting the Loxone Monitor, watching its logs, and moving them. Default: `$false`.
-*   `-MonitorSourceLogDirectory`: (Optional) Specify the source directory for Loxone Monitor logs when using `-TestMonitor`. If omitted, the script attempts to determine the correct path: if `loxonemonitor.exe` is already running, it assumes the log path based on whether the *script* is running as SYSTEM or a user (logging this assumption); if the monitor isn't running, it starts it interactively and watches the interactive user's Documents folder (`%USERPROFILE%\Documents\Loxone\Loxone Config\Monitor`). **Use this parameter to override the default if the automatic detection guesses incorrectly** (e.g., if the monitor was started by SYSTEM but the script is run interactively).
-
+*   `-Channel <String>`: (Optional) Specifies the update channel for Loxone Config. Options: `Release`, `Beta`, `Test`. Default might be `Test` or as defined in script.
+*   `-DebugMode`: (Optional) Enables verbose debug logging.
+*   `-EnableCRC`: (Optional) Enables CRC32 checksum verification of downloaded installers.
+*   `-InstallMode <String>`: (Optional) Sets the installer mode for Loxone Config/App. Options: `silent`, `verysilent`.
+*   `-CloseApplications`: (Optional) If set, forces running `LoxoneConfig.exe` instances to close before an update.
+*   `-ScriptSaveFolder <String>`: (Optional) Directory to store logs, downloads, and the script itself (referenced by the scheduled task). Defaults to the script's execution directory.
+*   `-MaxLogFileSizeMB <Int32>`: (Optional) Maximum size in MB for the main log file before rotation.
+*   `-RegisterTask`: (Optional) If specified, the script will register/update the scheduled task and then exit.
+*   `-SkipUpdateIfAnyProcessIsRunning`: (Optional) If set, the Loxone Config/App update will be skipped if `LoxoneConfig.exe` is detected running.
+*   `-UpdateLoxoneApp`: (Optional) A switch to control whether the Loxone App should also be updated as part of the pipeline.
+*   `-UpdateLoxoneAppChannel <String>`: (Optional) Specifies the update channel for the Loxone App if `-UpdateLoxoneApp` is used. Options: `Release`, `Beta`, `Test`.
+*   `-SkipCertificateCheck`: (Optional) If set, may bypass certain certificate validation steps during download or installation (use with caution).
 
 ## Usage
 
-1.  **Manually place** both the `UpdateLoxone.ps1` and `UpdateLoxoneUtils.psm1` scripts together in your desired final location (e.g., `C:\Scripts\UpdateLoxone`). This location must contain both files and should be stable, as the scheduled task will reference the `.ps1` file here.
-2.  (Optional) Create `UpdateLoxoneMSList.txt` in the same directory with your Miniserver details, or wait for the script to prompt you on the first interactive run.
-3.  Run the `UpdateLoxone.ps1` script **once** interactively *from its final location* to set up the scheduled task. You can start it from a regular PowerShell prompt; it will request Administrator elevation via a UAC prompt if needed:
+1.  Ensure `UpdateLoxone.ps1` and the entire `LoxoneUtils` directory (with all its `.psm1` module files) are placed together in a stable final location (e.g., `C:\Scripts\UpdateLoxone`).
+2.  (Optional) Create `UpdateLoxoneMSList.txt` in the `-ScriptSaveFolder` (defaults to script's directory) with your Miniserver details.
+3.  To set up automated updates, run `UpdateLoxone.ps1` **once** interactively from its final location with the `-RegisterTask` parameter. It will request Administrator elevation if needed.
     ```powershell
-    # Example (run from C:\Scripts\UpdateLoxone):
-    .\UpdateLoxone.ps1 -Channel Release -CloseApplications $true
+    # Example: Register the task, use Release channel for Config
+    .\UpdateLoxone.ps1 -RegisterTask -Channel Release
     ```
-4.  During this first interactive run, the script will attempt self-elevation if needed (to gain Administrator privileges) and then create/update a scheduled task named `LoxoneUpdateTask` pointing to the script's location (determined by `-ScriptSaveFolder`, which defaults to the script's own directory).
-5.  This task runs as the `SYSTEM` user with highest privileges, triggered initially and then repeating every `-ScheduledTaskIntervalMinutes` (default 10). Task registration/update is skipped on subsequent non-interactive runs (i.e., when run by the scheduler itself).
-6.  Subsequent runs performed by the scheduled task will handle the update checks and installations silently.
+4.  This initial run (with `-RegisterTask`) creates/updates a scheduled task (typically named `LoxoneUpdateTask`) to run the script periodically as SYSTEM with highest privileges.
+5.  Subsequent runs by the scheduled task will perform the update checks and installations silently based on the parameters baked into the task or defaults.
 
-## Workflow Overview (Scheduled Task)
+## Workflow Overview (Scheduled Task Execution)
 
-1.  **Log Rotation:** If running as the initial (non-elevated) instance, checks and rotates the main log file if size exceeds limit. Rotation is skipped if running as the self-elevated instance to maintain log continuity.
-2.  **Installation Check:** Determines the path and version of the currently installed Loxone Config.
-3.  **Process Check:** If `-SkipUpdateIfAnyProcessIsRunning` is `$true`, checks if `LoxoneConfig.exe` is running and exits if it is.
-4.  **Update Check:** Downloads `updatecheck.xml` from Loxone.
-5.  **Version Comparison:** Compares the installed version (if any) with the version available for the specified `-Channel`.
-6.  **Loxone Config Update (if needed):**
-    *   Downloads the installer ZIP.
-    *   Verifies file size and optionally CRC32 checksum.
-    *   Extracts the `.exe` installer.
-    *   Verifies if the installer has a valid Authenticode signature. If an existing `LoxoneConfig.exe` is found, it also compares the certificate thumbprint of the downloaded installer against the installed one, logging a warning on mismatch.
-    *   Runs the installer silently (`-InstallMode`).
-7.  **Miniserver Update Process (runs after Config update or if Config was already up-to-date):**
-    *   Calls `Update-MS` function.
-    *   Checks if `UpdateLoxoneMSList.txt` exists. If not, logs a warning and skips Miniserver updates for this run.
-    *   If file exists, iterates through each URL:
-        *   Checks the Miniserver's current version via `/dev/cfg/version`.
-        *   Compares with the target Loxone Config version (`$updateVersion`).
-        *   If Miniserver needs update:
-            *   Triggers the update (likely via `/sps/log/<clientIP>` endpoint).
-            *   Waits for the Miniserver to become unreachable (ping fails).
-            *   Waits for the Miniserver to become reachable again (ping succeeds).
-            *   Waits an additional 60 seconds.
-            *   Repeatedly checks the Miniserver version for up to 8 minutes until it matches the target version. Logs errors if it fails or times out.
-8.  **Notifications:** Sends success/failure notifications to logged-in users.
-9.  **Exit.**
+1.  **Parameter Parsing & Context Initialization:** The script starts, parses any parameters passed by the task, and initializes its context (paths, logging, versions).
+2.  **SYSTEM User Check (Initial Run Logic):** If running as SYSTEM and it's an initial invocation (not a self-relaunch), it may re-launch itself as the current interactive user to handle UI elements like `BurntToast` installations or initial prompts correctly. Subsequent operations by the task usually run fully as SYSTEM.
+3.  **Import Modules:** Loads necessary functions from the `LoxoneUtils` modules.
+4.  **Fetch Update Prerequisites:** Contacts `https://update.loxone.com/updatecheck.xml` to get the latest available versions for Loxone Config and App for the specified channels.
+5.  **Initialize Pipeline Data:** Prepares information about update targets (Config, App, Miniservers).
+6.  **Execute Update Pipeline (`LoxoneUtils.WorkflowSteps`):**
+    *   **Download Loxone Config:** If an update is available.
+    *   **Extract Loxone Config:** From the downloaded archive.
+    *   **Install Loxone Config:** Silently.
+    *   **Download Loxone App:** If an update is available and `-UpdateLoxoneApp` is enabled.
+    *   **Install Loxone App:** Silently.
+    *   **Check Miniserver Versions:** Compares versions on Miniservers (from `UpdateLoxoneMSList.txt`) against the just-installed Loxone Config version.
+    *   **Update Miniservers:** Triggers updates on Miniservers that require it.
+7.  **Error Handling & Logging:** Throughout the process, all actions, errors, and significant events are logged. `LoxoneUtils.ErrorHandling` captures detailed error information.
+8.  **Toast Notifications:** `LoxoneUtils.Toast` sends notifications to the interactive user (if applicable) about the update status.
+9.  **Log Rotation:** `LoxoneUtils.Logging` manages log file sizes and archives.
+10. **Exit.**
 
 ## Notes
 
-*   The script relies on specific Loxone web endpoints (`update.loxone.com`, `/dev/cfg/version`, `/sps/log/...`) which could change in the future.
-*   Error handling attempts to log details and notify users, but complex failures might still occur. Check `UpdateLoxone.log` for details.
-*   Managing the scheduled task (e.g., changing interval, disabling) can be done via the Windows Task Scheduler (`taskschd.msc`). Find the task named `LoxoneUpdateTask`.
+*   The script relies on specific Loxone web endpoints and behaviors which could change.
+*   Check `UpdateLoxone.log` (in `-ScriptSaveFolder`) for detailed operational logs and troubleshooting.
+*   Manage the scheduled task via Windows Task Scheduler (`taskschd.msc`).
 
 ## Testing
 
-A separate script, `Run-UpdateLoxoneTests.ps1`, is provided to test the core functions within the `UpdateLoxoneUtils.psm1` module.
+A separate script, `Run-UpdateLoxoneTests.ps1`, is provided to test the core functions within the `LoxoneUtils.psm1` module.
 
 *   **Purpose:** Verify individual function logic in different contexts (normal, simulated task, elevated).
 *   **Usage:**
