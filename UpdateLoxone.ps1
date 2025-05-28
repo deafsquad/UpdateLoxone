@@ -507,7 +507,25 @@ $scriptGlobalState.totalDownloads = $script:totalDownloads
 $steps = @(
     @{
         Name      = "Download Loxone Config"
-        ShouldRun = { param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg) ($UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Config" -and $_.UpdateNeeded}).Count -gt 0 }
+        ShouldRun = {
+            param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
+            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Entered."
+            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] UpdateTargetsInfoArg Count: $($UpdateTargetsInfoArg.Count)"
+            $itemIndex = 0
+            foreach ($item in $UpdateTargetsInfoArg) {
+                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Item #$itemIndex - Type: $($item.Type), UpdateNeeded: $($item.UpdateNeeded), Name: $($item.Name)"
+                $itemIndex++
+            }
+            $filteredTargets = $UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Config" -and $_.UpdateNeeded}
+            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Filtered Config Targets Count: $($filteredTargets.Count)"
+            if ($filteredTargets.Count -gt 0) {
+                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Filtered Config Target Details:"
+                $filteredTargets | ForEach-Object { Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config]   - Type: $($_.Type), UpdateNeeded: $($_.UpdateNeeded), Name: $($_.Name), Status: $($_.Status)" }
+            }
+            $result = ($filteredTargets.Count -gt 0)
+            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Result: $result"
+            return $result
+        }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef)
             $cfgTarget = $targets | Where-Object {$_.Type -eq "Config"} | Select-Object -First 1
