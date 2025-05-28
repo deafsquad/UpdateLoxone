@@ -516,13 +516,17 @@ $steps = @(
                 Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Item #$itemIndex - Type: $($item.Type), UpdateNeeded: $($item.UpdateNeeded), Name: $($item.Name)"
                 $itemIndex++
             }
-            $filteredTargets = $UpdateTargetsInfoArg | Where-Object {$_.Type -eq "Config" -and ($_.UpdateNeeded -eq $true -or $_.UpdateNeeded -eq "True")}
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Filtered Config Targets Count: $($filteredTargets.Count)"
-            if ($filteredTargets.Count -gt 0) {
-                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Filtered Config Target Details:"
-                $filteredTargets | ForEach-Object { Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config]   - Type: $($_.Type), UpdateNeeded: $($_.UpdateNeeded), Name: $($_.Name), Status: $($_.Status)" }
+            $foundConfigTargetNeedingUpdate = $false
+            foreach ($targetItem in $UpdateTargetsInfoArg) {
+                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Checking Item - Type: $($targetItem.Type), UpdateNeeded: $($targetItem.UpdateNeeded)"
+                if ($targetItem.Type -eq "Config" -and ($targetItem.UpdateNeeded -eq $true -or $targetItem.UpdateNeeded -eq "True")) {
+                    Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] MATCH FOUND - Type: $($targetItem.Type), UpdateNeeded: $($targetItem.UpdateNeeded), Name: $($targetItem.Name), Status: $($targetItem.Status)"
+                    $foundConfigTargetNeedingUpdate = $true
+                    break # Found a match, no need to check further
+                }
             }
-            $result = ($filteredTargets.Count -gt 0)
+            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Manual Filter Result (foundConfigTargetNeedingUpdate): $foundConfigTargetNeedingUpdate"
+            $result = $foundConfigTargetNeedingUpdate
             Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Result: $result"
             return $result
         }
