@@ -509,26 +509,14 @@ $steps = @(
         Name      = "Download Loxone Config"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Entered."
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] UpdateTargetsInfoArg Count: $($UpdateTargetsInfoArg.Count)"
-            $itemIndex = 0
-            foreach ($item in $UpdateTargetsInfoArg) {
-                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Item #$itemIndex - Type: $($item.Type), UpdateNeeded: $($item.UpdateNeeded), Name: $($item.Name)"
-                $itemIndex++
-            }
             $foundConfigTargetNeedingUpdate = $false
             foreach ($targetItem in $UpdateTargetsInfoArg) {
-                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Checking Item - Type: $($targetItem.Type), UpdateNeeded: $($targetItem.UpdateNeeded)"
                 if ($targetItem.Type -eq "Config" -and ($targetItem.UpdateNeeded -eq $true -or $targetItem.UpdateNeeded -eq "True")) {
-                    Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] MATCH FOUND - Type: $($targetItem.Type), UpdateNeeded: $($targetItem.UpdateNeeded), Name: $($targetItem.Name), Status: $($targetItem.Status)"
                     $foundConfigTargetNeedingUpdate = $true
-                    break # Found a match, no need to check further
+                    break
                 }
             }
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Manual Filter Result (foundConfigTargetNeedingUpdate): $foundConfigTargetNeedingUpdate"
-            $result = $foundConfigTargetNeedingUpdate
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Download Loxone Config] Result: $result"
-            return $result
+            return $foundConfigTargetNeedingUpdate
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef)
@@ -541,18 +529,13 @@ $steps = @(
         Name      = "Extract Loxone Config"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Extract Loxone Config] Entered."
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Extract Loxone Config] UpdateTargetsInfoArg Count: $($UpdateTargetsInfoArg.Count)"
             $foundConfigTargetForExtract = $false
             foreach ($targetItem in $UpdateTargetsInfoArg) {
-                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Extract Loxone Config] Checking Item - Type: $($targetItem.Type), UpdateNeeded: $($targetItem.UpdateNeeded), Status: $($targetItem.Status)"
                 if ($targetItem.Type -eq "Config" -and ($targetItem.UpdateNeeded -eq $true -or $targetItem.UpdateNeeded -eq "True") -and $targetItem.Status -ne "UpdateFailed (Download)") {
-                    Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Extract Loxone Config] MATCH FOUND - Type: $($targetItem.Type), UpdateNeeded: $($targetItem.UpdateNeeded), Name: $($targetItem.Name), Status: $($targetItem.Status)"
                     $foundConfigTargetForExtract = $true
                     break
                 }
             }
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Extract Loxone Config] Manual Filter Result (foundConfigTargetForExtract): $foundConfigTargetForExtract"
             return $foundConfigTargetForExtract
         }
         Run       = {
@@ -567,18 +550,13 @@ $steps = @(
         Name      = "Install Loxone Config"
         ShouldRun = {
             param([PSCustomObject]$scriptCtxArg, [System.Collections.ArrayList]$UpdateTargetsInfoArg, [ref]$globalStateRefArg, [PSCustomObject]$prerequisitesArg)
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Install Loxone Config] Entered."
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Install Loxone Config] UpdateTargetsInfoArg Count: $($UpdateTargetsInfoArg.Count)"
             $foundConfigTargetForInstall = $false
             foreach ($targetItem in $UpdateTargetsInfoArg) {
-                Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Install Loxone Config] Checking Item - Type: $($targetItem.Type), UpdateNeeded: $($targetItem.UpdateNeeded), Status: $($targetItem.Status)"
                 if ($targetItem.Type -eq "Config" -and ($targetItem.UpdateNeeded -eq $true -or $targetItem.UpdateNeeded -eq "True") -and $targetItem.Status -ne "UpdateFailed (Download)" -and $targetItem.Status -ne "UpdateFailed (Extraction)") {
-                    Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Install Loxone Config] MATCH FOUND - Type: $($targetItem.Type), UpdateNeeded: $($targetItem.UpdateNeeded), Name: $($targetItem.Name), Status: $($targetItem.Status)"
                     $foundConfigTargetForInstall = $true
                     break
                 }
             }
-            Write-Host "DEBUG: (UpdateLoxone.ps1) [ShouldRun - Install Loxone Config] Manual Filter Result (foundConfigTargetForInstall): $foundConfigTargetForInstall"
             return $foundConfigTargetForInstall
         }
         Run       = {
