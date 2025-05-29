@@ -35,12 +35,16 @@ BEFORE RUNNING THIS SCRIPT:
 3. Ensure you are in the root of your Git repository.
 4. Ensure Git is installed and configured (including credentials for push).
 5. Ensure your working directory is clean or changes are committed/stashed.
+6. Ensure GitHub CLI (`gh`) is installed and authenticated (`gh auth login`).
 
 .NOTES
-The script will attempt to stage, commit, and push the new ZIP archive and manifest files.
-If the Git push fails, you may need to push manually.
-The 'InstallerUrl' in the generated installer manifest still needs to be updated with the
-actual public URL of the ZIP file AFTER it has been uploaded (e.g., via GitHub Releases).
+The script will attempt to:
+- Stage, commit, and push the new ZIP archive and initial manifest files.
+- Create a GitHub Release and Tag.
+- Upload the ZIP as a release asset.
+- Update the local installer manifest with the public URL of the uploaded asset.
+- Commit and push the updated installer manifest.
+If any Git or GitHub CLI step fails, you may need to perform subsequent steps manually.
 #>
 [CmdletBinding()]
 param(
@@ -297,54 +301,85 @@ Write-Host "Attempting Git operations..."
 # Check if git command is available
 try {
     Get-Command git -ErrorAction Stop | Out-Null
+    Get-Command git -ErrorAction Stop | Out-Null
     Write-Host "Git command found."
+    Get-Command gh -ErrorAction Stop | Out-Null
+    Write-Host "GitHub CLI (gh) command found."
 }
 catch {
-    Write-Warning "Git command not found. Skipping Git operations. Please commit and push manually."
+    Write-Warning "Git or GitHub CLI (gh) command not found. Skipping automated Git and GitHub Release operations."
+    Write-Warning "Please commit, push, create release, upload asset, and update manifest URL manually."
     Write-Host "---"
-    Write-Host "Release process for $PackageName v$ScriptVersion (excluding Git) completed."
+    Write-Host "Release process for $PackageName v$ScriptVersion (excluding Git/GitHub automation) completed."
     Write-Host "ACTION REQUIRED: Upload '$zipFileName' to a public URL and update '$($installerManifestPath.Replace($PSScriptRoot, '.'))' with this URL."
     Write-Host "Example public URL: https://github.com/$PublisherName/UpdateLoxone/releases/download/v$ScriptVersion/$zipFileName"
-    exit 0 # Exit successfully as core tasks are done
+    exit 0 # Exit successfully as core packaging tasks are done
 }
 
 $commitMessage = "Release v$ScriptVersion"
-# $manifestRelativePath is not used for git add anymore, individual paths are used.
+$tagName = "v$ScriptVersion"
 $zipFileRelativePath = $zipFilePath.Replace($PSScriptRoot, ".")     # Get relative path for git add
 $readmeRelativePath = ".\README.md"
 $changelogRelativePath = ".\CHANGELOG.md"
+$installerManifestRelativePath = $installerManifestPath.Replace($PSScriptRoot, ".")
 
 try {
-    Write-Host "Staging files for commit..."
-    Write-Host "Staging README.md: $readmeRelativePath"
+    Write-Host "Staging files for initial commit (manifests, docs, ZIP)..."
     git add -f $readmeRelativePath
-    Write-Host "Staging CHANGELOG.md: $changelogRelativePath"
     git add -f $changelogRelativePath
-    Write-Host "Staging Version Manifest: $($versionManifestPath.Replace($PSScriptRoot, '.'))"
     git add -f $versionManifestPath # Use full path and force
-    Write-Host "Staging Locale Manifest: $($localeManifestPath.Replace($PSScriptRoot, '.'))"
     git add -f $localeManifestPath # Use full path and force
-    Write-Host "Staging Installer Manifest: $($installerManifestPath.Replace($PSScriptRoot, '.'))"
     git add -f $installerManifestPath # Use full path and force
-    Write-Host "Staging ZIP archive: $zipFileRelativePath"
     git add -f $zipFileRelativePath
 
-    Write-Host "Committing files with message: '$commitMessage'..."
+    Write-Host "Committing initial release files with message: '$commitMessage'..."
     git commit -m $commitMessage
-    Write-Host "Pushing commit to remote repository..."
+    Write-Host "Pushing initial commit to remote repository..."
     git push
 
-    Write-Host "Git operations completed successfully."
+    Write-Host "Initial Git push successful."
+    Write-Host "---"
+    Write-Host "Attempting GitHub Release creation and asset upload..."
+    
+    $releaseTitle = "Release $tagName"
+    # For simplicity, not extracting changelog notes for gh release notes yet.
+    # Use --notes "" for no notes, or --generate-notes for auto-generated (requires tags on remote)
+    # Or, gh release create $tagName --title $releaseTitle --notes "See CHANGELOG.md for details."
+    Write-Host "Creating GitHub tag '$tagName' and release '$releaseTitle'..."
+    gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
+    
+    Write-Host "Uploading '$zipFileName' to GitHub Release '$tagName'..."
+    gh release upload $tagName $zipFilePath
+
+    $InstallerUrl = "https://github.com/$PublisherName/$PackageName/releases/download/$tagName/$zipFileName"
+    Write-Host "Constructed InstallerUrl: $InstallerUrl"
+
+    Write-Host "Updating installer manifest '$installerManifestRelativePath' with new URL..."
+    $installerContent = Get-Content $installerManifestPath -Raw
+    $placeholderUrl = "REPLACE_WITH_PUBLIC_URL_TO/$zipFileName" # Ensure this matches exactly what's in the template
+    $updatedInstallerContent = $installerContent -replace [regex]::Escape($placeholderUrl), $InstallerUrl
+    Set-Content -Path $installerManifestPath -Value $updatedInstallerContent -Encoding UTF8
+    Write-Host "Installer manifest updated."
+
+    Write-Host "Staging updated installer manifest..."
+    git add -f $installerManifestPath
+    
+    $commitMessageUrlUpdate = "Update installer URL for v$ScriptVersion"
+    Write-Host "Committing updated installer manifest with message: '$commitMessageUrlUpdate'..."
+    git commit -m $commitMessageUrlUpdate
+    
+    Write-Host "Pushing updated installer manifest to remote repository..."
+    git push
+
+    Write-Host "All Git and GitHub operations completed successfully."
 }
 catch {
-    Write-Warning "An error occurred during Git operations: $($_.Exception.Message)"
-    Write-Warning "Please review the Git status, commit, and push manually if needed."
-    # Optionally, you might want to exit with an error code or specific message here
+    Write-Warning "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
+    Write-Warning "Please review the Git status and GitHub releases, then perform any remaining steps manually."
+    Write-Warning "You may need to: create the release, upload the asset '$zipFileName', update '$installerManifestRelativePath' with the URL, commit, and push."
 }
 
 Write-Host "---"
 Write-Host "Release process for $PackageName v$ScriptVersion completed."
-Write-Host "ACTION REQUIRED: If Git push was successful, create a release/tag on GitHub (or your Git host)."
-Write-Host "Then, upload '$zipFileName' to that release and update '$($installerManifestPath.Replace($PSScriptRoot, '.'))' with the final public URL."
-Write-Host "If you haven't already, commit and push the updated installer manifest."
-Write-Host "Example public URL (after creating GitHub release): https://github.com/$PublisherName/UpdateLoxone/releases/download/v$ScriptVersion/$zipFileName"
+Write-Host "Please verify the GitHub release, tag, and asset: https://github.com/$PublisherName/$PackageName/releases/tag/$tagName"
+Write-Host "Verify the installer manifest URL has been updated in your repository."
