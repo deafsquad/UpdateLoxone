@@ -24,7 +24,7 @@ Description = 'Utility functions for the Loxone Update Script, refactored into m
 # Minimum version of the Windows PowerShell engine required by this module
 PowerShellVersion = '5.1'
 # External modules required by this module
-RequiredModules = @('BurntToast')
+# RequiredModules = @('BurntToast') # Temporarily commented out, handled by main script
 
 # Modules to import as nested modules of the module specified in RootModule/ModuleToProcess
 # List all script modules (.psm1 files) that are part of this module

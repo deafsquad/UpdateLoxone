@@ -187,6 +187,36 @@ if ($script:InitialSystemInvocation) {
     }
 
     # Import the main LoxoneUtils module using its manifest.
+    Write-Host "INFO: (UpdateLoxone.ps1) Checking for BurntToast module before LoxoneUtils import..." -ForegroundColor Cyan
+    if (-not (Get-Module -ListAvailable -Name BurntToast)) {
+        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast module not found. Attempting to install..." -ForegroundColor Yellow
+        try {
+            Install-Module BurntToast -Scope CurrentUser -Force -Confirm:$false -SkipPublisherCheck -ErrorAction Stop
+            Write-Host "INFO: (UpdateLoxone.ps1) BurntToast module installed successfully." -ForegroundColor Green
+            try {
+                Write-Host "INFO: (UpdateLoxone.ps1) Explicitly importing BurntToast into the current session..." -ForegroundColor Cyan
+                Import-Module BurntToast -Force -ErrorAction Stop
+                Write-Host "INFO: (UpdateLoxone.ps1) BurntToast imported successfully." -ForegroundColor Green
+            } catch {
+                Write-Error "CRITICAL ERROR: (UpdateLoxone.ps1) Failed to import BurntToast after installation. Error: $($_.Exception.Message)."
+                exit 1
+            }
+        } catch {
+            Write-Error "CRITICAL ERROR: (UpdateLoxone.ps1) Failed to install BurntToast module. Error: $($_.Exception.Message). Please install it manually and re-run the script."
+            exit 1
+        }
+    } else {
+        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast module is already available." -ForegroundColor Cyan
+        try {
+            Write-Host "INFO: (UpdateLoxone.ps1) Explicitly importing BurntToast into the current session..." -ForegroundColor Cyan
+            Import-Module BurntToast -Force -ErrorAction Stop
+            Write-Host "INFO: (UpdateLoxone.ps1) BurntToast imported successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "CRITICAL ERROR: (UpdateLoxone.ps1) Failed to import already available BurntToast module. Error: $($_.Exception.Message)."
+            exit 1
+        }
+    }
+
     Write-Host "INFO: (UpdateLoxone.ps1) Attempting to import LoxoneUtils manifest: '$UtilsModulePath'..." -ForegroundColor Cyan
     try {
         Import-Module $UtilsModulePath -Force -ErrorAction Stop -Verbose
