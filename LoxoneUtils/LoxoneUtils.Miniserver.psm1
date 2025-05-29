@@ -47,6 +47,11 @@ $result = [PSCustomObject]@{
         if (-not ([string]::IsNullOrWhiteSpace($uriBuilder.UserName))) {
             $securePassword = $uriBuilder.Password | ConvertTo-SecureString -AsPlainText -Force
             $credential = New-Object System.Management.Automation.PSCredential($uriBuilder.UserName, $securePassword)
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Parsed UriBuilder.UserName: '{0}'" -f $uriBuilder.UserName)
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Parsed UriBuilder.Password: (length {0})" -f $uriBuilder.Password.Length) # Log length for security
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Credential object created for user: '{0}'" -f $credential.UserName)
+        } else {
+            Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName is NULL or Whitespace. No credential object created from URI.")
         }
 
         $uriBuilder.Path = "/dev/cfg/version"
@@ -97,8 +102,14 @@ $result = [PSCustomObject]@{
                     
                     # Fallback to HTTP
                     $iwrParams.Uri = $versionUri # Revert to original HTTP URI
-                    if ($credential -and $PSVersionTable.PSVersion.Major -ge 6) { $iwrParams.AllowUnencryptedAuthentication = $true }
+                    if ($credential -and $PSVersionTable.PSVersion.Major -ge 6) {
+                        $iwrParams.AllowUnencryptedAuthentication = $true
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): Added AllowUnencryptedAuthentication for HTTP fallback (PSVersion >= 6).")
+                    } elseif ($credential) {
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): Credential present for HTTP fallback (PSVersion < 6). AllowUnencryptedAuthentication not applicable/added by default by IWR for -Credential on HTTP.")
+                    }
                     Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting HTTP connection (fallback). Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback iwrParams: $($iwrParams | Out-String)")
                     try {
                         $responseObject = Invoke-WebRequest @iwrParams # This will throw to the outer catch if it fails
                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Invoke-WebRequest successful (fallback). StatusCode: {0}" -f $responseObject.StatusCode)
