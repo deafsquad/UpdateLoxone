@@ -10,7 +10,7 @@
 !LoxoneUtils/
 !*.png
 !CHANGELOG.md
-!manifests/
+!manifests/**
 !UpdateLoxone-v*.zip
 
 # Keep this .gitignore file
