@@ -12,6 +12,7 @@
 !*.png
 !CHANGELOG.md
 !manifests/d/deafsquad/UpdateLoxone/ # Be very specific
-!UpdateLoxone-v*.zip
+# !UpdateLoxone-v*.zip # No longer needed as ZIPs are in releases_archive and not committed
+releases_archive/
 
 # Keep this .gitignore file

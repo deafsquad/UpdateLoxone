@@ -8,13 +8,18 @@ This script performs the following actions:
 2. Bumps the version (patch, then minor, then major, with rollover at .9 for patch/minor).
 3. Takes publisher name as input.
 4. Automatically determines author name from existing locale manifest or defaults to publisher name.
-5. Packages the necessary files (UpdateLoxone.ps1, LoxoneUtils/, assets, README, CHANGELOG) into a ZIP archive named with the new version.
+5. Packages the necessary files into a ZIP archive, storing it locally in './releases_archive/'.
 6. Calculates the SHA256 hash of the ZIP archive.
 7. Generates a multi-file winget manifest for the new version in the './manifests' directory.
 8. Checks if CHANGELOG.md contains an entry for the new version; exits if not.
-9. Stages README.md, CHANGELOG.md, the new ZIP archive, and the new manifest files using Git.
+9. Stages README.md, CHANGELOG.md, and the new manifest files using Git (ZIPs are not committed).
 10. Commits the staged files with a message "Release vX.Y.Z".
-11. Attempts to push the commit to the remote repository.
+11. Pushes the commit to the remote repository.
+12. Creates a GitHub Tag and Release using 'gh' CLI.
+13. Uploads the locally created ZIP as an asset to the GitHub Release.
+14. Updates the local installer manifest with the public URL of the uploaded asset.
+15. Commits and pushes the updated installer manifest.
+16. Rotates local ZIP archives in './releases_archive/', keeping the latest 10.
 
 .PARAMETER PublisherName
 (Required) The publisher name (e.g., your GitHub username).
@@ -34,17 +39,14 @@ BEFORE RUNNING THIS SCRIPT:
 2. Manually update 'README.md' if there are any changes to usage, features, etc.
 3. Ensure you are in the root of your Git repository.
 4. Ensure Git is installed and configured (including credentials for push).
-5. Ensure your working directory is clean or changes are committed/stashed.
-6. Ensure GitHub CLI (`gh`) is installed and authenticated (`gh auth login`).
+5. Ensure GitHub CLI (`gh`) is installed and authenticated (`gh auth login`).
+6. Ensure your working directory is clean or changes are committed/stashed.
 
 .NOTES
-The script will attempt to:
-- Stage, commit, and push the new ZIP archive and initial manifest files.
-- Create a GitHub Release and Tag.
-- Upload the ZIP as a release asset.
-- Update the local installer manifest with the public URL of the uploaded asset.
-- Commit and push the updated installer manifest.
+The script automates most of the release process.
 If any Git or GitHub CLI step fails, you may need to perform subsequent steps manually.
+Local ZIP archives are stored in './releases_archive/' and rotated (default: keep 10).
+ZIP files themselves are NOT committed to the Git repository; they are uploaded to GitHub Releases.
 #>
 [CmdletBinding()]
 param(
@@ -74,7 +76,6 @@ function Get-CurrentVersion {
                     return $parsedVersion
                 }
             }
-            # If the loop completes without returning, it means the version line wasn't found
             Write-Warning "PackageVersion line not found or pattern mismatch in $BaseManifestPath. Defaulting to 0.0.0."
             return "0.0.0"
         } catch {
@@ -115,8 +116,8 @@ function Increment-Version {
 # --- Function to Get Current Author ---
 function Get-CurrentAuthor {
     param(
-        [string]$LocaleManifestPath, # Path to the locale manifest (e.g., deafsquad.UpdateLoxone.locale.en-US.yaml)
-        [string]$DefaultAuthor       # Fallback author name (usually PublisherName)
+        [string]$LocaleManifestPath, 
+        [string]$DefaultAuthor
     )
     if (Test-Path $LocaleManifestPath) {
         try {
@@ -140,7 +141,31 @@ function Get-CurrentAuthor {
     }
 }
 
-# --- Determine Manifest Paths (needed early for version and author detection) ---
+# --- Function to Rotate Local Release Archives ---
+function Rotate-LocalReleaseArchives {
+    param(
+        [string]$ArchiveDirectory,
+        [int]$KeepCount = 10
+    )
+    Write-Host "Checking local release archives in '$ArchiveDirectory' to keep the latest $KeepCount..."
+    if (-not (Test-Path $ArchiveDirectory)) {
+        Write-Host "Archive directory '$ArchiveDirectory' does not exist. Skipping rotation."
+        return
+    }
+    $archives = Get-ChildItem -Path $ArchiveDirectory -Filter "UpdateLoxone-v*.zip" | Sort-Object -Property Name -Descending
+    if ($archives.Count -gt $KeepCount) {
+        $archivesToRemove = $archives | Select-Object -Skip $KeepCount
+        foreach ($archiveToRemove in $archivesToRemove) {
+            Write-Host "Removing old local archive: $($archiveToRemove.FullName)"
+            Remove-Item -Path $archiveToRemove.FullName -Force
+        }
+    } else {
+        Write-Host "Fewer than $KeepCount local archives found, no rotation needed."
+    }
+}
+
+
+# --- Determine Manifest Paths ---
 $manifestDir = Join-Path -Path $PSScriptRoot -ChildPath "manifests"
 $publisherSubDir = Join-Path -Path $manifestDir -ChildPath $PublisherName.Substring(0,1).ToLower()
 $packageSubDir = Join-Path -Path $publisherSubDir -ChildPath $PublisherName
@@ -158,16 +183,14 @@ $AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthor
 Write-Host "Starting release process for $PackageName version $ScriptVersion (Author: $AuthorName)..."
 
 # --- Pre-flight checks ---
-# Check CHANGELOG.md for the new version entry
 $changelogPath = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
 if (-not (Test-Path $changelogPath)) {
     Write-Error "CHANGELOG.md not found at $changelogPath."
     exit 1
 }
-$changelogContent = Get-Content $changelogPath -Raw # Read all content for easier matching
-# Ensure the version string is properly escaped for regex, especially the dots.
+$changelogContent = Get-Content $changelogPath -Raw
 $escapedVersionForRegex = [regex]::Escape($ScriptVersion)
-$versionHeaderPattern = "## \[$escapedVersionForRegex\]" # Regex: ## [X.Y.Z]
+$versionHeaderPattern = "## \[$escapedVersionForRegex\]" 
 
 if ($changelogContent -notmatch $versionHeaderPattern) {
     Write-Error "CHANGELOG.md does not contain an entry for the new version $ScriptVersion."
@@ -177,52 +200,33 @@ if ($changelogContent -notmatch $versionHeaderPattern) {
 Write-Host "CHANGELOG.md contains an entry for version $ScriptVersion."
 
 $requiredFiles = @(
-    ".\UpdateLoxone.ps1",
-    ".\LoxoneUtils\LoxoneUtils.psd1", # Check for a key file in LoxoneUtils
-    ".\ms.png",
-    ".\nok.png",
-    ".\ok.png",
-    ".\UpdateLoxoneMSList.txt.example",
-    ".\Send-GoogleChat.ps1",
-    ".\README.md",
-    ".\CHANGELOG.md" # Already checked for content, but ensure it's in the list for other checks if any
+    ".\UpdateLoxone.ps1", ".\LoxoneUtils\LoxoneUtils.psd1", ".\ms.png", ".\nok.png", ".\ok.png",
+    ".\UpdateLoxoneMSList.txt.example", ".\Send-GoogleChat.ps1", ".\README.md", ".\CHANGELOG.md"
 )
-
 foreach ($file in $requiredFiles) {
-    if (-not (Test-Path $file)) {
-        Write-Error "Required file not found: $file. Please ensure all necessary files are present."
-        exit 1 # Should not happen for CHANGELOG.md due to check above, but good for others
-    }
+    if (-not (Test-Path $file)) { Write-Error "Required file not found: $file."; exit 1 }
 }
-Write-Host "All required files seem to be present."
+Write-Host "All required project files seem to be present."
 Write-Host "IMPORTANT: Ensure you have manually updated README.md if necessary for version $ScriptVersion."
-# Read-Host prompt removed, CHANGELOG check is now automated.
 
-# --- Define files and directories ---
+# --- Define Archive Path ---
+$releasesArchiveDirName = "releases_archive"
+$releasesArchiveDir = Join-Path -Path $PSScriptRoot -ChildPath $releasesArchiveDirName
+if (-not (Test-Path $releasesArchiveDir)) {
+    Write-Host "Creating local releases archive directory: $releasesArchiveDir"
+    New-Item -ItemType Directory -Path $releasesArchiveDir | Out-Null
+}
 $zipFileName = "UpdateLoxone-v$ScriptVersion.zip"
-$zipFilePath = Join-Path -Path $PSScriptRoot -ChildPath $zipFileName
-
-$filesToZip = @(
-    ".\UpdateLoxone.ps1",
-    ".\LoxoneUtils",
-    ".\ms.png",
-    ".\nok.png",
-    ".\ok.png",
-    ".\UpdateLoxoneMSList.txt.example",
-    ".\Send-GoogleChat.ps1",
-    ".\README.md",
-    ".\CHANGELOG.md"
-)
+$zipFilePath = Join-Path -Path $releasesArchiveDir -ChildPath $zipFileName
 
 # --- Create ZIP Archive ---
+$filesToZip = @(
+    ".\UpdateLoxone.ps1", ".\LoxoneUtils", ".\ms.png", ".\nok.png", ".\ok.png",
+    ".\UpdateLoxoneMSList.txt.example", ".\Send-GoogleChat.ps1", ".\README.md", ".\CHANGELOG.md"
+)
 Write-Host "Creating ZIP archive: $zipFilePath..."
-try {
-    Compress-Archive -Path $filesToZip -DestinationPath $zipFilePath -Force
-    Write-Host "Successfully created ZIP archive: $zipFilePath"
-} catch {
-    Write-Error "Failed to create ZIP archive. Error: $($_.Exception.Message)"
-    exit 1
-}
+Compress-Archive -Path $filesToZip -DestinationPath $zipFilePath -Force
+Write-Host "Successfully created ZIP archive: $zipFilePath"
 
 # --- Calculate SHA256 Hash ---
 Write-Host "Calculating SHA256 hash for $zipFilePath..."
@@ -230,15 +234,11 @@ $fileHash = Get-FileHash -Path $zipFilePath -Algorithm SHA256 | Select-Object -E
 Write-Host "SHA256 Hash: $fileHash"
 
 # --- Create Manifests ---
-# $manifestDir, $publisherSubDir, $packageSubDir, $finalManifestDir are already defined from earlier
 $versionManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.yaml"
 $localeManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.locale.en-US.yaml"
 $installerManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.installer.yaml"
 
 $currentDate = Get-Date -Format "yyyy-MM-dd"
-
-# Version Manifest
-Write-Host "Creating Version manifest: $versionManifestPath..."
 $versionManifestContent = @"
 PackageIdentifier: $PackageIdentifier
 PackageVersion: $ScriptVersion
@@ -248,8 +248,6 @@ ManifestVersion: 1.6.0
 "@
 Set-Content -Path $versionManifestPath -Value $versionManifestContent -Encoding UTF8
 
-# Locale Manifest
-Write-Host "Creating Locale manifest: $localeManifestPath..."
 $localeManifestContent = @"
 PackageIdentifier: $PackageIdentifier
 PackageVersion: $ScriptVersion
@@ -257,9 +255,9 @@ PackageLocale: en-US
 Publisher: $PublisherName
 Author: $AuthorName
 PackageName: $PackageName
-PackageUrl: https://github.com/$PublisherName/UpdateLoxone # Assuming GitHub, adjust if needed
-License: MIT # Assuming MIT, adjust if needed
-LicenseUrl: https://github.com/$PublisherName/UpdateLoxone/blob/main/LICENSE # Assuming, adjust
+PackageUrl: https://github.com/$PublisherName/$PackageName
+License: MIT 
+LicenseUrl: https://github.com/$PublisherName/$PackageName/blob/main/LICENSE
 ShortDescription: Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers.
 Moniker: updateloxone
 Tags:
@@ -272,91 +270,73 @@ ManifestVersion: 1.6.0
 "@
 Set-Content -Path $localeManifestPath -Value $localeManifestContent -Encoding UTF8
 
-# Installer Manifest
-Write-Host "Creating Installer manifest: $installerManifestPath..."
 $installerManifestContent = @"
 PackageIdentifier: $PackageIdentifier
 PackageVersion: $ScriptVersion
 InstallerLocale: en-US
 InstallerType: zip
-NestedInstallerType: portable # The PS1 script is portable
+NestedInstallerType: portable
 NestedInstallerFiles:
   - RelativeFilePath: UpdateLoxone.ps1
-    PortableCommandAlias: UpdateLoxone.ps1 # Or a more user-friendly alias if you create one
+    PortableCommandAlias: UpdateLoxone.ps1
 Installers:
-  - Architecture: x64 # Assuming x64, adjust if needed for other architectures
-    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/$zipFileName
+  - Architecture: x64
+    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/$zipFileName 
     InstallerSha256: $fileHash
 ManifestType: installer
 ManifestVersion: 1.6.0
 "@
 Set-Content -Path $installerManifestPath -Value $installerManifestContent -Encoding UTF8
-
 Write-Host "Winget manifests created in: $finalManifestDir"
 
-# --- Git Operations ---
+# --- Git and GitHub CLI Operations ---
 Write-Host "---"
-Write-Host "Attempting Git operations..."
-
-# Check if git command is available
+Write-Host "Attempting Git and GitHub CLI operations..."
 try {
-    Get-Command git -ErrorAction Stop | Out-Null
-    Get-Command git -ErrorAction Stop | Out-Null
-    Write-Host "Git command found."
-    Get-Command gh -ErrorAction Stop | Out-Null
-    Write-Host "GitHub CLI (gh) command found."
-}
-catch {
-    Write-Warning "Git or GitHub CLI (gh) command not found. Skipping automated Git and GitHub Release operations."
-    Write-Warning "Please commit, push, create release, upload asset, and update manifest URL manually."
-    Write-Host "---"
-    Write-Host "Release process for $PackageName v$ScriptVersion (excluding Git/GitHub automation) completed."
-    Write-Host "ACTION REQUIRED: Upload '$zipFileName' to a public URL and update '$($installerManifestPath.Replace($PSScriptRoot, '.'))' with this URL."
-    Write-Host "Example public URL: https://github.com/$PublisherName/UpdateLoxone/releases/download/v$ScriptVersion/$zipFileName"
-    exit 0 # Exit successfully as core packaging tasks are done
+    Get-Command git -ErrorAction Stop | Out-Null; Write-Host "Git command found."
+    Get-Command gh -ErrorAction Stop | Out-Null; Write-Host "GitHub CLI (gh) command found."
+} catch {
+    Write-Warning "Git or GitHub CLI (gh) command not found. Skipping automated Git/GitHub operations."
+    exit 1 # Critical for full automation
 }
 
 $commitMessage = "Release v$ScriptVersion"
 $tagName = "v$ScriptVersion"
-$zipFileRelativePath = $zipFilePath.Replace($PSScriptRoot, ".")     # Get relative path for git add
 $readmeRelativePath = ".\README.md"
 $changelogRelativePath = ".\CHANGELOG.md"
 $installerManifestRelativePath = $installerManifestPath.Replace($PSScriptRoot, ".")
 
 try {
-    Write-Host "Staging files for initial commit (manifests, docs, ZIP)..."
+    Write-Host "Staging files for initial commit (manifests, docs)..."
     git add -f $readmeRelativePath
     git add -f $changelogRelativePath
-    git add -f $versionManifestPath # Use full path and force
-    git add -f $localeManifestPath # Use full path and force
-    git add -f $installerManifestPath # Use full path and force
-    git add -f $zipFileRelativePath
+    git add -f $versionManifestPath 
+    git add -f $localeManifestPath 
+    git add -f $installerManifestPath 
+    # Note: ZIP file is NOT added to Git
 
     Write-Host "Committing initial release files with message: '$commitMessage'..."
     git commit -m $commitMessage
     Write-Host "Pushing initial commit to remote repository..."
     git push
-
     Write-Host "Initial Git push successful."
     Write-Host "---"
+
     Write-Host "Attempting GitHub Release creation and asset upload..."
-    
     $releaseTitle = "Release $tagName"
-    # For simplicity, not extracting changelog notes for gh release notes yet.
-    # Use --notes "" for no notes, or --generate-notes for auto-generated (requires tags on remote)
-    # Or, gh release create $tagName --title $releaseTitle --notes "See CHANGELOG.md for details."
     Write-Host "Creating GitHub tag '$tagName' and release '$releaseTitle'..."
     gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
     
-    Write-Host "Uploading '$zipFileName' to GitHub Release '$tagName'..."
-    gh release upload $tagName $zipFilePath
+    Write-Host "Uploading '$zipFileName' from '$zipFilePath' to GitHub Release '$tagName'..."
+    gh release upload $tagName $zipFilePath --clobber # --clobber to overwrite if asset exists
+    Write-Host "Asset upload successful."
 
     $InstallerUrl = "https://github.com/$PublisherName/$PackageName/releases/download/$tagName/$zipFileName"
     Write-Host "Constructed InstallerUrl: $InstallerUrl"
 
     Write-Host "Updating installer manifest '$installerManifestRelativePath' with new URL..."
     $installerContent = Get-Content $installerManifestPath -Raw
-    $placeholderUrl = "REPLACE_WITH_PUBLIC_URL_TO/$zipFileName" # Ensure this matches exactly what's in the template
+    $placeholderUrl = "REPLACE_WITH_PUBLIC_URL_TO/$zipFileName" 
     $updatedInstallerContent = $installerContent -replace [regex]::Escape($placeholderUrl), $InstallerUrl
     Set-Content -Path $installerManifestPath -Value $updatedInstallerContent -Encoding UTF8
     Write-Host "Installer manifest updated."
@@ -370,14 +350,15 @@ try {
     
     Write-Host "Pushing updated installer manifest to remote repository..."
     git push
-
     Write-Host "All Git and GitHub operations completed successfully."
-}
-catch {
+
+} catch {
     Write-Warning "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
     Write-Warning "Please review the Git status and GitHub releases, then perform any remaining steps manually."
-    Write-Warning "You may need to: create the release, upload the asset '$zipFileName', update '$installerManifestRelativePath' with the URL, commit, and push."
 }
+
+# --- Rotate Local Archives ---
+Rotate-LocalReleaseArchives -ArchiveDirectory $releasesArchiveDir -KeepCount 10
 
 Write-Host "---"
 Write-Host "Release process for $PackageName v$ScriptVersion completed."
