@@ -30,8 +30,19 @@ This script performs the following actions:
 .PARAMETER PackageName
 (Optional) The winget package name. Defaults to "UpdateLoxone".
 
+.PARAMETER DryRun
+(Optional) If specified, the script will simulate most operations without making remote changes (no git push, no GitHub release creation/upload).
+
+.PARAMETER WingetPkgsRepoPath
+(Optional) The local file path to your cloned fork of the 'winget-pkgs' repository. Required if using -SubmitToWinget.
+
+.PARAMETER SubmitToWinget
+(Optional) If specified along with -WingetPkgsRepoPath, the script will copy manifests to your local 'winget-pkgs' clone, run 'winget validate', and prepare a local commit.
+
 .EXAMPLE
 .\publish_new_release.ps1 -PublisherName "deafsquad"
+.\publish_new_release.ps1 -PublisherName "deafsquad" -DryRun
+.\publish_new_release.ps1 -PublisherName "deafsquad" -WingetPkgsRepoPath "D:\GitHub\winget-pkgs" -SubmitToWinget
 
 .IMPORTANT
 BEFORE RUNNING THIS SCRIPT:
@@ -55,8 +66,19 @@ param(
 
     [string]$PackageIdentifier = "$($PublisherName).UpdateLoxone",
 
-    [string]$PackageName = "UpdateLoxone"
+    [string]$PackageName = "UpdateLoxone",
+
+    [switch]$DryRun,
+
+    [string]$WingetPkgsRepoPath,
+
+    [switch]$SubmitToWinget
 )
+
+if ($SubmitToWinget.IsPresent -and ([string]::IsNullOrWhiteSpace($WingetPkgsRepoPath) -or -not (Test-Path $WingetPkgsRepoPath -PathType Container))) {
+    Write-Error "The -SubmitToWinget switch requires a valid -WingetPkgsRepoPath to be specified and the path must exist."
+    exit 1
+}
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -294,10 +316,15 @@ Write-Host "---"
 Write-Host "Attempting Git and GitHub CLI operations..."
 try {
     Get-Command git -ErrorAction Stop | Out-Null; Write-Host "Git command found."
-    Get-Command gh -ErrorAction Stop | Out-Null; Write-Host "GitHub CLI (gh) command found."
+    if (-not $DryRun) { # gh is only needed for actual remote operations
+        Get-Command gh -ErrorAction Stop | Out-Null; Write-Host "GitHub CLI (gh) command found."
+    }
 } catch {
-    Write-Warning "Git or GitHub CLI (gh) command not found. Skipping automated Git/GitHub operations."
-    exit 1 # Critical for full automation
+    Write-Warning "Git command not found, or GitHub CLI (gh) not found (and not a DryRun). Skipping automated Git/GitHub operations."
+    # For DryRun, gh not being found is not critical. For a real run, it is.
+    if (-not $DryRun) {
+        exit 1 # Critical for full automation if not a dry run
+    }
 }
 
 $commitMessage = "Release v$ScriptVersion"
@@ -316,41 +343,49 @@ try {
     # Note: ZIP file is NOT added to Git
 
     Write-Host "Committing initial release files with message: '$commitMessage'..."
+    Write-Host "Committing initial release files with message: '$commitMessage'..."
     git commit -m $commitMessage
-    Write-Host "Pushing initial commit to remote repository..."
-    git push
-    Write-Host "Initial Git push successful."
-    Write-Host "---"
-
-    Write-Host "Attempting GitHub Release creation and asset upload..."
-    $releaseTitle = "Release $tagName"
-    Write-Host "Creating GitHub tag '$tagName' and release '$releaseTitle'..."
-    gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
     
-    Write-Host "Uploading '$zipFileName' from '$zipFilePath' to GitHub Release '$tagName'..."
-    gh release upload $tagName $zipFilePath --clobber # --clobber to overwrite if asset exists
-    Write-Host "Asset upload successful."
+    if (-not $DryRun) {
+        Write-Host "Pushing initial commit to remote repository..."
+        git push
+        Write-Host "Initial Git push successful."
+        Write-Host "---"
 
-    $InstallerUrl = "https://github.com/$PublisherName/$PackageName/releases/download/$tagName/$zipFileName"
-    Write-Host "Constructed InstallerUrl: $InstallerUrl"
+        Write-Host "Attempting GitHub Release creation and asset upload..."
+        $releaseTitle = "Release $tagName"
+        Write-Host "Creating GitHub tag '$tagName' and release '$releaseTitle'..."
+        gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
+        
+        Write-Host "Uploading '$zipFileName' from '$zipFilePath' to GitHub Release '$tagName'..."
+        gh release upload $tagName $zipFilePath --clobber
+        Write-Host "Asset upload successful."
 
-    Write-Host "Updating installer manifest '$installerManifestRelativePath' with new URL..."
-    $installerContent = Get-Content $installerManifestPath -Raw
-    $placeholderUrl = "REPLACE_WITH_PUBLIC_URL_TO/$zipFileName" 
-    $updatedInstallerContent = $installerContent -replace [regex]::Escape($placeholderUrl), $InstallerUrl
-    Set-Content -Path $installerManifestPath -Value $updatedInstallerContent -Encoding UTF8
-    Write-Host "Installer manifest updated."
+        $InstallerUrl = "https://github.com/$PublisherName/$PackageName/releases/download/$tagName/$zipFileName"
+        Write-Host "Constructed InstallerUrl: $InstallerUrl"
 
-    Write-Host "Staging updated installer manifest..."
-    git add -f $installerManifestPath
-    
-    $commitMessageUrlUpdate = "Update installer URL for v$ScriptVersion"
-    Write-Host "Committing updated installer manifest with message: '$commitMessageUrlUpdate'..."
-    git commit -m $commitMessageUrlUpdate
-    
-    Write-Host "Pushing updated installer manifest to remote repository..."
-    git push
-    Write-Host "All Git and GitHub operations completed successfully."
+        Write-Host "Updating installer manifest '$installerManifestRelativePath' with new URL..."
+        $installerContent = Get-Content $installerManifestPath -Raw
+        $placeholderUrl = "REPLACE_WITH_PUBLIC_URL_TO/$zipFileName"
+        $updatedInstallerContent = $installerContent -replace [regex]::Escape($placeholderUrl), $InstallerUrl
+        Set-Content -Path $installerManifestPath -Value $updatedInstallerContent -Encoding UTF8
+        Write-Host "Installer manifest updated."
+
+        Write-Host "Staging updated installer manifest..."
+        git add -f $installerManifestPath
+        
+        $commitMessageUrlUpdate = "Update installer URL for v$ScriptVersion"
+        Write-Host "Committing updated installer manifest with message: '$commitMessageUrlUpdate'..."
+        git commit -m $commitMessageUrlUpdate
+        
+        Write-Host "Pushing updated installer manifest to remote repository..."
+        git push
+        Write-Host "All Git and GitHub operations completed successfully."
+    } else {
+        Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
+        Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$PublisherName/$PackageName/releases/download/$tagName/$zipFileName"
+        Write-Host "DRY RUN: Installer manifest at '$installerManifestPath' still contains placeholder URL."
+    }
 
 } catch {
     Write-Warning "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
@@ -360,7 +395,59 @@ try {
 # --- Rotate Local Archives ---
 Rotate-LocalReleaseArchives -ArchiveDirectory $releasesArchiveDir -KeepCount 10
 
+# --- Winget Submission Preparation ---
+if ($SubmitToWinget.IsPresent) {
+    Write-Host "---"
+    Write-Host "Preparing for Winget submission..."
+    $wingetPkgsManifestTargetDir = Join-Path -Path $WingetPkgsRepoPath -ChildPath "manifests\$($PublisherName.Substring(0,1).ToLower())\$PublisherName\$PackageName"
+    
+    Write-Host "Ensuring target directory exists in winget-pkgs clone: $wingetPkgsManifestTargetDir"
+    if (-not (Test-Path $wingetPkgsManifestTargetDir)) {
+        New-Item -ItemType Directory -Path $wingetPkgsManifestTargetDir -Force | Out-Null
+    }
+
+    Write-Host "Copying manifests to $wingetPkgsManifestTargetDir..."
+    Copy-Item -Path $versionManifestPath -Destination $wingetPkgsManifestTargetDir -Force
+    Copy-Item -Path $localeManifestPath -Destination $wingetPkgsManifestTargetDir -Force
+    Copy-Item -Path $installerManifestPath -Destination $wingetPkgsManifestTargetDir -Force
+    Write-Host "Manifests copied."
+
+    Write-Host "Validating manifests in winget-pkgs clone path..."
+    try {
+        winget validate --manifests $wingetPkgsManifestTargetDir
+        Write-Host "Winget validation successful (or warnings issued)."
+    } catch {
+        Write-Warning "Winget validation failed. Please check the output above. Error: $($_.Exception.Message)"
+    }
+
+    if (-not $DryRun) {
+        Write-Host "Preparing commit in local winget-pkgs repository at '$WingetPkgsRepoPath'..."
+        $currentLocation = Get-Location
+        Set-Location -Path $WingetPkgsRepoPath
+        
+        Write-Host "Staging manifests in winget-pkgs repository..."
+        $relativeManifestPathForWingetPkgs = "manifests\$($PublisherName.Substring(0,1).ToLower())\$PublisherName\$PackageName"
+        git add $relativeManifestPathForWingetPkgs
+        
+        $commitMessageWinget = "Add $PackageIdentifier v$ScriptVersion"
+        Write-Host "Committing manifests in winget-pkgs repository with message: '$commitMessageWinget'..."
+        git commit -m $commitMessageWinget
+        
+        Set-Location -Path $currentLocation
+        Write-Host "Commit prepared in '$WingetPkgsRepoPath'."
+        Write-Host "NEXT STEPS for Winget Submission:"
+        Write-Host "1. Navigate to '$WingetPkgsRepoPath'."
+        Write-Host "2. Manually run 'git push' to push the commit to your fork."
+        Write-Host "3. Create a Pull Request from your fork to 'microsoft/winget-pkgs' on GitHub."
+    } else {
+        Write-Host "DRY RUN: Skipping commit preparation in local winget-pkgs repository."
+        Write-Host "DRY RUN: Manifests would be copied to '$wingetPkgsManifestTargetDir' and validated."
+    }
+}
+
 Write-Host "---"
 Write-Host "Release process for $PackageName v$ScriptVersion completed."
-Write-Host "Please verify the GitHub release, tag, and asset: https://github.com/$PublisherName/$PackageName/releases/tag/$tagName"
-Write-Host "Verify the installer manifest URL has been updated in your repository."
+if (-not $DryRun) {
+    Write-Host "Please verify the GitHub release, tag, and asset: https://github.com/$PublisherName/$PackageName/releases/tag/$tagName"
+    Write-Host "Verify the installer manifest URL has been updated in your repository."
+}
