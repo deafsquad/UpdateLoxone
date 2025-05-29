@@ -1,0 +1,18 @@
+PackageIdentifier: deafsquad.UpdateLoxone
+PackageVersion: 0.0.4
+PackageLocale: en-US
+Publisher: deafsquad
+Author: deafsquad
+PackageName: UpdateLoxone
+PackageUrl: https://github.com/deafsquad/UpdateLoxone # Assuming GitHub, adjust if needed
+License: MIT # Assuming MIT, adjust if needed
+LicenseUrl: https://github.com/deafsquad/UpdateLoxone/blob/main/LICENSE # Assuming, adjust
+ShortDescription: Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers.
+Moniker: updateloxone
+Tags:
+  - loxone
+  - automation
+  - update
+  - smart-home
+ManifestType: locale
+ManifestVersion: 1.6.0
