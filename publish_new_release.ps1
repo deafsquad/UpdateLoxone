@@ -152,15 +152,15 @@ function Rotate-LocalReleaseArchives {
         Write-Host "Archive directory '$ArchiveDirectory' does not exist. Skipping rotation."
         return
     }
-    $archives = Get-ChildItem -Path $ArchiveDirectory -Filter "UpdateLoxone-v*.zip" | Sort-Object -Property Name -Descending
-    if ($archives.Count -gt $KeepCount) {
+    $archives = @(Get-ChildItem -Path $ArchiveDirectory -Filter "UpdateLoxone-v*.zip" | Sort-Object -Property Name -Descending) # Ensure $archives is always an array
+    if ($null -ne $archives -and $archives.Count -gt $KeepCount) {
         $archivesToRemove = $archives | Select-Object -Skip $KeepCount
         foreach ($archiveToRemove in $archivesToRemove) {
             Write-Host "Removing old local archive: $($archiveToRemove.FullName)"
             Remove-Item -Path $archiveToRemove.FullName -Force
         }
     } else {
-        Write-Host "Fewer than $KeepCount local archives found, no rotation needed."
+        Write-Host "Fewer than or equal to $KeepCount local archives found, or no archives found. No rotation needed."
     }
 }
 
