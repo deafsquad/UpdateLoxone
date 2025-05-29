@@ -9,10 +9,9 @@
 !*.example
 !LoxoneUtils/
 !*.png
+!*.png
 !CHANGELOG.md
-!manifests/
-!manifests/**/*.yaml
+!manifests/d/deafsquad/UpdateLoxone/ # Be very specific
 !UpdateLoxone-v*.zip
 
 # Keep this .gitignore file
-!.gitignore
