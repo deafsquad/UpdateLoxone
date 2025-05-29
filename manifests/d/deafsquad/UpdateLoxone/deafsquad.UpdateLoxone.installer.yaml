@@ -1,5 +1,5 @@
 PackageIdentifier: deafsquad.UpdateLoxone
-PackageVersion: 0.0.5
+PackageVersion: 0.0.6
 InstallerLocale: en-US
 InstallerType: zip
 NestedInstallerType: portable # The PS1 script is portable
@@ -8,7 +8,7 @@ NestedInstallerFiles:
     PortableCommandAlias: UpdateLoxone.ps1 # Or a more user-friendly alias if you create one
 Installers:
   - Architecture: x64 # Assuming x64, adjust if needed for other architectures
-    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/UpdateLoxone-v0.0.5.zip
-    InstallerSha256: C08DA9CAB2D3BE26226A8437E2E609A47D2264C0E3EA26D258A970E92857F356
+    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/UpdateLoxone-v0.0.6.zip
+    InstallerSha256: 9BDA1F54E1A2E5CA49A5C2FD1BAB3D27236A6245EC27C61B6BBF2BF14A02F0F5
 ManifestType: installer
 ManifestVersion: 1.6.0
