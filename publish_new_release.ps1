@@ -212,14 +212,39 @@ if (-not (Test-Path $changelogPath)) {
 }
 $changelogContent = Get-Content $changelogPath -Raw
 $escapedVersionForRegex = [regex]::Escape($ScriptVersion)
-$versionHeaderPattern = "## \[$escapedVersionForRegex\]" 
+# Pattern to find the version header, allowing for a date placeholder
+$versionHeaderSearchPattern = "## \[$escapedVersionForRegex\]\s*-\s*YYYY-MM-DD_TIMESTAMP_PLACEHOLDER"
+$versionHeaderExactPattern = "## \[$escapedVersionForRegex\]" # Used if placeholder not found initially
 
-if ($changelogContent -notmatch $versionHeaderPattern) {
+if ($changelogContent -match $versionHeaderSearchPattern) {
+    Write-Host "CHANGELOG.md contains an entry for version $ScriptVersion with date placeholder."
+    $currentDateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $lineToReplace = $matches[0] # The whole matched line, e.g., "## [0.1.1] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER"
+    $newLine = "## [$ScriptVersion] - $currentDateTime"
+    
+    # Read content as array for easier line replacement, then write back
+    $changelogLines = Get-Content $changelogPath
+    for ($i = 0; $i -lt $changelogLines.Length; $i++) {
+        if ($changelogLines[$i] -eq $lineToReplace) {
+            $changelogLines[$i] = $newLine
+            Write-Host "Updated date in CHANGELOG.md for version $ScriptVersion to $currentDateTime."
+            break
+        }
+    }
+    Set-Content -Path $changelogPath -Value $changelogLines
+    # Re-read content to ensure subsequent git add picks up the change
+    $changelogContent = Get-Content $changelogPath -Raw
+
+} elseif ($changelogContent -notmatch $versionHeaderExactPattern) {
+    # If neither placeholder nor a simple header is found
     Write-Error "CHANGELOG.md does not contain an entry for the new version $ScriptVersion."
-    Write-Error "Please add a section like '## [$ScriptVersion] - $(Get-Date -Format 'yyyy-MM-dd')' to CHANGELOG.md and try again."
+    Write-Error "Please add a section like '## [$ScriptVersion] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER' to CHANGELOG.md and try again."
     exit 1
+} else {
+    # Header found, but no placeholder - assume date is already set or manually managed for this run
+    Write-Host "CHANGELOG.md contains an entry for version $ScriptVersion (date assumed manually set or pre-existing)."
 }
-Write-Host "CHANGELOG.md contains an entry for version $ScriptVersion."
+
 
 $requiredFiles = @(
     ".\UpdateLoxone.ps1", ".\LoxoneUtils\LoxoneUtils.psd1", ".\ms.png", ".\nok.png", ".\ok.png",
