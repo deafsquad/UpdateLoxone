@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2025-05-30 02:57:21
+### Fixed
+- Applied manual credential parsing and Authorization header construction to the initial HTTP version check within the `Update-MS` function in `LoxoneUtils.Miniserver.psm1`. This mirrors the logic in `Get-MiniserverVersion` to prevent 401 Unauthorized errors when passwords contain special characters that would otherwise be URL-decoded by `[System.UriBuilder]`.
 ## [0.2.2] - 2025-05-30 02:53:00
 ### Fixed
 - Refined `Get-MiniserverVersion` in `LoxoneUtils.Miniserver.psm1` to correctly handle Miniserver entries specifying `http://`. It now directly attempts an HTTP connection with manual Authorization headers and `-UseBasicParsing`, instead of first attempting an HTTPS call which could lead to "AllowUnencryptedAuthentication" errors if a `$credential` object was inadvertently used with an HTTP URI during the initial HTTPS probe.

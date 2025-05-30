@@ -301,6 +301,24 @@ try { # Main function try
             $uriBuilder.Path = "/dev/cfg/version"
             $uriBuilder.Password = $null; $uriBuilder.UserName = $null
             $versionUriForCheck = $uriBuilder.Uri.AbsoluteUri
+
+            # Manually parse username and password from $entryToParse for Auth Header in Update-MS InitialCheck
+            $usernameForAuthHeaderUpdateMS = $null
+            $passwordForAuthHeaderUpdateMS = $null
+            # $entryToParse already has scheme, e.g., http://user:pass@host
+            if ($entryToParse -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+                $credPartFromEntry = $Matches.credentials
+                if ($credPartFromEntry -match '^(?<user>[^:]+):(?<pass>.+)$') {
+                    $usernameForAuthHeaderUpdateMS = $Matches.user
+                    $passwordForAuthHeaderUpdateMS = $Matches.pass
+                    Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: Manually parsed Username for Auth Header: '{0}'" -f $usernameForAuthHeaderUpdateMS)
+                    Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: Manually parsed Password for Auth Header (length): {0}" -f $passwordForAuthHeaderUpdateMS.Length)
+                } else {
+                    Write-Log -Level WARN -Message ("Update-MS InitialCheck: Could not manually parse user:pass from credentials part: '$credPartFromEntry'")
+                }
+            } else {
+                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: Entry '$($entryToParse -replace "([Pp]assword=)[^;]+", '$1********')' does not seem to contain user:pass@host format for direct manual parsing for Auth Header.")
+            }
             
             Write-Log -Message ("Checking current MS version for '{0}'..." -f $msIP) -Level "INFO"
             $responseObject = $null; $initialVersionCheckSuccess = $false; $currentNormalizedVersion = $null
@@ -329,7 +347,31 @@ try { # Main function try
                             $CaughtErrorICR = $_ # ICR for Initial Check Routines
                             Write-Log -Message ("Initial check for {0}: HTTPS failed ({1}). Falling back to HTTP." -f $msIP, $CaughtErrorICR.Exception.Message.Split([Environment]::NewLine)[0]) -Level DEBUG
                             $iwrParamsInitialCheck.Uri = $versionUriForCheck # Revert to original HTTP URI
-                            if ($credential -and $PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.AllowUnencryptedAuthentication = $true }
+                            # For HTTP fallback, prioritize manual auth header
+                            if (-not [string]::IsNullOrEmpty($usernameForAuthHeaderUpdateMS) -and -not [string]::IsNullOrEmpty($passwordForAuthHeaderUpdateMS)) {
+                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): Constructing Authorization header using MANUALLY PARSED User: '{0}' and Password (length: {1})." -f $usernameForAuthHeaderUpdateMS, $passwordForAuthHeaderUpdateMS.Length)
+                                $PairHttp = "${usernameForAuthHeaderUpdateMS}:${passwordForAuthHeaderUpdateMS}"
+                                $BytesHttp = [System.Text.Encoding]::ASCII.GetBytes($PairHttp)
+                                $Base64AuthHttp = [System.Convert]::ToBase64String($BytesHttp)
+                                $iwrParamsInitialCheck.Headers = @{ Authorization = "Basic $Base64AuthHttp" }
+                                $iwrParamsInitialCheck.Remove('Credential'); $iwrParamsInitialCheck.Credential = $null
+                                $iwrParamsInitialCheck.Remove('AllowUnencryptedAuthentication')
+                                $iwrParamsInitialCheck.UseBasicParsing = $true
+                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): Using manual Authorization header. Ensured -Credential is nulled.")
+                            } elseif ($credential) { # Fallback to $credential if manual parsing failed but $credential exists
+                                $iwrParamsInitialCheck.Remove('Headers') # Ensure .Headers is not set from a previous attempt
+                                $iwrParamsInitialCheck.Credential = $credential # Ensure it's set
+                                if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.AllowUnencryptedAuthentication = $true }
+                                $iwrParamsInitialCheck.UseBasicParsing = $true # Good for Gen1
+                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): Manual auth header not available/used. Using \$credential object.")
+                            } else { # No manual creds, no $credential
+                                $iwrParamsInitialCheck.Remove('Headers')
+                                $iwrParamsInitialCheck.Remove('Credential'); $iwrParamsInitialCheck.Credential = $null
+                                $iwrParamsInitialCheck.Remove('AllowUnencryptedAuthentication')
+                                $iwrParamsInitialCheck.UseBasicParsing = $true
+                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): No credentials available for this attempt.")
+                            }
+                            Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
                             $responseObject = Invoke-WebRequest @iwrParamsInitialCheck # This will throw to the outer IWR catch if it fails
                             $initialVersionCheckSuccess = $true
                         }
