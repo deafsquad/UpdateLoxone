@@ -499,7 +499,7 @@ try {
         
         # Extract changelog notes for the release body
         $changelogPathForNotesExtraction = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
-        $changelogLinesForNotes = Get-Content $changelogPathForNotesExtraction
+        $changelogLinesForNotes = @(Get-Content $changelogPathForNotesExtraction)
         $releaseNotesBody = Get-ChangelogNotesForVersion -Version $ScriptVersion -AllChangelogLines $changelogLinesForNotes
         
         if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
