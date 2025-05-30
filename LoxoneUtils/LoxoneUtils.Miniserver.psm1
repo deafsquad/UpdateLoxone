@@ -118,113 +118,81 @@ function Get-MiniserverVersion {
         if ($credential) { $iwrParams.Credential = $credential }
 
         try { # Main try for Invoke-WebRequest logic
-            if ($uriBuilder.Scheme -eq 'http') {
-                $httpsUriBuilder = [System.UriBuilder]$versionUri
-                $httpsUriBuilder.Scheme = 'https'; $httpsUriBuilder.Port = 443
-                try { # Try HTTPS first
-                    $iwrParams.Uri = $httpsUriBuilder.Uri.AbsoluteUri
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting HTTPS connection. Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
+            # Determine the scheme from the original $entryToParse via $uriBuilderForHostAndPath
+            $originalScheme = $uriBuilderForHostAndPath.Scheme
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Original scheme parsed from MSEntry: '$originalScheme'")
+
+            if ($originalScheme -eq 'http') {
+                # Original entry is HTTP, go straight to HTTP with manual auth
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Original scheme is HTTP. Proceeding directly with HTTP call.")
+                $iwrParams.Uri = $versionUri # $versionUri is already http://.../dev/cfg/version
+                
+                # Ensure $iwrParams.Uri is explicitly HTTP
+                if (($iwrParams.Uri -is [string]) -and $iwrParams.Uri.StartsWith('https://')) {
+                    $iwrParams.Uri = $iwrParams.Uri -replace '^https://', 'http://'
+                } elseif (($iwrParams.Uri -is [System.Uri]) -and $iwrParams.Uri.Scheme -eq 'https') {
+                     $httpDirectUriBuilder = [System.UriBuilder]$iwrParams.Uri
+                     $httpDirectUriBuilder.Scheme = 'http'; $httpDirectUriBuilder.Port = -1
+                     $iwrParams.Uri = $httpDirectUriBuilder.Uri.AbsoluteUri
+                }
+                Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: Final URI for Invoke-WebRequest: $($iwrParams.Uri)")
+
+                if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: Constructing Authorization header using MANUALLY PARSED User: '{0}' and Password (length: {1})." -f $usernameForAuthHeader, $passwordForAuthHeader.Length)
+                    $Pair = "${usernameForAuthHeader}:${passwordForAuthHeader}"
+                    $Bytes = [System.Text.Encoding]::ASCII.GetBytes($Pair)
+                    $Base64Auth = [System.Convert]::ToBase64String($Bytes)
+                    $iwrParams.Headers = @{ Authorization = "Basic $Base64Auth" }
+                    $iwrParams.Remove('Credential'); $iwrParams.Credential = $null
+                    $iwrParams.Remove('AllowUnencryptedAuthentication')
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: Using manual Authorization header. Ensured -Credential is nulled and -AllowUnencryptedAuthentication removed.")
+                } else { # Should not happen if credentials are in MSEntry, but as a safeguard
+                    Write-Log -Level WARN -Message ("$($FunctionName): HTTP Direct: Manually parsed credentials for Auth Header are missing. If \$credential object exists, IWR might use it, but this could lead to AllowUnencryptedAuthentication prompt if not handled by manual header.")
+                    # If $credential exists, IWR might try to use it. If not, it's an unauthenticated request.
+                    # We prefer the manual header, so this path indicates an issue with parsing or input.
+                    # To be safe, if we have no manual header, remove any existing $iwrParams.Headers to avoid sending a stale one.
+                    $iwrParams.Remove('Headers')
+                    if ($credential) {
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: \$credential object exists. IWR might attempt to use it. Adding AllowUnencryptedAuthentication as a precaution if PSVersion >= 6.")
+                        if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParams.AllowUnencryptedAuthentication = $true }
+                    } else {
+                         $iwrParams.Remove('Credential'); $iwrParams.Credential = $null
+                         $iwrParams.Remove('AllowUnencryptedAuthentication')
+                    }
+                }
+                $iwrParams.UseBasicParsing = $true
+                Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: iwrParams before invoke: $($iwrParams | Out-String)")
+                $responseObject = Invoke-WebRequest @iwrParams
+                Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: Invoke-WebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
+
+            } elseif ($originalScheme -eq 'https') {
+                # Original entry is HTTPS, try HTTPS first (using $credential object if present)
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Original scheme is HTTPS. Attempting HTTPS connection first.")
+                $iwrParams.Uri = $versionUri # $versionUri is already https://.../dev/cfg/version
+                # $iwrParams.Credential would have been set earlier if $credential was created.
+                # For HTTPS, using $credential object is standard.
+                Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Attempt: iwrParams before invoke: $($iwrParams | Out-String)")
+                try {
                     if ($PSVersionTable.PSVersion.Major -ge 6) {
                         $responseObject = Invoke-WebRequest @iwrParams -SslProtocol Tls12
                     } else {
                         $responseObject = Invoke-WebRequest @iwrParams
                     }
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Invoke-WebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
-                } catch { # Catch for HTTPS attempt
-                    $CaughtHttpsError = $_
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS connection to '{0}' failed. Full Exception: {1}" -f $httpsUriBuilder.Uri.AbsoluteUri, $CaughtHttpsError.Exception.ToString())
-                    if ($CaughtHttpsError.Exception -is [System.Net.WebException] -and $null -ne $CaughtHttpsError.Exception.Response) {
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS WebException Status: {0}, Description: {1}" -f $CaughtHttpsError.Exception.Response.StatusCode, $CaughtHttpsError.Exception.Response.StatusDescription)
-                    }
-                    Write-Log -Message ("$($FunctionName): HTTPS connection to '{0}' failed ('{1}'). Falling back to HTTP." -f $msIP, $CaughtHttpsError.Exception.Message.Split([Environment]::NewLine)[0]) -Level DEBUG
-                    # Fallback to HTTP
-                    $iwrParams.Uri = $versionUri # Revert to original HTTP URI (scheme might still be https here if original was https, but IWR will handle it)
-                                                # More accurately, $versionUri at this point is the one constructed from $tempUriBuilderForVersionPath
-                                                # which had userinfo cleared. The scheme of $iwrParams.Uri will be http.
-                    
-                    # Ensure $iwrParams.Uri is explicitly HTTP for the fallback
-                    if (($iwrParams.Uri -is [string]) -and $iwrParams.Uri.StartsWith('https://')) {
-                        $iwrParams.Uri = $iwrParams.Uri -replace '^https://', 'http://'
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Changed iwrParams.Uri scheme to http: $($iwrParams.Uri)")
-                    } elseif (($iwrParams.Uri -is [System.Uri]) -and $iwrParams.Uri.Scheme -eq 'https') {
-                         $httpFallbackUriBuilder = [System.UriBuilder]$iwrParams.Uri
-                         $httpFallbackUriBuilder.Scheme = 'http'
-                         $httpFallbackUriBuilder.Port = -1 # Default port for http
-                         $iwrParams.Uri = $httpFallbackUriBuilder.Uri.AbsoluteUri
-                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Changed iwrParams.Uri (System.Uri) scheme to http: $($iwrParams.Uri)")
-                    }
-
-
-                    # Use the manually parsed $usernameForAuthHeader and $passwordForAuthHeader for the Authorization header
-                    if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Constructing Authorization header using MANUALLY PARSED User: '{0}' and Password (length: {1})." -f $usernameForAuthHeader, $passwordForAuthHeader.Length)
-                        $Pair = "${usernameForAuthHeader}:${passwordForAuthHeader}" # Use manually parsed, literal credentials
-                        $Bytes = [System.Text.Encoding]::ASCII.GetBytes($Pair)
-                        $Base64Auth = [System.Convert]::ToBase64String($Bytes)
-                        $iwrParams.Headers = @{ Authorization = "Basic $Base64Auth" }
-                        
-                        $iwrParams.Remove('Credential')
-                        $iwrParams.Credential = $null # Explicitly nullify
-                        $iwrParams.Remove('AllowUnencryptedAuthentication')
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using manual Authorization header (from manually parsed credentials). Ensured -Credential is removed and nulled, and -AllowUnencryptedAuthentication removed from iwrParams.")
-                    } elseif ($credential) {
-                        # This is a less ideal fallback if manual parsing failed but we have a $credential object.
-                        # The password from $credential.GetNetworkCredential().Password is URL-decoded by UriBuilder.
-                        Write-Log -Level WARN -Message ("$($FunctionName): HTTP Fallback: Manual parsing of user/pass for Auth header failed or was incomplete. Attempting to use \$credential object's details for Authorization header. This might be problematic if password was URL-decoded by UriBuilder and contains special characters like '%'.")
-                        $UsernameFromCredObj = $credential.UserName
-                        $PasswordFromCredObj = $credential.GetNetworkCredential().Password
-                        $Pair = "${UsernameFromCredObj}:${PasswordFromCredObj}"
-                        $Bytes = [System.Text.Encoding]::ASCII.GetBytes($Pair)
-                        $Base64Auth = [System.Convert]::ToBase64String($Bytes)
-                        $iwrParams.Headers = @{ Authorization = "Basic $Base64Auth" }
-                        $iwrParams.Remove('Credential')
-                        $iwrParams.Credential = $null # Explicitly nullify
-                        $iwrParams.Remove('AllowUnencryptedAuthentication')
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using Authorization header from \$credential object (user: $UsernameFromCredObj). Password used was URL-decoded by UriBuilder. Ensured -Credential is removed and nulled.")
-                    } else {
-                        Write-Log -Level WARN -Message ("$($FunctionName): HTTP Fallback: No credentials available (neither manually parsed nor from \$credential object) to construct Authorization header.")
-                        # Still ensure Credential param is not lingering if it somehow got there
-                        $iwrParams.Remove('Credential')
-                        $iwrParams.Credential = $null
-                        $iwrParams.Remove('AllowUnencryptedAuthentication')
-                    }
-                    
-                    $iwrParams.UseBasicParsing = $true # Add UseBasicParsing for HTTP fallback
-
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting HTTP connection (fallback). Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback iwrParams (after manual header and UseBasicParsing): $($iwrParams | Out-String)")
-                    try {
-                        $responseObject = Invoke-WebRequest @iwrParams
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Invoke-WebRequest successful (fallback). StatusCode: {0}" -f $responseObject.StatusCode)
-                    } catch {
-                        $CaughtHttpFallbackError = $_
-                        Write-Log -Level WARN -Message ("$($FunctionName): HTTP connection (fallback) to '{0}' also failed. Full Exception: {1}" -f $iwrParams.Uri, $CaughtHttpFallbackError.Exception.ToString())
-                        if ($CaughtHttpFallbackError.Exception -is [System.Net.WebException] -and $null -ne $CaughtHttpFallbackError.Exception.Response) {
-                            Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP (fallback) WebException Status: {0}, Description: {1}" -f $CaughtHttpFallbackError.Exception.Response.StatusCode, $CaughtHttpFallbackError.Exception.Response.StatusDescription)
-                        }
-                        throw $CaughtHttpFallbackError
-                    }
-                } # End catch for HTTPS attempt
-            } else { # HTTPS was originally specified
-                Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting original HTTPS connection. Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
-                try {
-                    if ($PSVersionTable.PSVersion.Major -ge 6) {
-                        $iwrParamsSsl = $iwrParams | Add-Member -MemberType NoteProperty -Name SslProtocol -Value Tls12 -PassThru -Force
-                        $responseObject = Invoke-WebRequest @iwrParamsSsl
-                    } else {
-                        $responseObject = Invoke-WebRequest @iwrParams
-                    }
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): Original HTTPS Invoke-WebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
-                } catch {
-                    $CaughtOriginalHttpsError = $_
-                    Write-Log -Level WARN -Message ("$($FunctionName): Original HTTPS connection to '{0}' failed. Full Exception: {1}" -f $iwrParams.Uri, $CaughtOriginalHttpsError.Exception.ToString())
-                    if ($CaughtOriginalHttpsError.Exception -is [System.Net.WebException] -and $null -ne $CaughtOriginalHttpsError.Exception.Response) {
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): Original HTTPS WebException Status: {0}, Description: {1}" -f $CaughtOriginalHttpsError.Exception.Response.StatusCode, $CaughtOriginalHttpsError.Exception.Response.StatusDescription)
-                    }
-                    throw $CaughtOriginalHttpsError
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Attempt: Invoke-WebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
+                } catch { # Catch for primary HTTPS attempt
+                    $CaughtPrimaryHttpsError = $_
+                    Write-Log -Level WARN -Message ("$($FunctionName): Primary HTTPS connection to '{0}' failed ('{1}')." -f $iwrParams.Uri, $CaughtPrimaryHttpsError.Exception.Message.Split([Environment]::NewLine)[0])
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): Full Exception for primary HTTPS failure: $($CaughtPrimaryHttpsError.Exception.ToString())")
+                    # No automatic HTTP fallback here if original was HTTPS, let it error out or be handled by outer catch.
+                    # If a specific fallback to HTTP for an originally HTTPS entry is desired, it would be added here.
+                    # For now, if HTTPS fails, the error from this catch will propagate.
+                    throw $CaughtPrimaryHttpsError
                 }
+            } else {
+                throw ("$($FunctionName): Unknown original scheme '$originalScheme' from MSEntry '$($entryToParse -replace "([Pp]assword=)[^;]+", '$1********')'")
             }
 
+            # Process response if any was successful
             if ($responseObject) {
                 $xmlResponse = [xml]$responseObject.Content
                 $result.RawVersion = $xmlResponse.LL.value
