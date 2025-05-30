@@ -38,32 +38,74 @@ function Get-MiniserverVersion {
 
         $entryToParse = $MSEntry
         if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
-        $uriBuilder = [System.UriBuilder]$entryToParse
-        $result.MSIP = $uriBuilder.Host
+        if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
+        
+        # Use UriBuilder for scheme, host, and constructing the final version check URI
+        $uriBuilderForHostAndPath = [System.UriBuilder]$entryToParse # This parses the whole string initially
+        $result.MSIP = $uriBuilderForHostAndPath.Host
         $msIP = $result.MSIP
+        # $parsedScheme = $uriBuilderForHostAndPath.Scheme # Scheme will be determined later based on HTTP/HTTPS attempts
 
-        if (-not ([string]::IsNullOrWhiteSpace($uriBuilder.UserName))) {
-            $securePassword = $uriBuilder.Password | ConvertTo-SecureString -AsPlainText -Force
-            $credential = New-Object System.Management.Automation.PSCredential($uriBuilder.UserName, $securePassword)
-            Write-Log -Level DEBUG -Message ("$($FunctionName): Parsed UriBuilder.UserName: '{0}'" -f $uriBuilder.UserName)
-            Write-Log -Level DEBUG -Message ("$($FunctionName): Parsed UriBuilder.Password: (length {0})" -f $uriBuilder.Password.Length)
-            Write-Log -Level DEBUG -Message ("$($FunctionName): Credential object created for user: '{0}'" -f $credential.UserName)
+        # Manually parse username and password from the original $entryToParse to avoid URL-decoding issues with UriBuilder.Password
+        # These will be used specifically for constructing the Basic Auth header.
+        $usernameForAuthHeader = $null
+        $passwordForAuthHeader = $null
+        if ($entryToParse -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+            $credPartFromFile = $Matches.credentials
+            if ($credPartFromFile -match '^(?<user>[^:]+):(?<pass>.+)$') {
+                $usernameForAuthHeader = $Matches.user
+                $passwordForAuthHeader = $Matches.pass # This is the literal password string from the input
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Manually parsed Username for Auth Header: '{0}'" -f $usernameForAuthHeader)
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Manually parsed Password for Auth Header (length): {0}" -f $passwordForAuthHeader.Length)
+            } else {
+                Write-Log -Level WARN -Message ("$($FunctionName): Could not manually parse user:pass from credentials part: '$credPartFromFile'")
+            }
         } else {
-            Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName is NULL or Whitespace. No credential object created from URI.")
+            Write-Log -Level DEBUG -Message ("$($FunctionName): MSEntry '$($entryToParse -replace "([Pp]assword=)[^;]+", '$1********')' does not seem to contain user:pass@host format for direct manual parsing for Auth Header.")
         }
 
-        $uriBuilder.Path = "/dev/cfg/version"
-        $uriBuilder.Password = $null; $uriBuilder.UserName = $null
-        $versionUri = $uriBuilder.Uri.AbsoluteUri
-
-        Write-Log -Message ("$($FunctionName): Checking MS version for '{0}' (derived from MSEntry)." -f $msIP) -Level DEBUG
-        Write-Log -Level DEBUG -Message ("$($FunctionName): Base URI for version check (before potential HTTPS/HTTP switch): {0}" -f $versionUri)
-        if ($credential) {
-            Write-Log -Level DEBUG -Message ("$($FunctionName): Using credential for user: '{0}'" -f $credential.UserName)
+        # Create $credential object using UriBuilder's properties.
+        # This $credential object might be used by Invoke-WebRequest for other auth mechanisms (e.g. NTLM on HTTPS)
+        # or if our manual parsing for the Auth Header fails.
+        # Note: $uriBuilderForHostAndPath.Password IS URL-decoded.
+        if (-not ([string]::IsNullOrWhiteSpace($uriBuilderForHostAndPath.UserName))) {
+            $securePasswordFromUriBuilder = $uriBuilderForHostAndPath.Password | ConvertTo-SecureString -AsPlainText -Force
+            $credential = New-Object System.Management.Automation.PSCredential($uriBuilderForHostAndPath.UserName, $securePasswordFromUriBuilder)
+            Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName (for general \$credential obj): '{0}'" -f $uriBuilderForHostAndPath.UserName)
+            Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.Password (for general \$credential obj, URL-decoded, length): {0}" -f $uriBuilderForHostAndPath.Password.Length)
+            Write-Log -Level DEBUG -Message ("$($FunctionName): General \$credential object created for user: '{0}'" -f $credential.UserName)
         } else {
-            Write-Log -Level DEBUG -Message ("$($FunctionName): No credentials parsed from MSEntry.")
+            Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName is NULL/Whitespace. No general \$credential object created from UriBuilder properties.")
+        }
+        
+        # If $usernameForAuthHeader is still null (manual parsing failed or not applicable) AND $credential exists,
+        # populate $usernameForAuthHeader from $credential.UserName.
+        # $passwordForAuthHeader should ideally remain the manually parsed one for Basic Auth.
+        if ([string]::IsNullOrEmpty($usernameForAuthHeader) -and $credential) {
+            $usernameForAuthHeader = $credential.UserName
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Populated \$usernameForAuthHeader from \$credential.UserName ('$usernameForAuthHeader') as manual parse was empty/not applicable.")
+            # If $passwordForAuthHeader is also empty here, the Basic Auth header might rely on $credential.GetNetworkCredential().Password which is URL-decoded.
         }
 
+        # Construct the $versionUri (e.g., http://e1lox/dev/cfg/version or https://e1lox/dev/cfg/version)
+        # The scheme for $versionUri will be determined by the HTTPS/HTTP logic later.
+        # For now, build it based on the original scheme and host, then clear userinfo for this specific URI.
+        $tempUriBuilderForVersionPath = [System.UriBuilder]$entryToParse
+        $tempUriBuilderForVersionPath.Path = "/dev/cfg/version"
+        $tempUriBuilderForVersionPath.Password = $null
+        $tempUriBuilderForVersionPath.UserName = $null
+        $versionUri = $tempUriBuilderForVersionPath.Uri.AbsoluteUri # This will be the base, scheme might change
+
+        Write-Log -Message ("$($FunctionName): Checking MS version for '{0}' (parsed host)." -f $msIP) -Level DEBUG
+        Write-Log -Level DEBUG -Message ("$($FunctionName): Base URI for version check (scheme may change): {0}" -f $versionUri)
+        
+        if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Credentials intended FOR BASIC AUTH HEADER - User: '{0}', Password (literal from input) Length: {1}" -f $usernameForAuthHeader, $passwordForAuthHeader.Length)
+        } elseif ($credential) {
+             Write-Log -Level DEBUG -Message ("$($FunctionName): General \$credential object exists (user: '{0}'). Manual parsing for Auth header might have been incomplete or not applicable." -f $credential.UserName)
+        } else {
+            Write-Log -Level DEBUG -Message ("$($FunctionName): No credentials available from manual parsing or UriBuilder for Authorization.")
+        }
         if ($SkipCertificateCheck.IsPresent) {
             $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
             [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
@@ -95,21 +137,50 @@ function Get-MiniserverVersion {
                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS WebException Status: {0}, Description: {1}" -f $CaughtHttpsError.Exception.Response.StatusCode, $CaughtHttpsError.Exception.Response.StatusDescription)
                     }
                     Write-Log -Message ("$($FunctionName): HTTPS connection to '{0}' failed ('{1}'). Falling back to HTTP." -f $msIP, $CaughtHttpsError.Exception.Message.Split([Environment]::NewLine)[0]) -Level DEBUG
-                    
                     # Fallback to HTTP
-                    $iwrParams.Uri = $versionUri # Revert to original HTTP URI
+                    $iwrParams.Uri = $versionUri # Revert to original HTTP URI (scheme might still be https here if original was https, but IWR will handle it)
+                                                # More accurately, $versionUri at this point is the one constructed from $tempUriBuilderForVersionPath
+                                                # which had userinfo cleared. The scheme of $iwrParams.Uri will be http.
                     
-                    if ($credential) {
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Manually constructing Authorization header for user '$($credential.UserName)'.")
-                        $Username = $credential.UserName
-                        $Password = $credential.GetNetworkCredential().Password
-                        $Pair = "${Username}:${Password}"
+                    # Ensure $iwrParams.Uri is explicitly HTTP for the fallback
+                    if (($iwrParams.Uri -is [string]) -and $iwrParams.Uri.StartsWith('https://')) {
+                        $iwrParams.Uri = $iwrParams.Uri -replace '^https://', 'http://'
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Changed iwrParams.Uri scheme to http: $($iwrParams.Uri)")
+                    } elseif (($iwrParams.Uri -is [System.Uri]) -and $iwrParams.Uri.Scheme -eq 'https') {
+                         $httpFallbackUriBuilder = [System.UriBuilder]$iwrParams.Uri
+                         $httpFallbackUriBuilder.Scheme = 'http'
+                         $httpFallbackUriBuilder.Port = -1 # Default port for http
+                         $iwrParams.Uri = $httpFallbackUriBuilder.Uri.AbsoluteUri
+                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Changed iwrParams.Uri (System.Uri) scheme to http: $($iwrParams.Uri)")
+                    }
+
+
+                    # Use the manually parsed $usernameForAuthHeader and $passwordForAuthHeader for the Authorization header
+                    if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Constructing Authorization header using MANUALLY PARSED User: '{0}' and Password (length: {1})." -f $usernameForAuthHeader, $passwordForAuthHeader.Length)
+                        $Pair = "${usernameForAuthHeader}:${passwordForAuthHeader}" # Use manually parsed, literal credentials
                         $Bytes = [System.Text.Encoding]::ASCII.GetBytes($Pair)
-                        $Base64 = [System.Convert]::ToBase64String($Bytes)
-                        $iwrParams.Headers = @{ Authorization = "Basic $Base64" }
+                        $Base64Auth = [System.Convert]::ToBase64String($Bytes)
+                        $iwrParams.Headers = @{ Authorization = "Basic $Base64Auth" }
+                        
+                        $iwrParams.Remove('Credential') # Ensure $credential object isn't used by IWR for Basic Auth here
+                        $iwrParams.Remove('AllowUnencryptedAuthentication') # Not needed with manual header
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using manual Authorization header (from manually parsed credentials). Removed -Credential and -AllowUnencryptedAuthentication from iwrParams.")
+                    } elseif ($credential) {
+                        # This is a less ideal fallback if manual parsing failed but we have a $credential object.
+                        # The password from $credential.GetNetworkCredential().Password is URL-decoded by UriBuilder.
+                        Write-Log -Level WARN -Message ("$($FunctionName): HTTP Fallback: Manual parsing of user/pass for Auth header failed or was incomplete. Attempting to use \$credential object's details for Authorization header. This might be problematic if password was URL-decoded by UriBuilder and contains special characters like '%'.")
+                        $UsernameFromCredObj = $credential.UserName
+                        $PasswordFromCredObj = $credential.GetNetworkCredential().Password
+                        $Pair = "${UsernameFromCredObj}:${PasswordFromCredObj}"
+                        $Bytes = [System.Text.Encoding]::ASCII.GetBytes($Pair)
+                        $Base64Auth = [System.Convert]::ToBase64String($Bytes)
+                        $iwrParams.Headers = @{ Authorization = "Basic $Base64Auth" }
                         $iwrParams.Remove('Credential')
-                        $iwrParams.Remove('AllowUnencryptedAuthentication') # Ensure this is removed if we use manual header
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using manual Authorization header. Removed -Credential and -AllowUnencryptedAuthentication from iwrParams if present.")
+                        $iwrParams.Remove('AllowUnencryptedAuthentication')
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using Authorization header from \$credential object (user: $UsernameFromCredObj). Password used was URL-decoded by UriBuilder.")
+                    } else {
+                        Write-Log -Level WARN -Message ("$($FunctionName): HTTP Fallback: No credentials available (neither manually parsed nor from \$credential object) to construct Authorization header.")
                     }
                     
                     $iwrParams.UseBasicParsing = $true # Add UseBasicParsing for HTTP fallback
