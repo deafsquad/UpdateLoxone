@@ -678,7 +678,14 @@ $steps = @(
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef, $prereqs)
-            Invoke-UpdateMiniserversInBulk -WorkflowContext $scriptCtx -Prerequisites $prereqs -UpdateTargetsToUpdate $targets -ScriptGlobalState $globalStateRef -ConfiguredUpdateChannel $scriptCtx.Params.Channel
+            $effectiveChannelForMS = if ($scriptCtx.Params.ContainsKey('Channel') -and -not ([string]::IsNullOrWhiteSpace($scriptCtx.Params.Channel))) {
+                $scriptCtx.Params.Channel
+            } else {
+                # Default value of Channel parameter in UpdateLoxone.ps1, or if an empty string was passed
+                Write-Log -Message "Channel for Miniserver update was not specified or was empty, defaulting to 'Test'." -Level DEBUG
+                "Test"
+            }
+            Invoke-UpdateMiniserversInBulk -WorkflowContext $scriptCtx -Prerequisites $prereqs -UpdateTargetsToUpdate $targets -ScriptGlobalState $globalStateRef -ConfiguredUpdateChannel $effectiveChannelForMS
         }
         Component = "MiniserverUpdate"
     }
