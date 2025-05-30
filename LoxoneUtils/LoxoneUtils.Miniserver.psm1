@@ -163,9 +163,10 @@ function Get-MiniserverVersion {
                         $Base64Auth = [System.Convert]::ToBase64String($Bytes)
                         $iwrParams.Headers = @{ Authorization = "Basic $Base64Auth" }
                         
-                        $iwrParams.Remove('Credential') # Ensure $credential object isn't used by IWR for Basic Auth here
-                        $iwrParams.Remove('AllowUnencryptedAuthentication') # Not needed with manual header
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using manual Authorization header (from manually parsed credentials). Removed -Credential and -AllowUnencryptedAuthentication from iwrParams.")
+                        $iwrParams.Remove('Credential')
+                        $iwrParams.Credential = $null # Explicitly nullify
+                        $iwrParams.Remove('AllowUnencryptedAuthentication')
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using manual Authorization header (from manually parsed credentials). Ensured -Credential is removed and nulled, and -AllowUnencryptedAuthentication removed from iwrParams.")
                     } elseif ($credential) {
                         # This is a less ideal fallback if manual parsing failed but we have a $credential object.
                         # The password from $credential.GetNetworkCredential().Password is URL-decoded by UriBuilder.
@@ -177,10 +178,15 @@ function Get-MiniserverVersion {
                         $Base64Auth = [System.Convert]::ToBase64String($Bytes)
                         $iwrParams.Headers = @{ Authorization = "Basic $Base64Auth" }
                         $iwrParams.Remove('Credential')
+                        $iwrParams.Credential = $null # Explicitly nullify
                         $iwrParams.Remove('AllowUnencryptedAuthentication')
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using Authorization header from \$credential object (user: $UsernameFromCredObj). Password used was URL-decoded by UriBuilder.")
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using Authorization header from \$credential object (user: $UsernameFromCredObj). Password used was URL-decoded by UriBuilder. Ensured -Credential is removed and nulled.")
                     } else {
                         Write-Log -Level WARN -Message ("$($FunctionName): HTTP Fallback: No credentials available (neither manually parsed nor from \$credential object) to construct Authorization header.")
+                        # Still ensure Credential param is not lingering if it somehow got there
+                        $iwrParams.Remove('Credential')
+                        $iwrParams.Credential = $null
+                        $iwrParams.Remove('AllowUnencryptedAuthentication')
                     }
                     
                     $iwrParams.UseBasicParsing = $true # Add UseBasicParsing for HTTP fallback
