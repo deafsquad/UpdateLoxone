@@ -13,53 +13,51 @@ function Get-MiniserverVersion {
 
         [Parameter()]
         [int]$TimeoutSec = 15 # Default timeout
-    ) # Closing paren for param block
-# Entry and Parameters Logging
-$FunctionName = $MyInvocation.MyCommand.Name
-Enter-Function -FunctionName $FunctionName -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-Write-Log -Level DEBUG -Message "Entering function '$($FunctionName)'."
-Write-Log -Level DEBUG -Message "Parameters for '$($FunctionName)':"
-Write-Log -Level DEBUG -Message ("  MSEntry (original): '{0}'" -f ($MSEntry -replace "([Pp]assword=)[^;]+", '$1********'))
-Write-Log -Level DEBUG -Message ("  SkipCertificateCheck: {0}" -f $SkipCertificateCheck.IsPresent)
-Write-Log -Level DEBUG -Message ("  TimeoutSec: {0}" -f $TimeoutSec)
-# Credentials will be logged if used, after parsing.
+    )
+    $FunctionName = $MyInvocation.MyCommand.Name
+    Enter-Function -FunctionName $FunctionName -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    Write-Log -Level DEBUG -Message "Entering function '$($FunctionName)'."
+    Write-Log -Level DEBUG -Message "Parameters for '$($FunctionName)':"
+    Write-Log -Level DEBUG -Message ("  MSEntry (original): '{0}'" -f ($MSEntry -replace "([Pp]assword=)[^;]+", '$1********'))
+    Write-Log -Level DEBUG -Message ("  SkipCertificateCheck: {0}" -f $SkipCertificateCheck.IsPresent)
+    Write-Log -Level DEBUG -Message ("  TimeoutSec: {0}" -f $TimeoutSec)
 
-$result = [PSCustomObject]@{
-    MSIP       = "Unknown"
-    RawVersion = $null
-    Version    = $null # Initialize Version property
-    Error      = $null
-}
+    $result = [PSCustomObject]@{
+        MSIP       = "Unknown"
+        RawVersion = $null
+        Version    = $null
+        Error      = $null
+    }
 
     $msIP = $null; $versionUri = $null; $credential = $null
     $originalCallback = $null; $callbackChanged = $false
     $oldProgressPreference = $ProgressPreference
 
     try {
-        $ProgressPreference = 'SilentlyContinue' # Suppress progress for this internal function
+        $ProgressPreference = 'SilentlyContinue'
 
         $entryToParse = $MSEntry
         if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
         $uriBuilder = [System.UriBuilder]$entryToParse
         $result.MSIP = $uriBuilder.Host
-        $msIP = $result.MSIP # For logging consistency if needed later
+        $msIP = $result.MSIP
 
         if (-not ([string]::IsNullOrWhiteSpace($uriBuilder.UserName))) {
             $securePassword = $uriBuilder.Password | ConvertTo-SecureString -AsPlainText -Force
             $credential = New-Object System.Management.Automation.PSCredential($uriBuilder.UserName, $securePassword)
             Write-Log -Level DEBUG -Message ("$($FunctionName): Parsed UriBuilder.UserName: '{0}'" -f $uriBuilder.UserName)
-            Write-Log -Level DEBUG -Message ("$($FunctionName): Parsed UriBuilder.Password: (length {0})" -f $uriBuilder.Password.Length) # Log length for security
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Parsed UriBuilder.Password: (length {0})" -f $uriBuilder.Password.Length)
             Write-Log -Level DEBUG -Message ("$($FunctionName): Credential object created for user: '{0}'" -f $credential.UserName)
         } else {
             Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName is NULL or Whitespace. No credential object created from URI.")
         }
 
         $uriBuilder.Path = "/dev/cfg/version"
-        $uriBuilder.Password = $null; $uriBuilder.UserName = $null # Clear credentials from URI for version check
+        $uriBuilder.Password = $null; $uriBuilder.UserName = $null
         $versionUri = $uriBuilder.Uri.AbsoluteUri
 
         Write-Log -Message ("$($FunctionName): Checking MS version for '{0}' (derived from MSEntry)." -f $msIP) -Level DEBUG
-        Write-Log -Level DEBUG -Message ("$($FunctionName): Base URI for version check (before potential HTTPS/HTTP switch): {0}" -f $versionUri) # Log Base URI
+        Write-Log -Level DEBUG -Message ("$($FunctionName): Base URI for version check (before potential HTTPS/HTTP switch): {0}" -f $versionUri)
         if ($credential) {
             Write-Log -Level DEBUG -Message ("$($FunctionName): Using credential for user: '{0}'" -f $credential.UserName)
         } else {
@@ -74,24 +72,22 @@ $result = [PSCustomObject]@{
         }
 
         $responseObject = $null
-        $iwrParams = @{ Uri = $versionUri; TimeoutSec = $TimeoutSec; ErrorAction = 'Stop'; Method = 'Get' } # Use explicit 'Stop' to catch here
+        $iwrParams = @{ Uri = $versionUri; TimeoutSec = $TimeoutSec; ErrorAction = 'Stop'; Method = 'Get' }
         if ($credential) { $iwrParams.Credential = $credential }
 
         try { # Main try for Invoke-WebRequest logic
             if ($uriBuilder.Scheme -eq 'http') {
                 $httpsUriBuilder = [System.UriBuilder]$versionUri
-                $httpsUriBuilder = [System.UriBuilder]$versionUri
-                $httpsUriBuilder.Scheme = 'https'; $httpsUriBuilder.Port = 443 # Default HTTPS port
+                $httpsUriBuilder.Scheme = 'https'; $httpsUriBuilder.Port = 443
                 try { # Try HTTPS first
                     $iwrParams.Uri = $httpsUriBuilder.Uri.AbsoluteUri
                     Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting HTTPS connection. Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
-                    if ($PSVersionTable.PSVersion.Major -ge 6) { # SslProtocol available in PS 6+
+                    if ($PSVersionTable.PSVersion.Major -ge 6) {
                         $responseObject = Invoke-WebRequest @iwrParams -SslProtocol Tls12
                     } else {
                         $responseObject = Invoke-WebRequest @iwrParams
                     }
                     Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Invoke-WebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Content Snippet (first 100 chars): '{0}'" -f ($responseObject.Content | Select-String -Pattern '^.{0,100}' | ForEach-Object {$_.Matches[0].Value}))
                 } catch { # Catch for HTTPS attempt
                     $CaughtHttpsError = $_
                     Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS connection to '{0}' failed. Full Exception: {1}" -f $httpsUriBuilder.Uri.AbsoluteUri, $CaughtHttpsError.Exception.ToString())
@@ -103,8 +99,6 @@ $result = [PSCustomObject]@{
                     # Fallback to HTTP
                     $iwrParams.Uri = $versionUri # Revert to original HTTP URI
                     
-                    # For HTTP fallback with credentials, construct the Authorization header manually
-                    # as -Credential with HTTP Basic Auth can be unreliable with some servers.
                     if ($credential) {
                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Manually constructing Authorization header for user '$($credential.UserName)'.")
                         $Username = $credential.UserName
@@ -113,29 +107,27 @@ $result = [PSCustomObject]@{
                         $Bytes = [System.Text.Encoding]::ASCII.GetBytes($Pair)
                         $Base64 = [System.Convert]::ToBase64String($Bytes)
                         $iwrParams.Headers = @{ Authorization = "Basic $Base64" }
-                        # Remove -Credential and -AllowUnencryptedAuthentication if they were set, as we're using a manual header
                         $iwrParams.Remove('Credential')
-                        $iwrParams.Remove('AllowUnencryptedAuthentication')
+                        $iwrParams.Remove('AllowUnencryptedAuthentication') # Ensure this is removed if we use manual header
                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using manual Authorization header. Removed -Credential and -AllowUnencryptedAuthentication from iwrParams if present.")
                     }
                     
                     $iwrParams.UseBasicParsing = $true # Add UseBasicParsing for HTTP fallback
 
                     Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting HTTP connection (fallback). Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback iwrParams (after potential manual header and UseBasicParsing): $($iwrParams | Out-String)")
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback iwrParams (after manual header and UseBasicParsing): $($iwrParams | Out-String)")
                     try {
-                        $responseObject = Invoke-WebRequest @iwrParams # This will throw to the outer catch if it fails
+                        $responseObject = Invoke-WebRequest @iwrParams
                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Invoke-WebRequest successful (fallback). StatusCode: {0}" -f $responseObject.StatusCode)
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Content Snippet (fallback) (first 100 chars): '{0}'" -f ($responseObject.Content | Select-String -Pattern '^.{0,100}' | ForEach-Object {$_.Matches[0].Value}))
                     } catch {
                         $CaughtHttpFallbackError = $_
                         Write-Log -Level WARN -Message ("$($FunctionName): HTTP connection (fallback) to '{0}' also failed. Full Exception: {1}" -f $iwrParams.Uri, $CaughtHttpFallbackError.Exception.ToString())
                         if ($CaughtHttpFallbackError.Exception -is [System.Net.WebException] -and $null -ne $CaughtHttpFallbackError.Exception.Response) {
                             Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP (fallback) WebException Status: {0}, Description: {1}" -f $CaughtHttpFallbackError.Exception.Response.StatusCode, $CaughtHttpFallbackError.Exception.Response.StatusDescription)
                         }
-                        throw $CaughtHttpFallbackError # Re-throw to be caught by the main IWR logic catch
+                        throw $CaughtHttpFallbackError
                     }
-                }
+                } # End catch for HTTPS attempt
             } else { # HTTPS was originally specified
                 Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting original HTTPS connection. Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
                 try {
@@ -146,18 +138,16 @@ $result = [PSCustomObject]@{
                         $responseObject = Invoke-WebRequest @iwrParams
                     }
                     Write-Log -Level DEBUG -Message ("$($FunctionName): Original HTTPS Invoke-WebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): Original HTTPS Content Snippet (first 100 chars): '{0}'" -f ($responseObject.Content | Select-String -Pattern '^.{0,100}' | ForEach-Object {$_.Matches[0].Value}))
                 } catch {
                     $CaughtOriginalHttpsError = $_
                     Write-Log -Level WARN -Message ("$($FunctionName): Original HTTPS connection to '{0}' failed. Full Exception: {1}" -f $iwrParams.Uri, $CaughtOriginalHttpsError.Exception.ToString())
                     if ($CaughtOriginalHttpsError.Exception -is [System.Net.WebException] -and $null -ne $CaughtOriginalHttpsError.Exception.Response) {
                         Write-Log -Level DEBUG -Message ("$($FunctionName): Original HTTPS WebException Status: {0}, Description: {1}" -f $CaughtOriginalHttpsError.Exception.Response.StatusCode, $CaughtOriginalHttpsError.Exception.Response.StatusDescription)
                     }
-                    throw $CaughtOriginalHttpsError # Re-throw to be caught by the main IWR logic catch
+                    throw $CaughtOriginalHttpsError
                 }
             }
 
-            # Process response if any was successful
             if ($responseObject) {
                 $xmlResponse = [xml]$responseObject.Content
                 $result.RawVersion = $xmlResponse.LL.value
@@ -165,14 +155,13 @@ $result = [PSCustomObject]@{
                     Write-Log -Level WARN -Message ("$($FunctionName): Could not parse version from MS '{0}' (LL.value empty in response: '$($responseObject.Content | Select-String -Pattern '^.{0,200}' | ForEach-Object {$_.Matches[0].Value})')." -f $msIP)
                     throw ("Could not parse version from MS '{0}' (LL.value empty)." -f $msIP)
                 }
-                $result.Version = Convert-VersionString $result.RawVersion # Assuming Convert-VersionString is available
+                $result.Version = Convert-VersionString $result.RawVersion
                 Write-Log -Level DEBUG -Message ("$($FunctionName): Extracted Version: '{0}', RawVersion from XML: '{1}' for MS: '{2}'" -f $result.Version, $result.RawVersion, $msIP)
             } else {
-                # This case should ideally not be reached if ErrorAction='Stop' is effective for all IWR calls.
                 Write-Log -Level WARN -Message ("$($FunctionName): Failed to get a valid response object for version check of MS '{0}' after all attempts." -f $msIP)
                 throw ("Failed to get a valid response for version check of MS '{0}' after all attempts." -f $msIP)
             }
-        } catch { # Catch for the main Invoke-WebRequest logic try block (catches re-thrown errors from inner blocks too)
+        } catch {
             $CaughtIwrError = $_
             $result.Error = ("Error during Invoke-WebRequest for '{0}': {1}" -f $msIP, $CaughtIwrError.Exception.Message.Split([Environment]::NewLine)[0])
             Write-Log -Level WARN -Message $result.Error
@@ -181,10 +170,10 @@ $result = [PSCustomObject]@{
                  Write-Log -Level DEBUG -Message ("$($FunctionName): WebException Details - Status: {0}, Description: {1}" -f $CaughtIwrError.Exception.Response.StatusCode, $CaughtIwrError.Exception.Response.StatusDescription)
             }
         }
-    } catch { # This is the CATCH for the OUTER try block (started line 39)
+    } catch {
         $OuterCaughtError = $_
         $result.Error = ("Outer error in Get-MiniserverVersion for '{0}': {1}" -f $msIP, $OuterCaughtError.Exception.Message.Split([Environment]::NewLine)[0])
-        Write-Log -Level WARN -Message $result.Error # Log the general outer error
+        Write-Log -Level WARN -Message $result.Error
         Write-Log -Level DEBUG -Message ("$($FunctionName): Full outer error details for MS '{0}': {1}" -f $msIP, $OuterCaughtError.Exception.ToString())
     } finally {
         $ProgressPreference = $oldProgressPreference
@@ -195,7 +184,7 @@ $result = [PSCustomObject]@{
         Write-Log -Level DEBUG -Message ("$($FunctionName): Exiting. Final version for MS '{0}': '{1}', Error: '{2}'" -f $result.MSIP, $result.Version, $result.Error)
         Exit-Function
     }
-return $result
+    return $result
 }
 function Update-MS {
 [CmdletBinding()]
