@@ -152,8 +152,21 @@ function Get-ChangelogNotesForVersion {
         [string]$Version,
 
         [Parameter(Mandatory=$true)]
-        [string[]]$AllChangelogLines
+        [string]$ChangelogFilePath # Changed from AllChangelogLines
     )
+
+    Write-Host "Get-ChangelogNotesForVersion: Reading changelog from path '$ChangelogFilePath' for version '$Version'."
+    if (-not (Test-Path $ChangelogFilePath)) {
+        Write-Warning "Get-ChangelogNotesForVersion: Changelog file not found at '$ChangelogFilePath'."
+        return "" # Return empty string if file not found
+    }
+
+    $AllChangelogLines = (Get-Content $ChangelogFilePath -Raw -ErrorAction SilentlyContinue) -split '\r?\n'
+    if ($null -eq $AllChangelogLines -or $AllChangelogLines.Count -eq 0) {
+        Write-Warning "Get-ChangelogNotesForVersion: Changelog file at '$ChangelogFilePath' is empty or could not be read properly."
+        return "" # Return empty string if content is empty
+    }
+    Write-Host "Get-ChangelogNotesForVersion: Read $($AllChangelogLines.Count) lines from '$ChangelogFilePath'."
 
     $notesLines = [System.Collections.Generic.List[string]]::new()
     $collectingNotes = $false
@@ -499,52 +512,14 @@ try {
         
         # Extract changelog notes for the release body
         $changelogPathForNotesExtraction = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
-        Write-Host "DEBUG: Reading changelog for notes from: $changelogPathForNotesExtraction"
-        
-        $rawChangelogContentForNotes = Get-Content $changelogPathForNotesExtraction -Raw -ErrorAction SilentlyContinue
-        if ($null -eq $rawChangelogContentForNotes) {
-            Write-Warning "DEBUG: Get-Content -Raw returned null or an error occurred reading $changelogPathForNotesExtraction. Defaulting to empty array for changelog lines."
-            $changelogLinesForNotes = @()
-        } else {
-            # Split the raw content by newline characters. Handles Windows (CRLF) and Unix (LF) newlines.
-            $changelogLinesForNotes = $rawChangelogContentForNotes -split '\r?\n'
-        }
-        
-        Write-Host "DEBUG: Type of `$changelogLinesForNotes is: $($changelogLinesForNotes.GetType().FullName)"
-        Write-Host "DEBUG: Count of lines in `$changelogLinesForNotes: $($changelogLinesForNotes.Count)"
-        
-        if ($changelogLinesForNotes.Count -gt 0) {
-            if ($changelogLinesForNotes.Count -lt 15) { # Log all lines if few
-                Write-Host "DEBUG: Content of `$changelogLinesForNotes (all lines):"
-                $changelogLinesForNotes | ForEach-Object { Write-Host "DEBUG: Line: '$_'" }
-            } else { # Log only first 5 if many
-                Write-Host "DEBUG: First 5 lines of `$changelogLinesForNotes:"
-                $changelogLinesForNotes | Select-Object -First 5 | ForEach-Object { Write-Host "DEBUG: Line: '$_'" }
-            }
-        } else {
-            Write-Host "DEBUG: `$changelogLinesForNotes is empty after processing."
-        }
-        [string[]]$linesToPassExplicit = $changelogLinesForNotes
-        Write-Host "DEBUG (Explicit Pass): Type of `$linesToPassExplicit is: $($linesToPassExplicit.GetType().FullName)"
-        Write-Host "DEBUG (Explicit Pass): Count of lines in `$linesToPassExplicit: $($linesToPassExplicit.Count)"
-        if ($linesToPassExplicit.Count -gt 0) {
-            if ($linesToPassExplicit.Count -lt 6) {
-                Write-Host "DEBUG (Explicit Pass): Content (all lines):"
-                $linesToPassExplicit | ForEach-Object { Write-Host "DEBUG (Explicit Pass): Line: '$_'" }
-            } else {
-                Write-Host "DEBUG (Explicit Pass): First 5 lines:"
-                $linesToPassExplicit | Select-Object -First 5 | ForEach-Object { Write-Host "DEBUG (Explicit Pass): Line: '$_'" }
-            }
-        } else {
-            Write-Host "DEBUG (Explicit Pass): `$linesToPassExplicit is empty."
-        }
+        Write-Host "DEBUG: Changelog path for notes extraction: $changelogPathForNotesExtraction"
 
         $getNotesParams = @{
             Version = $ScriptVersion
-            AllChangelogLines = $linesToPassExplicit
+            ChangelogFilePath = $changelogPathForNotesExtraction # Pass path instead of lines
         }
         Write-Host "DEBUG: Splatting parameters for Get-ChangelogNotesForVersion:"
-        $getNotesParams.GetEnumerator() | ForEach-Object { Write-Host "DEBUG:   $($_.Key) = $($_.Value | Select-Object -First 1) (Type: $($_.Value.GetType().FullName), Count: $(if ($_.Value -is [System.Array]) {$_.Value.Count} else {'N/A'}))" }
+        $getNotesParams.GetEnumerator() | ForEach-Object { Write-Host "DEBUG:   $($_.Key) = '$($_.Value)' (Type: $($_.Value.GetType().FullName))" }
         
         $releaseNotesBody = Get-ChangelogNotesForVersion @getNotesParams
         $tempNotesFilePath = Join-Path -Path $PSScriptRoot -ChildPath "temp_release_notes.md" # Or use $env:TEMP
