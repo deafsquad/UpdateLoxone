@@ -540,15 +540,29 @@ try {
         }
 
         $releaseNotesBody = Get-ChangelogNotesForVersion -Version $ScriptVersion -AllChangelogLines $linesToPassExplicit
-        
-        if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
-            Write-Warning "Could not extract changelog notes for version $ScriptVersion from CHANGELOG.md. Using default notes."
-            $releaseNotesBody = "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
-        } else {
-            Write-Host "Successfully extracted changelog notes for version $ScriptVersion to be used in the release body."
-        }
+        $tempNotesFilePath = Join-Path -Path $PSScriptRoot -ChildPath "temp_release_notes.md" # Or use $env:TEMP
 
-        gh release create $tagName --title $releaseTitle --notes $releaseNotesBody
+        if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
+            Write-Warning "Could not extract changelog notes for version $ScriptVersion from CHANGELOG.md. Using default notes string."
+            gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
+        } else {
+            Write-Host "Successfully extracted changelog notes for version $ScriptVersion. Writing to temporary file for release body."
+            try {
+                Set-Content -Path $tempNotesFilePath -Value $releaseNotesBody -Encoding UTF8
+                Write-Host "DEBUG: Notes written to $tempNotesFilePath"
+                gh release create $tagName --title $releaseTitle --notes-file $tempNotesFilePath
+            } catch {
+                Write-Error "Error during GitHub release creation with notes file: $($_.Exception.Message)"
+                # Fallback to simple notes if file method fails for some reason
+                Write-Warning "Falling back to default notes string due to error with notes file."
+                gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details. (Error using notes file)"
+            } finally {
+                if (Test-Path $tempNotesFilePath) {
+                    Write-Host "DEBUG: Removing temporary notes file: $tempNotesFilePath"
+                    Remove-Item $tempNotesFilePath -Force
+                }
+            }
+        }
         
         Write-Host "Uploading '$zipFileName' from '$zipFilePath' to GitHub Release '$tagName'..."
         gh release upload $tagName $zipFilePath --clobber
