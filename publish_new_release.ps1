@@ -21,14 +21,8 @@ This script performs the following actions:
 15. Commits and pushes the updated installer manifest.
 16. Rotates local ZIP archives in './releases_archive/', keeping the latest 10.
 
-.PARAMETER PublisherName
-(Required) The publisher name (e.g., your GitHub username).
-
 .PARAMETER PackageIdentifier
-(Optional) The winget package identifier. Defaults to "$PublisherName.UpdateLoxone".
-
-.PARAMETER PackageName
-(Optional) The winget package name. Defaults to "UpdateLoxone".
+(Required) The winget package identifier (e.g., YourGitHubUser.UpdateLoxone).
 
 .PARAMETER DryRun
 (Optional) If specified, the script will simulate most operations without making remote changes (no git push, no GitHub release creation/upload).
@@ -40,9 +34,9 @@ This script performs the following actions:
 (Optional) If specified along with -WingetPkgsRepoPath, the script will copy manifests to your local 'winget-pkgs' clone, run 'winget validate', and prepare a local commit.
 
 .EXAMPLE
-.\publish_new_release.ps1 -PublisherName "deafsquad"
-.\publish_new_release.ps1 -PublisherName "deafsquad" -DryRun
-.\publish_new_release.ps1 -PublisherName "deafsquad" -WingetPkgsRepoPath "D:\GitHub\winget-pkgs" -SubmitToWinget
+.\publish_new_release.ps1 -PackageIdentifier "deafsquad.UpdateLoxone"
+.\publish_new_release.ps1 -PackageIdentifier "deafsquad.UpdateLoxone" -DryRun
+.\publish_new_release.ps1 -PackageIdentifier "deafsquad.UpdateLoxone" -WingetPkgsRepoPath "D:\GitHub\winget-pkgs" -SubmitToWinget
 
 .IMPORTANT
 BEFORE RUNNING THIS SCRIPT:
@@ -60,20 +54,88 @@ Local ZIP archives are stored in './releases_archive/' and rotated (default: kee
 ZIP files themselves are NOT committed to the Git repository; they are uploaded to GitHub Releases.
 #>
 [CmdletBinding()]
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$PublisherName,
-
-    [string]$PackageIdentifier = "$($PublisherName).UpdateLoxone",
-
-    [string]$PackageName = "UpdateLoxone",
+    [Parameter(Mandatory=$false)] # Changed from $true
+    [string]$PackageIdentifier, # Example: YourGitHubUser.UpdateLoxone. If not provided, script will attempt to auto-discover.
 
     [switch]$DryRun,
-
     [string]$WingetPkgsRepoPath,
 
     [switch]$SubmitToWinget
 )
+
+if ([string]::IsNullOrWhiteSpace($PackageIdentifier)) {
+    Write-Host "PackageIdentifier not provided, attempting auto-discovery..."
+    $manifestsRoot = Join-Path -Path $PSScriptRoot -ChildPath "manifests"
+    if (-not (Test-Path $manifestsRoot -PathType Container)) {
+        Write-Error "Auto-discovery failed: Manifests directory '$manifestsRoot' not found."
+        exit 1
+    }
+
+    $candidateFiles = Get-ChildItem -Path $manifestsRoot -Recurse -Filter "*.yaml" | Where-Object {
+        $_.Name -notlike "*.installer.yaml" -and $_.Name -notlike "*.locale.*.yaml"
+    }
+
+    if ($candidateFiles.Count -eq 0) {
+        Write-Error "Auto-discovery failed: No candidate version manifest YAML files found in '$manifestsRoot'."
+        Write-Error "Ensure a version manifest (e.g., Publisher.Package.yaml) exists in the manifests subdirectory structure."
+        exit 1
+    } elseif ($candidateFiles.Count -gt 1) {
+        Write-Host "Auto-discovery found multiple candidate version manifests. Attempting to find best match based on path..."
+        $bestMatchIdentifier = $null
+        foreach ($fileCand in $candidateFiles) {
+            try {
+                # Expected structure: $manifestsRoot/{char_publisher}/{publisher}/{package}/{publisher}.{package}.yaml
+                $relativePath = $fileCand.DirectoryName.Substring($manifestsRoot.Length).TrimStart('\')
+                $pathSegments = $relativePath.Split([System.IO.Path]::DirectorySeparatorChar)
+                if ($pathSegments.Count -ge 3) { # Need at least char/publisher/package
+                    $expectedPublisher = $pathSegments[-2]
+                    $expectedPackage = $pathSegments[-1]
+                    $derivedIdentifier = "$expectedPublisher.$expectedPackage"
+                    if ($fileCand.BaseName -eq $derivedIdentifier) {
+                        $bestMatchIdentifier = $fileCand.BaseName
+                        Write-Host "Found strong candidate '$bestMatchIdentifier' where path matches filename structure."
+                        break
+                    }
+                }
+            } catch {
+                Write-Warning "Error processing candidate file '$($fileCand.FullName)' for path matching: $($_.Exception.Message)"
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($bestMatchIdentifier)) {
+            $PackageIdentifier = $bestMatchIdentifier
+        } else {
+            Write-Warning "Could not determine a single best match from multiple candidates based on path structure. Using the first one found: $($candidateFiles[0].BaseName)"
+            $PackageIdentifier = $candidateFiles[0].BaseName
+        }
+    } else { # Exactly one candidate
+        $PackageIdentifier = $candidateFiles[0].BaseName
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($PackageIdentifier)) {
+        Write-Error "Auto-discovery failed to determine a valid PackageIdentifier from found files."
+        exit 1
+    }
+    Write-Host "Auto-discovered PackageIdentifier: $PackageIdentifier"
+} else {
+    Write-Host "Using provided PackageIdentifier: $PackageIdentifier"
+}
+
+# --- Derive PublisherName and PackageName from PackageIdentifier ---
+$IdParts = $PackageIdentifier.Split('.')
+if ($IdParts.Count -lt 2) {
+    Write-Error "PackageIdentifier '$PackageIdentifier' is not valid. It must be in the format 'Publisher.PackageName' (e.g., MyOrg.MyPackage)."
+    exit 1
+}
+# Handles Publisher.With.Dots.PackageName by taking all but the last part as Publisher
+$script:PublisherName = $IdParts[0..($IdParts.Count-2)] -join '.'
+$script:PackageName = $IdParts[-1]
+
+Write-Host "Using PackageIdentifier: $PackageIdentifier"
+Write-Host "Derived Publisher: $script:PublisherName"
+Write-Host "Derived Package Name: $script:PackageName"
+
 
 if ($SubmitToWinget.IsPresent -and ([string]::IsNullOrWhiteSpace($WingetPkgsRepoPath) -or -not (Test-Path $WingetPkgsRepoPath -PathType Container))) {
     Write-Error "The -SubmitToWinget switch requires a valid -WingetPkgsRepoPath to be specified and the path must exist."
@@ -111,7 +173,7 @@ function Get-CurrentVersion {
 }
 
 # --- Function to Increment Version ---
-function Increment-Version {
+function Get-NextVersion {
     param(
         [string]$CurrentVersionString
     )
@@ -164,7 +226,7 @@ function Get-CurrentAuthor {
 }
 
 # --- Function to Rotate Local Release Archives ---
-function Rotate-LocalReleaseArchives {
+function Limit-LocalReleaseArchives {
     param(
         [string]$ArchiveDirectory,
         [int]$KeepCount = 10
@@ -189,20 +251,20 @@ function Rotate-LocalReleaseArchives {
 
 # --- Determine Manifest Paths ---
 $manifestDir = Join-Path -Path $PSScriptRoot -ChildPath "manifests"
-$publisherSubDir = Join-Path -Path $manifestDir -ChildPath $PublisherName.Substring(0,1).ToLower()
-$packageSubDir = Join-Path -Path $publisherSubDir -ChildPath $PublisherName
-$finalManifestDir = Join-Path -Path $packageSubDir -ChildPath $PackageName
+$publisherSubDir = Join-Path -Path $manifestDir -ChildPath $script:PublisherName.Substring(0,1).ToLower()
+$packageSubDir = Join-Path -Path $publisherSubDir -ChildPath $script:PublisherName
+$finalManifestDir = Join-Path -Path $packageSubDir -ChildPath $script:PackageName
 $versionManifestPathForVersionDetection = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.yaml"
 $localeManifestPathForAuthorDetection = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.locale.en-US.yaml"
 
 # --- Determine and Bump Version ---
 $currentVersion = Get-CurrentVersion -BaseManifestPath $versionManifestPathForVersionDetection
-$ScriptVersion = Increment-Version -CurrentVersionString $currentVersion
+$ScriptVersion = Get-NextVersion -CurrentVersionString $currentVersion
 
 # --- Determine Author Name ---
-$AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthorDetection -DefaultAuthor $PublisherName
+$AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthorDetection -DefaultAuthor $script:PublisherName
 
-Write-Host "Starting release process for $PackageName version $ScriptVersion (Author: $AuthorName)..."
+Write-Host "Starting release process for $script:PackageName version $ScriptVersion (Author: $AuthorName)..."
 
 # --- Pre-flight checks ---
 $changelogPath = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
@@ -299,12 +361,12 @@ $localeManifestContent = @"
 PackageIdentifier: $PackageIdentifier
 PackageVersion: $ScriptVersion
 PackageLocale: en-US
-Publisher: $PublisherName
+Publisher: $script:PublisherName
 Author: $AuthorName
-PackageName: $PackageName
-PackageUrl: https://github.com/$PublisherName/$PackageName
-License: MIT 
-LicenseUrl: https://github.com/$PublisherName/$PackageName/blob/main/LICENSE
+PackageName: $script:PackageName
+PackageUrl: https://github.com/$script:PublisherName/$script:PackageName
+License: MIT
+LicenseUrl: https://github.com/$script:PublisherName/$script:PackageName/blob/main/LICENSE
 ShortDescription: Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers.
 Moniker: updateloxone
 Tags:
@@ -312,6 +374,7 @@ Tags:
   - automation
   - update
   - smart-home
+ReleaseDate: $currentDate
 ManifestType: locale
 ManifestVersion: 1.6.0
 "@
@@ -359,12 +422,15 @@ $changelogRelativePath = ".\CHANGELOG.md"
 $installerManifestRelativePath = $installerManifestPath.Replace($PSScriptRoot, ".")
 
 try {
-    Write-Host "Staging files for initial commit (manifests, docs)..."
+    Write-Host "Staging files for initial commit (scripts, manifests, docs)..."
+    git add -f (Join-Path -Path $PSScriptRoot -ChildPath "UpdateLoxone.ps1")
+    git add -f (Join-Path -Path $PSScriptRoot -ChildPath "LoxoneUtils") # Stage the whole LoxoneUtils directory
+    git add -f $MyInvocation.MyCommand.Path # Stage the publish_new_release.ps1 script itself
     git add -f $readmeRelativePath
     git add -f $changelogRelativePath
-    git add -f $versionManifestPath 
-    git add -f $localeManifestPath 
-    git add -f $installerManifestPath 
+    git add -f $versionManifestPath
+    git add -f $localeManifestPath
+    git add -f $installerManifestPath
     # Note: ZIP file is NOT added to Git
 
     Write-Host "Committing initial release files with message: '$commitMessage'..."
@@ -386,7 +452,7 @@ try {
         gh release upload $tagName $zipFilePath --clobber
         Write-Host "Asset upload successful."
 
-        $InstallerUrl = "https://github.com/$PublisherName/$PackageName/releases/download/$tagName/$zipFileName"
+        $InstallerUrl = "https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$zipFileName"
         Write-Host "Constructed InstallerUrl: $InstallerUrl"
 
         Write-Host "Updating installer manifest '$installerManifestRelativePath' with new URL..."
@@ -407,29 +473,27 @@ try {
         git push
         Write-Host "All Git and GitHub operations completed successfully."
     } else {
-        Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
-        Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$PublisherName/$PackageName/releases/download/$tagName/$zipFileName"
-        Write-Host "DRY RUN: Installer manifest at '$installerManifestPath' still contains placeholder URL."
-    }
-
+            Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
+            Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$zipFileName"
+            Write-Host "DRY RUN: Installer manifest at '$installerManifestPath' still contains placeholder URL."
+        }
 } catch {
     Write-Warning "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
     Write-Warning "Please review the Git status and GitHub releases, then perform any remaining steps manually."
 }
 
 # --- Rotate Local Archives ---
-Rotate-LocalReleaseArchives -ArchiveDirectory $releasesArchiveDir -KeepCount 10
+Limit-LocalReleaseArchives -ArchiveDirectory $releasesArchiveDir -KeepCount 10
 
 # --- Winget Submission Preparation ---
 if ($SubmitToWinget.IsPresent) {
     Write-Host "---"
+    Write-Host "---"
     Write-Host "Preparing for Winget submission..."
-    $wingetPkgsManifestTargetDir = Join-Path -Path $WingetPkgsRepoPath -ChildPath "manifests\$($PublisherName.Substring(0,1).ToLower())\$PublisherName\$PackageName"
+    $wingetPkgsManifestTargetDir = Join-Path -Path $WingetPkgsRepoPath -ChildPath "manifests\$($script:PublisherName.Substring(0,1).ToLower())\$script:PublisherName\$script:PackageName"
     
     Write-Host "Ensuring target directory exists in winget-pkgs clone: $wingetPkgsManifestTargetDir"
-    if (-not (Test-Path $wingetPkgsManifestTargetDir)) {
         New-Item -ItemType Directory -Path $wingetPkgsManifestTargetDir -Force | Out-Null
-    }
 
     Write-Host "Copying manifests to $wingetPkgsManifestTargetDir..."
     Copy-Item -Path $versionManifestPath -Destination $wingetPkgsManifestTargetDir -Force
@@ -451,7 +515,7 @@ if ($SubmitToWinget.IsPresent) {
         Set-Location -Path $WingetPkgsRepoPath
         
         Write-Host "Staging manifests in winget-pkgs repository..."
-        $relativeManifestPathForWingetPkgs = "manifests\$($PublisherName.Substring(0,1).ToLower())\$PublisherName\$PackageName"
+        $relativeManifestPathForWingetPkgs = "manifests\$($script:PublisherName.Substring(0,1).ToLower())\$script:PublisherName\$script:PackageName"
         git add $relativeManifestPathForWingetPkgs
         
         $commitMessageWinget = "Add $PackageIdentifier v$ScriptVersion"
@@ -471,8 +535,8 @@ if ($SubmitToWinget.IsPresent) {
 }
 
 Write-Host "---"
-Write-Host "Release process for $PackageName v$ScriptVersion completed."
+Write-Host "Release process for $script:PackageName v$ScriptVersion completed."
 if (-not $DryRun) {
-    Write-Host "Please verify the GitHub release, tag, and asset: https://github.com/$PublisherName/$PackageName/releases/tag/$tagName"
+    Write-Host "Please verify the GitHub release, tag, and asset: https://github.com/$script:PublisherName/$script:PackageName/releases/tag/$tagName"
     Write-Host "Verify the installer manifest URL has been updated in your repository."
 }
