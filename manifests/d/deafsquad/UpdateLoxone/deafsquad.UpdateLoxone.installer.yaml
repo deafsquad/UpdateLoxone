@@ -8,7 +8,8 @@ NestedInstallerFiles:
     PortableCommandAlias: UpdateLoxone.ps1
 Installers:
   - Architecture: x64
-    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/UpdateLoxone-v0.2.5.zip 
+    InstallerUrl: https://github.com/deafsquad/UpdateLoxone/releases/download/v0.2.5/UpdateLoxone-v0.2.5.zip 
     InstallerSha256: EACB64F8E416BD3293CB04277A38D77393EA5C1B9EF73265052EA7399063DB0D
 ManifestType: installer
 ManifestVersion: 1.6.0
+
