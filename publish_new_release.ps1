@@ -499,7 +499,31 @@ try {
         
         # Extract changelog notes for the release body
         $changelogPathForNotesExtraction = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
-        $changelogLinesForNotes = @(Get-Content $changelogPathForNotesExtraction)
+        Write-Host "DEBUG: Reading changelog for notes from: $changelogPathForNotesExtraction"
+        
+        $rawChangelogContentForNotes = Get-Content $changelogPathForNotesExtraction -Raw -ErrorAction SilentlyContinue
+        if ($null -eq $rawChangelogContentForNotes) {
+            Write-Warning "DEBUG: Get-Content -Raw returned null or an error occurred reading $changelogPathForNotesExtraction. Defaulting to empty array for changelog lines."
+            $changelogLinesForNotes = @()
+        } else {
+            # Split the raw content by newline characters. Handles Windows (CRLF) and Unix (LF) newlines.
+            $changelogLinesForNotes = $rawChangelogContentForNotes -split '\r?\n'
+        }
+        
+        Write-Host "DEBUG: Type of `$changelogLinesForNotes is: $($changelogLinesForNotes.GetType().FullName)"
+        Write-Host "DEBUG: Count of lines in `$changelogLinesForNotes: $($changelogLinesForNotes.Count)"
+        
+        if ($changelogLinesForNotes.Count -gt 0) {
+            if ($changelogLinesForNotes.Count -lt 15) { # Log all lines if few
+                Write-Host "DEBUG: Content of `$changelogLinesForNotes (all lines):"
+                $changelogLinesForNotes | ForEach-Object { Write-Host "DEBUG: Line: '$_'" }
+            } else { # Log only first 5 if many
+                Write-Host "DEBUG: First 5 lines of `$changelogLinesForNotes:"
+                $changelogLinesForNotes | Select-Object -First 5 | ForEach-Object { Write-Host "DEBUG: Line: '$_'" }
+            }
+        } else {
+            Write-Host "DEBUG: `$changelogLinesForNotes is empty after processing."
+        }
         $releaseNotesBody = Get-ChangelogNotesForVersion -Version $ScriptVersion -AllChangelogLines $changelogLinesForNotes
         
         if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {

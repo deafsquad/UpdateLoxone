@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2025-05-30 04:44:11
+### Added
+- This is a test for version 0.2.9.
+- Release notes should be correctly extracted from this section.
 ## [0.2.8] - 2025-05-30 04:42:22
 ### Added
 - Final test: Release notes from this section, with Get-Content fix.
