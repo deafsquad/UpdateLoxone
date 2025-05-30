@@ -73,9 +73,9 @@ if ([string]::IsNullOrWhiteSpace($PackageIdentifier)) {
         exit 1
     }
 
-    $candidateFiles = Get-ChildItem -Path $manifestsRoot -Recurse -Filter "*.yaml" | Where-Object {
+    $candidateFiles = @(Get-ChildItem -Path $manifestsRoot -Recurse -Filter "*.yaml" | Where-Object {
         $_.Name -notlike "*.installer.yaml" -and $_.Name -notlike "*.locale.*.yaml"
-    }
+    })
 
     if ($candidateFiles.Count -eq 0) {
         Write-Error "Auto-discovery failed: No candidate version manifest YAML files found in '$manifestsRoot'."
@@ -236,8 +236,8 @@ function Limit-LocalReleaseArchives {
         Write-Host "Archive directory '$ArchiveDirectory' does not exist. Skipping rotation."
         return
     }
-    $archives = @(Get-ChildItem -Path $ArchiveDirectory -Filter "UpdateLoxone-v*.zip" | Sort-Object -Property Name -Descending) # Ensure $archives is always an array
-    if ($null -ne $archives -and $archives.Count -gt $KeepCount) {
+    $archives = @(Get-ChildItem -Path $ArchiveDirectory -Filter "UpdateLoxone-v*.zip" | Sort-Object -Property Name -Descending)
+    if ($archives.Count -gt $KeepCount) {
         $archivesToRemove = $archives | Select-Object -Skip $KeepCount
         foreach ($archiveToRemove in $archivesToRemove) {
             Write-Host "Removing old local archive: $($archiveToRemove.FullName)"

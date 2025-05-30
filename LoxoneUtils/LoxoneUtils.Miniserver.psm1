@@ -333,59 +333,96 @@ try { # Main function try
                 }
     
                 try { # For IWR calls
-                    $iwrParamsInitialCheck = @{ Uri = $versionUriForCheck; TimeoutSec = 15; ErrorAction = 'Stop'; Method = 'Get' }
-                    if ($credential) { $iwrParamsInitialCheck.Credential = $credential }
-    
+                    $iwrParamsInitialCheck = @{ TimeoutSec = 15; ErrorAction = 'Stop'; Method = 'Get' }
+                    # $credential (with URL-decoded password) is NOT set here by default anymore.
+                    # We will explicitly build headers if $usernameForAuthHeaderUpdateMS is available.
+
                     if ($uriBuilder.Scheme -eq 'http') {
-                        $httpsUriBuilderCheck = [System.UriBuilder]$versionUriForCheck
-                        $httpsUriBuilderCheck.Scheme = 'https'; $httpsUriBuilderCheck.Port = 443
+                        # Original entry is HTTP. Try HTTPS first as a failsafe, then HTTP.
+                        Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: Original scheme is HTTP. Attempting HTTPS first (with manual AuthN if available).")
+                        $httpsUriBuilderCheck = [System.UriBuilder]$versionUriForCheck # $versionUriForCheck is http://host/dev/cfg/version
+                        $httpsUriBuilderCheck.Scheme = 'https'; $httpsUriBuilderCheck.Port = -1 # Use default HTTPS port
+                        $iwrParamsInitialCheck.Uri = $httpsUriBuilderCheck.Uri.AbsoluteUri
+
+                        # Configure Auth for HTTPS attempt
+                        if (-not [string]::IsNullOrEmpty($usernameForAuthHeaderUpdateMS) -and -not [string]::IsNullOrEmpty($passwordForAuthHeaderUpdateMS)) {
+                            $PairHttps = "${usernameForAuthHeaderUpdateMS}:${passwordForAuthHeaderUpdateMS}"
+                            $BytesHttps = [System.Text.Encoding]::ASCII.GetBytes($PairHttps)
+                            $Base64AuthHttps = [System.Convert]::ToBase64String($BytesHttps)
+                            $iwrParamsInitialCheck.Headers = @{ Authorization = "Basic $Base64AuthHttps" }
+                            $iwrParamsInitialCheck.Remove('Credential'); $iwrParamsInitialCheck.Credential = $null
+                            Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Attempt): Using manual Authorization header.")
+                        } elseif ($credential) { # Fallback to $credential ONLY if manual parsing failed
+                            $iwrParamsInitialCheck.Credential = $credential
+                            $iwrParamsInitialCheck.Remove('Headers')
+                            Write-Log -Level WARN -Message ("Update-MS InitialCheck (HTTPS Attempt): Manual creds not parsed, using \$credential (URL-decoded password).")
+                        } else { # No credentials
+                            $iwrParamsInitialCheck.Remove('Credential'); $iwrParamsInitialCheck.Credential = $null
+                            $iwrParamsInitialCheck.Remove('Headers')
+                            Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Attempt): No credentials available.")
+                        }
+                        if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 }
+                        Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Attempt): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
                         try {
-                            $iwrParamsInitialCheck.Uri = $httpsUriBuilderCheck.Uri.AbsoluteUri
-                            $responseObject = Invoke-WebRequest @iwrParamsInitialCheck -SslProtocol Tls12
+                            $responseObject = Invoke-WebRequest @iwrParamsInitialCheck
                             $initialVersionCheckSuccess = $true
+                            Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: HTTPS attempt successful for $msIP.")
                         } catch {
-                            $CaughtErrorICR = $_ # ICR for Initial Check Routines
-                            Write-Log -Message ("Initial check for {0}: HTTPS failed ({1}). Falling back to HTTP." -f $msIP, $CaughtErrorICR.Exception.Message.Split([Environment]::NewLine)[0]) -Level DEBUG
-                            $iwrParamsInitialCheck.Uri = $versionUriForCheck # Revert to original HTTP URI
-                            # For HTTP fallback, prioritize manual auth header
+                            $CaughtErrorHttpsAttempt = $_
+                            Write-Log -Message ("Update-MS InitialCheck for {0}: Initial HTTPS attempt failed ({1}). Falling back to HTTP." -f $msIP, $CaughtErrorHttpsAttempt.Exception.Message.Split([Environment]::NewLine)[0]) -Level DEBUG
+
+                            # HTTP Fallback
+                            $iwrParamsInitialCheck.Uri = $versionUriForCheck # Revert to original HTTP URI from $uriBuilder (e.g. http://host/dev/cfg/version)
+                            $iwrParamsInitialCheck.Remove('SslProtocol') # Not applicable for HTTP
+
                             if (-not [string]::IsNullOrEmpty($usernameForAuthHeaderUpdateMS) -and -not [string]::IsNullOrEmpty($passwordForAuthHeaderUpdateMS)) {
-                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): Constructing Authorization header using MANUALLY PARSED User: '{0}' and Password (length: {1})." -f $usernameForAuthHeaderUpdateMS, $passwordForAuthHeaderUpdateMS.Length)
-                                $PairHttp = "${usernameForAuthHeaderUpdateMS}:${passwordForAuthHeaderUpdateMS}"
-                                $BytesHttp = [System.Text.Encoding]::ASCII.GetBytes($PairHttp)
-                                $Base64AuthHttp = [System.Convert]::ToBase64String($BytesHttp)
-                                $iwrParamsInitialCheck.Headers = @{ Authorization = "Basic $Base64AuthHttp" }
+                                $PairHttpFallback = "${usernameForAuthHeaderUpdateMS}:${passwordForAuthHeaderUpdateMS}"
+                                $BytesHttpFallback = [System.Text.Encoding]::ASCII.GetBytes($PairHttpFallback)
+                                $Base64AuthHttpFallback = [System.Convert]::ToBase64String($BytesHttpFallback)
+                                $iwrParamsInitialCheck.Headers = @{ Authorization = "Basic $Base64AuthHttpFallback" }
                                 $iwrParamsInitialCheck.Remove('Credential'); $iwrParamsInitialCheck.Credential = $null
-                                $iwrParamsInitialCheck.Remove('AllowUnencryptedAuthentication')
-                                $iwrParamsInitialCheck.UseBasicParsing = $true
-                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): Using manual Authorization header. Ensured -Credential is nulled.")
-                            } elseif ($credential) { # Fallback to $credential if manual parsing failed but $credential exists
-                                $iwrParamsInitialCheck.Remove('Headers') # Ensure .Headers is not set from a previous attempt
-                                $iwrParamsInitialCheck.Credential = $credential # Ensure it's set
-                                if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.AllowUnencryptedAuthentication = $true }
-                                $iwrParamsInitialCheck.UseBasicParsing = $true # Good for Gen1
-                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): Manual auth header not available/used. Using \$credential object.")
-                            } else { # No manual creds, no $credential
+                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): Using manual Authorization header.")
+                            } elseif ($credential) { # Fallback to $credential ONLY if manual parsing failed
+                                $iwrParamsInitialCheck.Credential = $credential
                                 $iwrParamsInitialCheck.Remove('Headers')
+                                if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.AllowUnencryptedAuthentication = $true }
+                                Write-Log -Level WARN -Message ("Update-MS InitialCheck (HTTP Fallback): Manual creds not parsed, using \$credential (URL-decoded password).")
+                            } else { # No credentials
                                 $iwrParamsInitialCheck.Remove('Credential'); $iwrParamsInitialCheck.Credential = $null
-                                $iwrParamsInitialCheck.Remove('AllowUnencryptedAuthentication')
-                                $iwrParamsInitialCheck.UseBasicParsing = $true
-                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): No credentials available for this attempt.")
+                                $iwrParamsInitialCheck.Remove('Headers')
+                                Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): No credentials available.")
                             }
+                            $iwrParamsInitialCheck.UseBasicParsing = $true
                             Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
                             $responseObject = Invoke-WebRequest @iwrParamsInitialCheck # This will throw to the outer IWR catch if it fails
                             $initialVersionCheckSuccess = $true
+                            Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: HTTP fallback attempt successful for $msIP.")
                         }
-                    } else { # Scheme was HTTPS
-                        $invokeWebRequestSplatHttp = $iwrParamsInitialCheck
-                        # Ensure SslProtocol Tls12 is used for HTTPS if on PS 6+ (already in iwrParams for PS5 via SecurityProtocol global)
-                        # For PS Core, Invoke-WebRequest might need explicit -SslProtocol if not relying on global.
-                        # However, the global [System.Net.ServicePointManager]::SecurityProtocol should cover it.
-                        # Adding it explicitly for PS6+ for robustness if needed, though original logic didn't differentiate here.
-                        if ($PSVersionTable.PSVersion.Major -ge 6) {
-                             $invokeWebRequestSplatHttp = $iwrParamsInitialCheck | Add-Member -MemberType NoteProperty -Name SslProtocol -Value Tls12 -PassThru -Force
+                    } else { # Original Scheme was HTTPS
+                        Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: Original scheme is HTTPS. Attempting HTTPS (with manual AuthN if available).")
+                        $iwrParamsInitialCheck.Uri = $versionUriForCheck # URI is already HTTPS
+
+                        if (-not [string]::IsNullOrEmpty($usernameForAuthHeaderUpdateMS) -and -not [string]::IsNullOrEmpty($passwordForAuthHeaderUpdateMS)) {
+                            $PairHttpsDirect = "${usernameForAuthHeaderUpdateMS}:${passwordForAuthHeaderUpdateMS}"
+                            $BytesHttpsDirect = [System.Text.Encoding]::ASCII.GetBytes($PairHttpsDirect)
+                            $Base64AuthHttpsDirect = [System.Convert]::ToBase64String($BytesHttpsDirect)
+                            $iwrParamsInitialCheck.Headers = @{ Authorization = "Basic $Base64AuthHttpsDirect" }
+                            $iwrParamsInitialCheck.Remove('Credential'); $iwrParamsInitialCheck.Credential = $null
+                            Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Direct): Using manual Authorization header.")
+                        } elseif ($credential) { # Fallback to $credential ONLY if manual parsing failed
+                            $iwrParamsInitialCheck.Credential = $credential
+                            $iwrParamsInitialCheck.Remove('Headers')
+                            Write-Log -Level WARN -Message ("Update-MS InitialCheck (HTTPS Direct): Manual creds not parsed, using \$credential (URL-decoded password).")
+                        } else { # No credentials
+                            $iwrParamsInitialCheck.Remove('Credential'); $iwrParamsInitialCheck.Credential = $null
+                            $iwrParamsInitialCheck.Remove('Headers')
+                            Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Direct): No credentials available.")
                         }
-                        $responseObject = Invoke-WebRequest @invokeWebRequestSplatHttp
+                        if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 }
+                        Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Direct): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
+                        $responseObject = Invoke-WebRequest @iwrParamsInitialCheck
                         $initialVersionCheckSuccess = $true
+                        Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: HTTPS direct attempt successful for $msIP.")
                     }
     
                     if ($initialVersionCheckSuccess -and $responseObject) {
