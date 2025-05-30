@@ -1,5 +1,5 @@
 PackageIdentifier: deafsquad.UpdateLoxone
-PackageVersion: 0.2.4
+PackageVersion: 0.2.5
 InstallerLocale: en-US
 InstallerType: zip
 NestedInstallerType: portable
@@ -8,8 +8,7 @@ NestedInstallerFiles:
     PortableCommandAlias: UpdateLoxone.ps1
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/deafsquad/UpdateLoxone/releases/download/v0.2.4/UpdateLoxone-v0.2.4.zip 
-    InstallerSha256: 918DDF85F1441D2EF3D1EC5F5908F9F53370703FA4437015A7DFF0A8D27F8644
+    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/UpdateLoxone-v0.2.5.zip 
+    InstallerSha256: EACB64F8E416BD3293CB04277A38D77393EA5C1B9EF73265052EA7399063DB0D
 ManifestType: installer
 ManifestVersion: 1.6.0
-

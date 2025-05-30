@@ -461,15 +461,17 @@ try { # Main function try
                 $invokeParams = @{
                     MSUri                  = $uriForUpdateTrigger
                     NormalizedDesiredVersion = $DesiredVersion
-                    Credential             = $credential
-                    StepNumber             = $StepNumber # Pass overall step number
-                    TotalSteps             = $TotalSteps   # Pass overall total steps
+                    Credential             = $credential # Still pass for potential non-Basic Auth or fallback
+                    UsernameForAuthHeader  = $usernameForAuthHeaderUpdateMS # Pass manually parsed creds
+                    PasswordForAuthHeader  = $passwordForAuthHeaderUpdateMS # Pass manually parsed creds
+                    StepNumber             = $StepNumber
+                    TotalSteps             = $TotalSteps
                     IsInteractive          = $IsInteractive
                     ErrorOccurred          = $script:ErrorOccurredInUpdateMS
                     AnyUpdatePerformed     = ($allMSResults.UpdateSucceeded -contains $true)
                     SkipCertificateCheck   = $SkipCertificateCheck.IsPresent
-                    MSCounter              = $msCounter # For Invoke-MSUpdate to use in its toast
-                    TotalMS                = $MSs.Count  # For Invoke-MSUpdate to use in its toast
+                    MSCounter              = $msCounter
+                    TotalMS                = $MSs.Count
                 }
                 $updateResultObject = Invoke-MSUpdate @invokeParams
     
@@ -511,17 +513,20 @@ function Invoke-MSUpdate {
 param(
     [Parameter(Mandatory=$true)][string]$MSUri,
     [Parameter(Mandatory=$true)][string]$NormalizedDesiredVersion,
-    [Parameter()][System.Management.Automation.PSCredential]$Credential = $null,
+    [Parameter()][System.Management.Automation.PSCredential]$Credential = $null, # Original credential object
+    [Parameter()][string]$UsernameForAuthHeader = $null, # Manually parsed username
+    [Parameter()][string]$PasswordForAuthHeader = $null, # Manually parsed (raw) password
     [Parameter(Mandatory = $false)][int]$StepNumber = 1,
     [Parameter(Mandatory = $false)][int]$TotalSteps = 1,
     [Parameter()][bool]$IsInteractive = $false,
     [Parameter()][bool]$ErrorOccurred = $false,
     [Parameter()][bool]$AnyUpdatePerformed = $false,
     [Parameter()][switch]$SkipCertificateCheck,
-    [Parameter(Mandatory = $false)][int]$MSCounter = 1, # Current MS being processed
-    [Parameter(Mandatory = $false)][int]$TotalMS = 1    # Total MS in this batch
+    [Parameter(Mandatory = $false)][int]$MSCounter = 1,
+    [Parameter(Mandatory = $false)][int]$TotalMS = 1
 )
 Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+Write-Log -Level DEBUG -Message ("Invoke-MSUpdate: UsernameForAuthHeader is null/empty: $([string]::IsNullOrEmpty($UsernameForAuthHeader)), PasswordForAuthHeader is null/empty: $([string]::IsNullOrEmpty($PasswordForAuthHeader))")
 
 $invokeResult = [PSCustomObject]@{ VerificationSuccess = $false; ReportedVersion = $null; ErrorOccurredInInvoke = $false; StatusMessage = "NotStarted" }
 $originalCallback = $null; $callbackChanged = $false
@@ -545,23 +550,39 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     }
 
     try { # For IWR - Trigger
-        $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = 30; ErrorAction = 'Stop' }
-        if ($Credential) {
-            if ($schemeInInvoke -eq 'http' -and $PSVersionTable.PSVersion.Major -ge 6) {
-                $triggerParams.Credential = $Credential; $triggerParams.AllowUnencryptedAuthentication = $true
-            } elseif ($schemeInInvoke -eq 'http') {
-                $Username = $Credential.UserName; $Password = $Credential.GetNetworkCredential().Password
-                $EncodedCredentials = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${Username}:${Password}"))
-                $triggerParams.Headers = @{ Authorization = "Basic $EncodedCredentials" }
+            $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = 30; ErrorAction = 'Stop' }
+            
+            if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and -not [string]::IsNullOrEmpty($PasswordForAuthHeader)) {
+                Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Trigger): Using manually parsed credentials for Authorization header."
+                $PairTrigger = "${UsernameForAuthHeader}:${PasswordForAuthHeader}"
+                $BytesTrigger = [System.Text.Encoding]::ASCII.GetBytes($PairTrigger)
+                $Base64AuthTrigger = [System.Convert]::ToBase64String($BytesTrigger)
+                $triggerParams.Headers = @{ Authorization = "Basic $Base64AuthTrigger" }
+                # $triggerParams.Credential = $null # Ensure $Credential object is not used if manual header is set
+            } elseif ($Credential) { # Fallback to $Credential object if manual ones aren't available
+                Write-Log -Level WARN -Message "Invoke-MSUpdate (Trigger): Manually parsed credentials not available, falling back to \$Credential object (may use URL-decoded password)."
+                if ($schemeInInvoke -eq 'http' -and $PSVersionTable.PSVersion.Major -ge 6) {
+                    $triggerParams.Credential = $Credential; $triggerParams.AllowUnencryptedAuthentication = $true
+                } elseif ($schemeInInvoke -eq 'http') {
+                    # This path for PS5 HTTP with $Credential might still use URL-decoded password from $Credential.GetNetworkCredential().Password
+                    # Ideally, if $UsernameForAuthHeader/$PasswordForAuthHeader were always populated from Update-MS, this branch wouldn't be hit for Basic Auth.
+                    $UsernameDecoded = $Credential.UserName; $PasswordDecoded = $Credential.GetNetworkCredential().Password
+                    Write-Log -Level WARN -Message "Invoke-MSUpdate (Trigger): PS5 HTTP with \$Credential. Password used will be URL-decoded from \$Credential object."
+                    $EncodedCredentialsDecoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${UsernameDecoded}:${PasswordDecoded}"))
+                    $triggerParams.Headers = @{ Authorization = "Basic $EncodedCredentialsDecoded" }
+                } else { # HTTPS
+                    $triggerParams.Credential = $Credential
+                }
             } else {
-                $triggerParams.Credential = $Credential
+                Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Trigger): No credentials provided."
             }
-        }
-        Invoke-WebRequest @triggerParams | Out-Null
-        Write-Log -Message ("Update trigger sent to '{0}'." -f $hostForPingInInvoke) -Level INFO
-        $invokeResult.StatusMessage = "UpdateTriggered_WaitingForReboot"
-    } catch {
-        $CaughtError = $_
+            if ($schemeInInvoke -eq 'http') { $triggerParams.UseBasicParsing = $true }
+    
+            Write-Log -Level DEBUG -Message ("Invoke-MSUpdate (Trigger): triggerParams before invoke: $($triggerParams | Out-String)")
+            Invoke-WebRequest @triggerParams | Out-Null
+            Write-Log -Message ("Update trigger sent to '{0}'." -f $hostForPingInInvoke) -Level INFO
+            $invokeResult.StatusMessage = "UpdateTriggered_WaitingForReboot"
+        } catch {
         $invokeResult.ErrorOccurredInInvoke = $true; $invokeResult.StatusMessage = ("Error_TriggeringUpdate: {0}" -f $CaughtError.Exception.Message.Split([Environment]::NewLine)[0])
         Write-Log -Message ("Error triggering update for '{0}': {1}" -f $hostForPingInInvoke, $CaughtError.Exception.Message) -Level ERROR
     }
@@ -573,17 +594,31 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         
         $startTime = Get-Date; $timeout = New-TimeSpan -Minutes 15; $msResponsive = $false; $loggedUpdatingStatus = $false
         $verifyParams = @{ Uri = $verificationUriForPolling; UseBasicParsing = $true; TimeoutSec = 10; ErrorAction = 'Stop' }
-        if ($Credential) {
+
+        if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and -not [string]::IsNullOrEmpty($PasswordForAuthHeader)) {
+            Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Polling): Using manually parsed credentials for Authorization header."
+            $PairVerify = "${UsernameForAuthHeader}:${PasswordForAuthHeader}"
+            $BytesVerify = [System.Text.Encoding]::ASCII.GetBytes($PairVerify)
+            $Base64AuthVerify = [System.Convert]::ToBase64String($BytesVerify)
+            $verifyParams.Headers = @{ Authorization = "Basic $Base64AuthVerify" }
+            # $verifyParams.Credential = $null
+        } elseif ($Credential) { # Fallback to $Credential object
+            Write-Log -Level WARN -Message "Invoke-MSUpdate (Polling): Manually parsed credentials not available, falling back to \$Credential object (may use URL-decoded password)."
             if ($schemeInInvoke -eq 'http' -and $PSVersionTable.PSVersion.Major -ge 6) {
                 $verifyParams.Credential = $Credential; $verifyParams.AllowUnencryptedAuthentication = $true
             } elseif ($schemeInInvoke -eq 'http') {
-                $Username = $Credential.UserName; $Password = $Credential.GetNetworkCredential().Password
-                $EncodedCredentials = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${Username}:${Password}"))
-                $verifyParams.Headers = @{ Authorization = "Basic $EncodedCredentials" }
-            } else {
+                $UsernameDecodedPoll = $Credential.UserName; $PasswordDecodedPoll = $Credential.GetNetworkCredential().Password
+                Write-Log -Level WARN -Message "Invoke-MSUpdate (Polling): PS5 HTTP with \$Credential. Password used will be URL-decoded from \$Credential object."
+                $EncodedCredentialsDecodedPoll = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${UsernameDecodedPoll}:${PasswordDecodedPoll}"))
+                $verifyParams.Headers = @{ Authorization = "Basic $EncodedCredentialsDecodedPoll" }
+            } else { # HTTPS
                 $verifyParams.Credential = $Credential
             }
+        } else {
+            Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Polling): No credentials provided."
         }
+        # UseBasicParsing is already in $verifyParams base definition for polling.
+        Write-Log -Level DEBUG -Message ("Invoke-MSUpdate (Polling): verifyParams before invoke: $($verifyParams | Out-String)")
 
         $Attempts = 0; $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
         $LastPollStatusMessage = "Initiating..."
