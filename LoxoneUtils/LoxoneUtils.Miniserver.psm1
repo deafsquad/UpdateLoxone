@@ -515,7 +515,7 @@ param(
     [Parameter(Mandatory=$true)][string]$NormalizedDesiredVersion,
     [Parameter()][System.Management.Automation.PSCredential]$Credential = $null, # Original credential object
     [Parameter()][string]$UsernameForAuthHeader = $null, # Manually parsed username
-    [Parameter()][string]$PasswordForAuthHeader = $null, # Manually parsed (raw) password
+    [Parameter()][SecureString]$PasswordForAuthHeader = $null, # Manually parsed (raw) password
     [Parameter(Mandatory = $false)][int]$StepNumber = 1,
     [Parameter(Mandatory = $false)][int]$TotalSteps = 1,
     [Parameter()][bool]$IsInteractive = $false,
@@ -526,7 +526,7 @@ param(
     [Parameter(Mandatory = $false)][int]$TotalMS = 1
 )
 Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-Write-Log -Level DEBUG -Message ("Invoke-MSUpdate: UsernameForAuthHeader is null/empty: $([string]::IsNullOrEmpty($UsernameForAuthHeader)), PasswordForAuthHeader is null/empty: $([string]::IsNullOrEmpty($PasswordForAuthHeader))")
+Write-Log -Level DEBUG -Message ("Invoke-MSUpdate: UsernameForAuthHeader is null/empty: $([string]::IsNullOrEmpty($UsernameForAuthHeader)), PasswordForAuthHeader is null/empty: $(($null -eq $PasswordForAuthHeader -or $PasswordForAuthHeader.Length -eq 0))")
 
 $invokeResult = [PSCustomObject]@{ VerificationSuccess = $false; ReportedVersion = $null; ErrorOccurredInInvoke = $false; StatusMessage = "NotStarted" }
 $originalCallback = $null; $callbackChanged = $false
@@ -552,9 +552,23 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     try { # For IWR - Trigger
             $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = 30; ErrorAction = 'Stop' }
             
-            if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and -not [string]::IsNullOrEmpty($PasswordForAuthHeader)) {
+            if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null -and $PasswordForAuthHeader.Length -gt 0)) {
                 Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Trigger): Using manually parsed credentials for Authorization header."
-                $PairTrigger = "${UsernameForAuthHeader}:${PasswordForAuthHeader}"
+                $plainPasswordForAuthHeader = $null
+                $bstr = $null
+                try {
+                    # Convert SecureString to plain text for the Authorization header
+                    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($PasswordForAuthHeader)
+                    $plainPasswordForAuthHeader = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+                }
+                finally {
+                    if ($null -ne $bstr) {
+                        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+                    }
+                }
+                $PairTrigger = "${UsernameForAuthHeader}:${plainPasswordForAuthHeader}"
+                # Clear the plain text password variable as its content is now in PairTrigger
+                if ($null -ne $plainPasswordForAuthHeader) { Clear-Variable plainPasswordForAuthHeader -ErrorAction SilentlyContinue }
                 $BytesTrigger = [System.Text.Encoding]::ASCII.GetBytes($PairTrigger)
                 $Base64AuthTrigger = [System.Convert]::ToBase64String($BytesTrigger)
                 $triggerParams.Headers = @{ Authorization = "Basic $Base64AuthTrigger" }
@@ -595,9 +609,23 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         $startTime = Get-Date; $timeout = New-TimeSpan -Minutes 15; $msResponsive = $false; $loggedUpdatingStatus = $false
         $verifyParams = @{ Uri = $verificationUriForPolling; UseBasicParsing = $true; TimeoutSec = 10; ErrorAction = 'Stop' }
 
-        if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and -not [string]::IsNullOrEmpty($PasswordForAuthHeader)) {
+        if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null -and $PasswordForAuthHeader.Length -gt 0)) {
             Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Polling): Using manually parsed credentials for Authorization header."
-            $PairVerify = "${UsernameForAuthHeader}:${PasswordForAuthHeader}"
+            $plainPasswordForVerifyHeader = $null
+            $bstrVerify = $null
+            try {
+                # Convert SecureString to plain text for the Authorization header
+                $bstrVerify = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($PasswordForAuthHeader)
+                $plainPasswordForVerifyHeader = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstrVerify)
+            }
+            finally {
+                If ($null -ne $bstrVerify) {
+                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstrVerify)
+                }
+            }
+            $PairVerify = "${UsernameForAuthHeader}:${plainPasswordForVerifyHeader}"
+            # Clear the plain text password variable
+            if ($null -ne $plainPasswordForVerifyHeader) { Clear-Variable plainPasswordForVerifyHeader -ErrorAction SilentlyContinue }
             $BytesVerify = [System.Text.Encoding]::ASCII.GetBytes($PairVerify)
             $Base64AuthVerify = [System.Convert]::ToBase64String($BytesVerify)
             $verifyParams.Headers = @{ Authorization = "Basic $Base64AuthVerify" }
@@ -641,7 +669,6 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     $LastPollStatusMessage = ("Updating ({0})" -f $errorDetail); if (-not $loggedUpdatingStatus) { Write-Log -Level INFO -Message ("MS {0} status: {1}" -f $hostForPingInInvoke, $errorDetail); $loggedUpdatingStatus = $true }
                 } else { $invokeResult.StatusMessage = ("Polling_WebException_StatusCode_{0}" -f $statusCode); $LastPollStatusMessage = ("Error ({0})" -f $statusCode) }
                 Write-Log -Message ("MS {0} WebException during poll ({1}): {2}" -f $hostForPingInInvoke, $LastPollStatusMessage, $CaughtWebError.Exception.Message.Split([Environment]::NewLine)[0]) -Level WARN
-            Write-Log -Message ("MS {0} WebException during poll ({1}): {2}" -f $hostForPingInInvoke, $LastPollStatusMessage, $currentWebError.Exception.Message.Split([Environment]::NewLine)[0]) -Level WARN
         } catch {
             $CaughtCatchError = $_
             $invokeResult.StatusMessage = ("Polling_Unreachable_Or_ParseError: {0}" -f $CaughtCatchError.Exception.Message.Split([Environment]::NewLine)[0]); $LastPollStatusMessage = "Unreachable/ParseError"; Write-Log -Message ("MS {0} unreachable/parse error: {1}" -f $hostForPingInInvoke, $CaughtCatchError.Exception.Message) -Level WARN

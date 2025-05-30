@@ -446,7 +446,20 @@ try {
         Write-Host "Attempting GitHub Release creation and asset upload..."
         $releaseTitle = "Release $tagName"
         Write-Host "Creating GitHub tag '$tagName' and release '$releaseTitle'..."
-        gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
+        
+        # Extract changelog notes for the release body
+        $changelogPathForNotesExtraction = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
+        $changelogLinesForNotes = Get-Content $changelogPathForNotesExtraction
+        $releaseNotesBody = Get-ChangelogNotesForVersion -Version $ScriptVersion -AllChangelogLines $changelogLinesForNotes
+        
+        if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
+            Write-Warning "Could not extract changelog notes for version $ScriptVersion from CHANGELOG.md. Using default notes."
+            $releaseNotesBody = "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
+        } else {
+            Write-Host "Successfully extracted changelog notes for version $ScriptVersion to be used in the release body."
+        }
+
+        gh release create $tagName --title $releaseTitle --notes $releaseNotesBody
         
         Write-Host "Uploading '$zipFileName' from '$zipFilePath' to GitHub Release '$tagName'..."
         gh release upload $tagName $zipFilePath --clobber
