@@ -463,7 +463,7 @@ try { # Main function try
                     NormalizedDesiredVersion = $DesiredVersion
                     Credential             = $credential # Still pass for potential non-Basic Auth or fallback
                     UsernameForAuthHeader  = $usernameForAuthHeaderUpdateMS # Pass manually parsed creds
-                    PasswordForAuthHeader  = $passwordForAuthHeaderUpdateMS # Pass manually parsed creds
+                    PasswordForAuthHeader  = if (-not [string]::IsNullOrEmpty($passwordForAuthHeaderUpdateMS)) { $passwordForAuthHeaderUpdateMS | ConvertTo-SecureString -AsPlainText -Force } else { $null } # Convert to SecureString
                     StepNumber             = $StepNumber
                     TotalSteps             = $TotalSteps
                     IsInteractive          = $IsInteractive
