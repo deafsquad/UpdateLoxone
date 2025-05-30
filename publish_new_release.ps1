@@ -539,7 +539,14 @@ try {
             Write-Host "DEBUG (Explicit Pass): `$linesToPassExplicit is empty."
         }
 
-        $releaseNotesBody = Get-ChangelogNotesForVersion -Version $ScriptVersion -AllChangelogLines $linesToPassExplicit
+        $getNotesParams = @{
+            Version = $ScriptVersion
+            AllChangelogLines = $linesToPassExplicit
+        }
+        Write-Host "DEBUG: Splatting parameters for Get-ChangelogNotesForVersion:"
+        $getNotesParams.GetEnumerator() | ForEach-Object { Write-Host "DEBUG:   $($_.Key) = $($_.Value | Select-Object -First 1) (Type: $($_.Value.GetType().FullName), Count: $(if ($_.Value -is [System.Array]) {$_.Value.Count} else {'N/A'}))" }
+        
+        $releaseNotesBody = Get-ChangelogNotesForVersion @getNotesParams
         $tempNotesFilePath = Join-Path -Path $PSScriptRoot -ChildPath "temp_release_notes.md" # Or use $env:TEMP
 
         if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
