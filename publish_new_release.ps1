@@ -524,7 +524,22 @@ try {
         } else {
             Write-Host "DEBUG: `$changelogLinesForNotes is empty after processing."
         }
-        $releaseNotesBody = Get-ChangelogNotesForVersion -Version $ScriptVersion -AllChangelogLines $changelogLinesForNotes
+        [string[]]$linesToPassExplicit = $changelogLinesForNotes
+        Write-Host "DEBUG (Explicit Pass): Type of `$linesToPassExplicit is: $($linesToPassExplicit.GetType().FullName)"
+        Write-Host "DEBUG (Explicit Pass): Count of lines in `$linesToPassExplicit: $($linesToPassExplicit.Count)"
+        if ($linesToPassExplicit.Count -gt 0) {
+            if ($linesToPassExplicit.Count -lt 6) {
+                Write-Host "DEBUG (Explicit Pass): Content (all lines):"
+                $linesToPassExplicit | ForEach-Object { Write-Host "DEBUG (Explicit Pass): Line: '$_'" }
+            } else {
+                Write-Host "DEBUG (Explicit Pass): First 5 lines:"
+                $linesToPassExplicit | Select-Object -First 5 | ForEach-Object { Write-Host "DEBUG (Explicit Pass): Line: '$_'" }
+            }
+        } else {
+            Write-Host "DEBUG (Explicit Pass): `$linesToPassExplicit is empty."
+        }
+
+        $releaseNotesBody = Get-ChangelogNotesForVersion -Version $ScriptVersion -AllChangelogLines $linesToPassExplicit
         
         if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
             Write-Warning "Could not extract changelog notes for version $ScriptVersion from CHANGELOG.md. Using default notes."
