@@ -118,9 +118,11 @@ $result = [PSCustomObject]@{
                         $iwrParams.Remove('AllowUnencryptedAuthentication')
                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using manual Authorization header. Removed -Credential and -AllowUnencryptedAuthentication from iwrParams if present.")
                     }
+                    
+                    $iwrParams.UseBasicParsing = $true # Add UseBasicParsing for HTTP fallback
 
                     Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting HTTP connection (fallback). Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback iwrParams (after potential manual header): $($iwrParams | Out-String)")
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback iwrParams (after potential manual header and UseBasicParsing): $($iwrParams | Out-String)")
                     try {
                         $responseObject = Invoke-WebRequest @iwrParams # This will throw to the outer catch if it fails
                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Invoke-WebRequest successful (fallback). StatusCode: {0}" -f $responseObject.StatusCode)
