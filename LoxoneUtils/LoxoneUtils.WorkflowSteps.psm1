@@ -1608,7 +1608,9 @@ function Invoke-UpdateMiniserversInBulk {
         [Parameter(Mandatory=$true)]
         [System.Collections.ArrayList]$UpdateTargetsToUpdate, # The main $UpdateTargetsInfo array
         [Parameter(Mandatory=$true)]
-        [ref]$ScriptGlobalState
+        [ref]$ScriptGlobalState,
+        [Parameter(Mandatory=$true)] # Added
+        [string]$ConfiguredUpdateChannel # Added
     )
     $FunctionName = $MyInvocation.MyCommand.Name
     $overallResult = [pscustomobject]@{
@@ -1687,6 +1689,7 @@ function Invoke-UpdateMiniserversInBulk {
     $updateMSParams = @{
         MSListPath                    = $WorkflowContext.MSListPath # Path to the file containing MS entries
         DesiredVersion                = $targetMSVersion
+        ConfiguredUpdateChannel       = $ConfiguredUpdateChannel # Added
         LogFile                       = $WorkflowContext.LogFile
         MaxLogFileSizeMB              = $WorkflowContext.Params.MaxLogFileSizeMB
         ScriptSaveFolder              = $WorkflowContext.ScriptSaveFolder # For temp files Update-MS might use

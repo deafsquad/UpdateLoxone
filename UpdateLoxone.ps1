@@ -678,7 +678,7 @@ $steps = @(
         }
         Run       = {
             param($scriptCtx, $targets, $globalStateRef, $prereqs)
-            Invoke-UpdateMiniserversInBulk -WorkflowContext $scriptCtx -Prerequisites $prereqs -UpdateTargetsToUpdate $targets -ScriptGlobalState $globalStateRef
+            Invoke-UpdateMiniserversInBulk -WorkflowContext $scriptCtx -Prerequisites $prereqs -UpdateTargetsToUpdate $targets -ScriptGlobalState $globalStateRef -ConfiguredUpdateChannel $scriptCtx.Params.Channel
         }
         Component = "MiniserverUpdate"
     }

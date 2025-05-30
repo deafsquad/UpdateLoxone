@@ -230,23 +230,239 @@ function Get-MiniserverVersion {
         Exit-Function
     }
     return $result
+return $result
 }
+
+function Test-LoxoneMiniserverUpdateLevel {
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$MSEntry,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ConfiguredUpdateChannel, # e.g., "Release", "Beta", "Test"
+
+    [Parameter()]
+    [switch]$SkipCertificateCheck,
+
+    [Parameter()]
+    [int]$TimeoutSec = 15 # Default timeout
+)
+$FunctionName = $MyInvocation.MyCommand.Name
+Enter-Function -FunctionName $FunctionName -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+Write-Log -Level DEBUG -Message "Entering function '$($FunctionName)'."
+Write-Log -Level DEBUG -Message "Parameters for '$($FunctionName)':"
+Write-Log -Level DEBUG -Message ("  MSEntry (original): '{0}'" -f ($MSEntry -replace "([Pp]assword=)[^;]+", '$1********'))
+Write-Log -Level DEBUG -Message ("  ConfiguredUpdateChannel: {0}" -f $ConfiguredUpdateChannel)
+Write-Log -Level DEBUG -Message ("  SkipCertificateCheck: {0}" -f $SkipCertificateCheck.IsPresent)
+Write-Log -Level DEBUG -Message ("  TimeoutSec: {0}" -f $TimeoutSec)
+
+$msIP = "Unknown"; $credential = $null; $usernameForAuthHeader = $null; $passwordForAuthHeader = $null
+$originalCallback = $null; $callbackChanged = $false
+$oldProgressPreference = $ProgressPreference
+
+try {
+    $ProgressPreference = 'SilentlyContinue'
+
+    $entryToParse = $MSEntry
+    if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
+    
+    $uriBuilderForHostAndPath = [System.UriBuilder]$entryToParse
+    $msIP = $uriBuilderForHostAndPath.Host
+    
+    # Manually parse username and password for Basic Auth header
+    if ($entryToParse -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+        $credPartFromFile = $Matches.credentials
+        if ($credPartFromFile -match '^(?<user>[^:]+):(?<pass>.+)$') {
+            $usernameForAuthHeader = $Matches.user
+            $passwordForAuthHeader = $Matches.pass
+        }
+    }
+
+    # Fallback to UriBuilder's properties if manual parsing failed, for $credential object
+    if (-not ([string]::IsNullOrWhiteSpace($uriBuilderForHostAndPath.UserName))) {
+        $securePasswordFromUriBuilder = $uriBuilderForHostAndPath.Password | ConvertTo-SecureString -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential($uriBuilderForHostAndPath.UserName, $securePasswordFromUriBuilder)
+        if ([string]::IsNullOrEmpty($usernameForAuthHeader)) { $usernameForAuthHeader = $credential.UserName } # Populate if manual parse was empty
+    }
+
+    # Determine the target update level string for comparison
+    $expectedUpdateLevelValue = $ConfiguredUpdateChannel
+    if ($ConfiguredUpdateChannel -eq "Test") {
+        $expectedUpdateLevelValue = "Alpha"
+        Write-Log -Level DEBUG -Message ("$($FunctionName): Translated ConfiguredUpdateChannel 'Test' to 'Alpha' for comparison.")
+    }
+
+    # Construct URI for /dev/cfg/updatelevel
+    $updateLevelUriBuilder = [System.UriBuilder]$entryToParse # Start with the full entry
+    $updateLevelUriBuilder.Path = "/dev/cfg/updatelevel"
+    $updateLevelUriBuilder.Password = $null # Clear userinfo for the request URI itself
+    $updateLevelUriBuilder.UserName = $null
+    
+    # The scheme (http/https) will be handled by the request logic below
+    $baseUpdateLevelUri = $updateLevelUriBuilder.Uri.AbsoluteUri
+
+    Write-Log -Message ("$($FunctionName): Checking MS updatelevel for '{0}' (parsed host)." -f $msIP) -Level DEBUG
+    
+    if ($SkipCertificateCheck.IsPresent) {
+        $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        $callbackChanged = $true
+    }
+
+    $responseObject = $null
+    $iwrParams = @{ TimeoutSec = $TimeoutSec; ErrorAction = 'Stop'; Method = 'Get' }
+    # Auth header construction logic (similar to Get-MiniserverVersion)
+    # Will try HTTPS first, then HTTP if original scheme was HTTP, or stick to HTTPS if original was HTTPS
+
+    $originalScheme = $uriBuilderForHostAndPath.Scheme
+    Write-Log -Level DEBUG -Message ("$($FunctionName): Original scheme parsed from MSEntry: '$originalScheme'")
+
+    $schemesToTry = @()
+    if ($originalScheme -eq 'http') {
+        $schemesToTry = 'https', 'http' # Try HTTPS first even if original is HTTP
+    } elseif ($originalScheme -eq 'https') {
+        $schemesToTry = 'https'
+    } else {
+        throw ("$($FunctionName): Unknown original scheme '$originalScheme' from MSEntry.")
+    }
+
+    $lastException = $null
+    foreach ($scheme in $schemesToTry) {
+        $currentUriBuilder = [System.UriBuilder]$baseUpdateLevelUri
+        $currentUriBuilder.Scheme = $scheme
+        if ($scheme -eq 'http') { $currentUriBuilder.Port = if ($uriBuilderForHostAndPath.Port -ne -1 -and $uriBuilderForHostAndPath.Scheme -eq 'http') { $uriBuilderForHostAndPath.Port } else { -1 } } # Use original port for http if specified, else default
+        elseif ($scheme -eq 'https') { $currentUriBuilder.Port = if ($uriBuilderForHostAndPath.Port -ne -1 -and $uriBuilderForHostAndPath.Scheme -eq 'https') { $uriBuilderForHostAndPath.Port } else { -1 } } # Use original port for https if specified, else default
+        
+        $iwrParams.Uri = $currentUriBuilder.Uri.AbsoluteUri
+        Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting $scheme connection to $($iwrParams.Uri)")
+
+        # Clear previous auth settings for this attempt
+        $iwrParams.Remove('Headers')
+        $iwrParams.Remove('Credential')
+        $iwrParams.Credential = $null
+        $iwrParams.Remove('AllowUnencryptedAuthentication')
+        $iwrParams.Remove('SslProtocol') # Remove SslProtocol for HTTP attempts
+        $iwrParams.Remove('UseBasicParsing')
+
+
+        if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
+            $Pair = "${usernameForAuthHeader}:${passwordForAuthHeader}"
+            $Bytes = [System.Text.Encoding]::ASCII.GetBytes($Pair)
+            $Base64Auth = [System.Convert]::ToBase64String($Bytes)
+            $iwrParams.Headers = @{ Authorization = "Basic $Base64Auth" }
+            if ($scheme -eq 'http') {
+                # For HTTP with manual header, ensure AllowUnencryptedAuthentication is not needed by PS Core
+                # and UseBasicParsing is set.
+                $iwrParams.UseBasicParsing = $true
+            }
+             Write-Log -Level DEBUG -Message ("$($FunctionName): Using manual Authorization header for $scheme.")
+        } elseif ($credential) { # Fallback to $credential object if manual parsing failed
+            $iwrParams.Credential = $credential
+            if ($scheme -eq 'http' -and $PSVersionTable.PSVersion.Major -ge 6) { $iwrParams.AllowUnencryptedAuthentication = $true }
+            if ($scheme -eq 'http') { $iwrParams.UseBasicParsing = $true }
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Using \$credential object for $scheme.")
+        } else {
+             if ($scheme -eq 'http') { $iwrParams.UseBasicParsing = $true }
+             Write-Log -Level DEBUG -Message ("$($FunctionName): No credentials for $scheme.")
+        }
+        
+        if ($scheme -eq 'https') {
+             if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParams.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 }
+        }
+
+        try {
+            Write-Log -Level DEBUG -Message ("$($FunctionName): iwrParams for ${scheme}: $($iwrParams | Out-String)")
+            $responseObject = Invoke-WebRequest @iwrParams
+            Write-Log -Level DEBUG -Message ("$($FunctionName): $scheme connection successful. StatusCode: $($responseObject.StatusCode)")
+            $lastException = $null # Clear last exception on success
+            break # Success, exit loop
+        } catch {
+            $lastException = $_
+            Write-Log -Level WARN -Message ("$($FunctionName): $scheme connection to '$($iwrParams.Uri)' failed: $($_.Exception.Message.Split([Environment]::NewLine)[0])")
+        }
+    }
+
+    if ($lastException -and -not $responseObject) { # If all attempts failed
+        throw $lastException # Re-throw the last encountered exception
+    }
+    
+    if ($responseObject) {
+        $xmlResponse = [xml]$responseObject.Content
+        $currentUpdateLevel = $xmlResponse.LL.value
+        $responseCode = $xmlResponse.LL.Code
+        Write-Log -Level INFO -Message ("$($FunctionName): MS '{0}' current updatelevel: '{1}' (Code: {2}). Expected: '{3}' (from channel '{4}')" -f $msIP, $currentUpdateLevel, $responseCode, $expectedUpdateLevelValue, $ConfiguredUpdateChannel)
+
+        if ($currentUpdateLevel -ne $expectedUpdateLevelValue) {
+            # Construct the URI for the error message
+            # We need the original user:pass and ip/hostname. $entryToParse has this.
+            # Scheme needs to be determined. If original was HTTP, suggest HTTP. If HTTPS, suggest HTTPS.
+            # For Gen1, always suggest HTTP. We don't have Gen1 info here directly.
+            # Let's provide both if unsure, or stick to original scheme.
+            
+            $setErrorUriHttp = "http://"
+            $setErrorUriHttps = "https://"
+            
+            if ($entryToParse -match '^(?<scheme>[^:]+)://(?<userpass>[^@]+@)?(?<hostandport>[^/]+)') {
+                $userPassPart = $Matches.userpass # Includes '@' if present
+                $hostAndPortPart = $Matches.hostandport
+                $setErrorUriHttp += $userPassPart + $hostAndPortPart + "/dev/cfg/updatelevel/" + $ConfiguredUpdateChannel # Use original channel name for setting
+                $setErrorUriHttps += $userPassPart + $hostAndPortPart + "/dev/cfg/updatelevel/" + $ConfiguredUpdateChannel
+            } else { # Fallback if regex fails (should not happen with validated MSEntry)
+                 $setErrorUriHttp += $msIP + "/dev/cfg/updatelevel/" + $ConfiguredUpdateChannel
+                 $setErrorUriHttps += $msIP + "/dev/cfg/updatelevel/" + $ConfiguredUpdateChannel
+            }
+
+            $errorMessage = @"
+Miniserver '$msIP' is on updatelevel '$currentUpdateLevel', but the configured update channel is '$ConfiguredUpdateChannel' (expects '$expectedUpdateLevelValue').
+Please set the correct updatelevel on the Miniserver using an account with administrator rights.
+You can typically do this by navigating to one of the following URLs in a web browser:
+$setErrorUriHttps
+(For older Miniservers, try HTTP: $setErrorUriHttp)
+Then, re-run this script.
+"@
+            Write-Log -Level ERROR -Message $errorMessage
+            throw $errorMessage # This will be caught by Update-MS
+        } else {
+            Write-Log -Level INFO -Message ("$($FunctionName): MS '{0}' updatelevel ('{1}') matches configured channel ('{2}' -> '{3}')." -f $msIP, $currentUpdateLevel, $ConfiguredUpdateChannel, $expectedUpdateLevelValue)
+        }
+    } else {
+        throw ("$($FunctionName): Failed to get a valid response for updatelevel check of MS '{0}' after all attempts." -f $msIP)
+    }
+
+} catch {
+    $CaughtError = $_
+    $errorMessageToLog = ("Error in Test-LoxoneMiniserverUpdateLevel for '{0}': {1}" -f $msIP, $CaughtError.Exception.Message.Split([Environment]::NewLine)[0])
+    Write-Log -Level ERROR -Message $errorMessageToLog
+    Write-Log -Level DEBUG -Message ("$($FunctionName): Full error details for MS '{0}': {1}" -f $msIP, $CaughtError.Exception.ToString())
+    # Re-throw the original exception object to preserve its type and details for the caller (Update-MS)
+    throw $CaughtError
+} finally {
+    $ProgressPreference = $oldProgressPreference
+    if ($callbackChanged) {
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
+    }
+    Write-Log -Level DEBUG -Message "$($FunctionName): Exiting."
+    Exit-Function
+}
+}
+
 function Update-MS {
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)] [string]$DesiredVersion,
-    [Parameter(Mandatory = $true)] [string]$MSListPath,
-    [Parameter(Mandatory = $true)] [string]$LogFile,
-    [Parameter(Mandatory = $true)] [int]$MaxLogFileSizeMB,
-    [Parameter()][switch]$DebugMode,
-    [Parameter(Mandatory = $true)] [string]$ScriptSaveFolder,
-    [Parameter(Mandatory = $false)][int]$StepNumber = 1,
-    [Parameter(Mandatory = $false)][int]$TotalSteps = 1,
-    [Parameter()][switch]$SkipCertificateCheck,
-    [Parameter()][bool]$IsInteractive = $false
+[Parameter(Mandatory = $true)] [string]$DesiredVersion,
+[Parameter(Mandatory = $true)] [string]$ConfiguredUpdateChannel, # Added parameter
+[Parameter(Mandatory = $true)] [string]$MSListPath,
+[Parameter(Mandatory = $true)] [string]$LogFile,
+[Parameter(Mandatory = $true)] [int]$MaxLogFileSizeMB,
+[Parameter()][switch]$DebugMode,
+[Parameter(Mandatory = $true)] [string]$ScriptSaveFolder,
+[Parameter(Mandatory = $false)][int]$StepNumber = 1,
+[Parameter(Mandatory = $false)][int]$TotalSteps = 1,
+[Parameter()][switch]$SkipCertificateCheck,
+[Parameter()][bool]$IsInteractive = $false
 )
 Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-
 $script:ErrorOccurredInUpdateMS = $false
 $allMSResults = @()
 
@@ -449,6 +665,12 @@ try { # Main function try
                 Write-Log -Message ("MS '{0}' is already at desired version '{1}'." -f $msIP, $DesiredVersion) -Level INFO
                 $msStatusObject.StatusMessage = "AlreadyUpToDate"; $msStatusObject.VersionAfterUpdate = $currentNormalizedVersion; $msStatusObject.UpdateSucceeded = $true
             } else {
+                # Check UpdateLevel before proceeding with update
+                Write-Log -Message ("MS '{0}' needs update. Checking updatelevel before proceeding..." -f $msIP) -Level INFO
+                Test-LoxoneMiniserverUpdateLevel -MSEntry $msEntry -ConfiguredUpdateChannel $ConfiguredUpdateChannel -SkipCertificateCheck:$SkipCertificateCheck.IsPresent
+                # If Test-LoxoneMiniserverUpdateLevel throws an error, it will be caught by the per-MS catch block below,
+                # setting ErrorDuringProcessing and StatusMessage appropriately.
+
                 Write-Log -Message ("Proceeding with update trigger for MS '{0}'..." -f $msIP) -Level INFO
                 $msStatusObject.AttemptedUpdate = $true
                 # Use the passed StepNumber and TotalSteps for the toast
