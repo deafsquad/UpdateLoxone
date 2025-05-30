@@ -145,6 +145,56 @@ if ($SubmitToWinget.IsPresent -and ([string]::IsNullOrWhiteSpace($WingetPkgsRepo
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# --- Function to Extract Changelog Notes for a Specific Version ---
+function Get-ChangelogNotesForVersion {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Version,
+
+        [Parameter(Mandatory=$true)]
+        [string[]]$AllChangelogLines
+    )
+
+    $notesLines = [System.Collections.Generic.List[string]]::new()
+    $collectingNotes = $false
+    $escapedVersion = [regex]::Escape($Version)
+    $versionHeaderPattern = "^## \[$escapedVersion\]" # Pattern for the start of the target version's header
+    $anyNewSectionPattern = "^## \[" # Pattern for the start of any ## section (typically a new version)
+
+    Write-Host "Get-ChangelogNotesForVersion: Attempting to extract notes for version '$Version'."
+
+    foreach ($line in $AllChangelogLines) {
+        if ($collectingNotes) {
+            # If we are collecting notes and encounter another ## section, it's the next version. Stop.
+            if ($line -match $anyNewSectionPattern) {
+                Write-Host "Get-ChangelogNotesForVersion: Found next section header, stopping collection for '$Version'."
+                $collectingNotes = $false # Stop collecting
+                break
+            }
+            # Otherwise, add the line to notes
+            $notesLines.Add($line.TrimEnd())
+        } elseif ($line -match $versionHeaderPattern) {
+            # Found the header for the target version. Start collecting from the next line.
+            Write-Host "Get-ChangelogNotesForVersion: Found header for version '$Version'. Starting to collect notes."
+            $collectingNotes = $true
+            # Do not add the header line itself to the notes
+        }
+    }
+
+    if ($notesLines.Count -eq 0) {
+        if ($collectingNotes) {
+            # This means the header was found, but no lines followed before EOF or next section
+            Write-Host "Get-ChangelogNotesForVersion: Version '$Version' header was found, but no subsequent content lines were collected."
+        } else {
+            # This means the header for $Version was never matched by $versionHeaderPattern
+            Write-Warning "Get-ChangelogNotesForVersion: Header for version '$Version' not found in CHANGELOG.md. Cannot extract notes."
+        }
+    } else {
+        Write-Host "Get-ChangelogNotesForVersion: Successfully collected $($notesLines.Count) lines of notes for version '$Version'."
+    }
+
+    return $notesLines -join "`n"
+}
 # --- Function to Get Current Version ---
 function Get-CurrentVersion {
     param(
