@@ -102,14 +102,25 @@ $result = [PSCustomObject]@{
                     
                     # Fallback to HTTP
                     $iwrParams.Uri = $versionUri # Revert to original HTTP URI
-                    if ($credential -and $PSVersionTable.PSVersion.Major -ge 6) {
-                        $iwrParams.AllowUnencryptedAuthentication = $true
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): Added AllowUnencryptedAuthentication for HTTP fallback (PSVersion >= 6).")
-                    } elseif ($credential) {
-                        Write-Log -Level DEBUG -Message ("$($FunctionName): Credential present for HTTP fallback (PSVersion < 6). AllowUnencryptedAuthentication not applicable/added by default by IWR for -Credential on HTTP.")
+                    
+                    # For HTTP fallback with credentials, construct the Authorization header manually
+                    # as -Credential with HTTP Basic Auth can be unreliable with some servers.
+                    if ($credential) {
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Manually constructing Authorization header for user '$($credential.UserName)'.")
+                        $Username = $credential.UserName
+                        $Password = $credential.GetNetworkCredential().Password
+                        $Pair = "${Username}:${Password}"
+                        $Bytes = [System.Text.Encoding]::ASCII.GetBytes($Pair)
+                        $Base64 = [System.Convert]::ToBase64String($Bytes)
+                        $iwrParams.Headers = @{ Authorization = "Basic $Base64" }
+                        # Remove -Credential and -AllowUnencryptedAuthentication if they were set, as we're using a manual header
+                        $iwrParams.Remove('Credential')
+                        $iwrParams.Remove('AllowUnencryptedAuthentication')
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback: Using manual Authorization header. Removed -Credential and -AllowUnencryptedAuthentication from iwrParams if present.")
                     }
+
                     Write-Log -Level DEBUG -Message ("$($FunctionName): Attempting HTTP connection (fallback). Exact URI for Invoke-WebRequest: {0}" -f $iwrParams.Uri)
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback iwrParams: $($iwrParams | Out-String)")
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Fallback iwrParams (after potential manual header): $($iwrParams | Out-String)")
                     try {
                         $responseObject = Invoke-WebRequest @iwrParams # This will throw to the outer catch if it fails
                         Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Invoke-WebRequest successful (fallback). StatusCode: {0}" -f $responseObject.StatusCode)
