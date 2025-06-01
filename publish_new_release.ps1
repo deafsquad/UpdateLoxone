@@ -335,39 +335,70 @@ if (-not (Test-Path $changelogPath)) {
     Write-Error "CHANGELOG.md not found at $changelogPath."
     exit 1
 }
+$currentDateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+$changelogLines = Get-Content $changelogPath
+$unreleasedHeaderPatternStrict = "^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER$" # Strict match for replacement
+$changelogUpdatedByScript = $false # Flag to track if script made changes
+
+# Attempt to update [Unreleased] section first
+for ($i = 0; $i -lt $changelogLines.Length; $i++) {
+    if ($changelogLines[$i] -match $unreleasedHeaderPatternStrict) {
+        Write-Host "Found '[Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER'. Updating to version $ScriptVersion and timestamp $currentDateTime."
+        $changelogLines[$i] = "## [$ScriptVersion] - $currentDateTime"
+        Set-Content -Path $changelogPath -Value $changelogLines
+        $changelogUpdatedByScript = $true
+        break
+    }
+    # Stop if we hit another version header, assuming Unreleased is at the top.
+    # Allow processing if $i is 0 (first line) even if it's another version header (though unlikely for Unreleased)
+    if ($i -gt 0 -and $changelogLines[$i] -match "^## \[") {
+        break
+    }
+}
+
+# Re-read content after potential modification
 $changelogContent = Get-Content $changelogPath -Raw
 $escapedVersionForRegex = [regex]::Escape($ScriptVersion)
-# Pattern to find the version header, allowing for a date placeholder
-$versionHeaderSearchPattern = "## \[$escapedVersionForRegex\]\s*-\s*YYYY-MM-DD_TIMESTAMP_PLACEHOLDER"
-$versionHeaderExactPattern = "## \[$escapedVersionForRegex\]" # Used if placeholder not found initially
+$versionHeaderExactPattern = "## \[$escapedVersionForRegex\]" # Checks if the version section exists (with any date)
+$versionHeaderWithSpecificPlaceholderPattern = "## \[$escapedVersionForRegex\]\s*-\s*YYYY-MM-DD_TIMESTAMP_PLACEHOLDER" # Checks for specific placeholder
 
-if ($changelogContent -match $versionHeaderSearchPattern) {
-    Write-Host "CHANGELOG.md contains an entry for version $ScriptVersion with date placeholder."
-    $currentDateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $lineToReplace = $matches[0] # The whole matched line, e.g., "## [0.1.1] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER"
-    $newLine = "## [$ScriptVersion] - $currentDateTime"
+if ($changelogUpdatedByScript) {
+    Write-Host "CHANGELOG.md updated from '[Unreleased]' section for version $ScriptVersion."
+    # The content is now up-to-date for $ScriptVersion.
+} elseif ($changelogContent -match $versionHeaderWithSpecificPlaceholderPattern) {
+    # [Unreleased] was not updated (or not found as specified),
+    # but an entry for $ScriptVersion with the specific 'YYYY-MM-DD_TIMESTAMP_PLACEHOLDER' exists. Update its date.
+    Write-Host "CHANGELOG.md contains an entry for version $ScriptVersion with 'YYYY-MM-DD_TIMESTAMP_PLACEHOLDER'. Updating timestamp."
+    $lineToReplace = $matches[0]
+    $newLine = "## [$ScriptVersion] - $currentDateTime" # Use the same $currentDateTime
     
-    # Read content as array for easier line replacement, then write back
-    $changelogLines = Get-Content $changelogPath
-    for ($i = 0; $i -lt $changelogLines.Length; $i++) {
-        if ($changelogLines[$i] -eq $lineToReplace) {
-            $changelogLines[$i] = $newLine
-            Write-Host "Updated date in CHANGELOG.md for version $ScriptVersion to $currentDateTime."
+    # Read lines again for replacement to ensure we have the latest content if other tools modified it (though unlikely here)
+    $tempChangelogLinesForPlaceholderUpdate = Get-Content $changelogPath
+    for ($j = 0; $j -lt $tempChangelogLinesForPlaceholderUpdate.Length; $j++) {
+        if ($tempChangelogLinesForPlaceholderUpdate[$j] -eq $lineToReplace) {
+            $tempChangelogLinesForPlaceholderUpdate[$j] = $newLine
             break
         }
     }
-    Set-Content -Path $changelogPath -Value $changelogLines
-    # Re-read content to ensure subsequent git add picks up the change
-    $changelogContent = Get-Content $changelogPath -Raw
+    Set-Content -Path $changelogPath -Value $tempChangelogLinesForPlaceholderUpdate
+    $changelogContent = Get-Content $changelogPath -Raw # Re-read content again
+    $changelogUpdatedByScript = $true # Mark as updated by script
+    Write-Host "Updated specific placeholder date in CHANGELOG.md for version $ScriptVersion to $currentDateTime."
+}
 
-} elseif ($changelogContent -notmatch $versionHeaderExactPattern) {
-    # If neither placeholder nor a simple header is found
-    Write-Error "CHANGELOG.md does not contain an entry for the new version $ScriptVersion."
-    Write-Error "Please add a section like '## [$ScriptVersion] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER' to CHANGELOG.md and try again."
+# Final check: After all attempts to update, does an entry for $ScriptVersion exist?
+if (-not ($changelogContent -match $versionHeaderExactPattern)) {
+    Write-Error "CHANGELOG.md does not contain a valid entry for the new version $ScriptVersion after attempting updates."
+    Write-Error "Please ensure an '## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER' section is at the top, or a specific '## [$ScriptVersion] ...' entry exists."
     exit 1
 } else {
-    # Header found, but no placeholder - assume date is already set or manually managed for this run
-    Write-Host "CHANGELOG.md contains an entry for version $ScriptVersion (date assumed manually set or pre-existing)."
+    # An entry for $ScriptVersion exists.
+    if ($changelogUpdatedByScript) {
+         Write-Host "CHANGELOG.md successfully prepared by script for version $ScriptVersion."
+    } else {
+        # This means an entry for $ScriptVersion was already present with a specific date (not the placeholder).
+        Write-Host "CHANGELOG.md already contained a dated entry for version $ScriptVersion."
+    }
 }
 
 

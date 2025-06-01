@@ -140,8 +140,26 @@ graph TD
     *   **Install Loxone Config:** Silently.
     *   **Download Loxone App:** If an update is available and `-UpdateLoxoneApp` is enabled.
     *   **Install Loxone App:** Silently.
-    *   **Check Miniserver Versions:** Compares versions on Miniservers (from `UpdateLoxoneMSList.txt`) against the just-installed Loxone Config version.
-    *   **Update Miniservers:** Triggers updates on Miniservers that require it.
+    *   **Check Miniserver Versions (`LoxoneUtils.Miniserver`):**
+        *   Iterates through each Miniserver defined in `UpdateLoxoneMSList.txt`.
+        *   Connects to the Miniserver's `/dev/cfg/version` endpoint to retrieve its current firmware version.
+        *   Handles authentication using credentials from the `UpdateLoxoneMSList.txt` entry.
+        *   Respects the `-SkipCertificateCheck` parameter for SSL/TLS certificate validation during this connection.
+        *   Compares the Miniserver's current firmware version with the target Loxone Config version (typically the one just installed or the existing one if no Config update occurred).
+        *   Miniservers with firmware older than the target Config version are marked as requiring an update.
+    *   **Update Miniservers (`LoxoneUtils.Miniserver`, `LoxoneUtils.WorkflowSteps`):** For each Miniserver marked as needing an update:
+        *   **`updatelevel` Validation:**
+            *   The script connects to the Miniserver's `/dev/cfg/updatelevel` endpoint.
+            *   It verifies that the Miniserver's own update channel setting (e.g., "Alpha", "Beta", "Release") aligns with the script's configured `-Channel` parameter (note: the script's "Test" channel corresponds to "Alpha" on the Miniserver).
+            *   If a mismatch is detected (e.g., script is set to "Test" but Miniserver is on "Release"), the update for that specific Miniserver is aborted. An error message is logged, guiding the user to correct the Miniserver's `updatelevel` setting via a provided URL.
+        *   **Trigger Update:**
+            *   If the `updatelevel` validation passes, the script sends a request to the Miniserver's `/dev/sys/autoupdate` endpoint. This command instructs the Miniserver to start its firmware update process using the Loxone Config version present on the machine running the script.
+        *   **Polling and Verification:**
+            *   After triggering the update, the script begins polling the Miniserver's `/dev/cfg/version` endpoint.
+            *   It monitors for signs of the update process, such as temporary unresponsiveness (as the Miniserver reboots) or an HTTP 503 status code (often indicating the Miniserver is busy with the update).
+            *   Once the Miniserver becomes responsive again, the script retrieves the new firmware version.
+            *   The update for that Miniserver is deemed successful if the newly reported firmware version matches the target Loxone Config version.
+        *   All outcomes (success, failure, skipped due to `updatelevel` mismatch) are logged.
 7.  **Error Handling & Logging:** Throughout the process, all actions, errors, and significant events are logged. `LoxoneUtils.ErrorHandling` captures detailed error information.
 8.  **Toast Notifications:** `LoxoneUtils.Toast` sends notifications to the interactive user (if applicable) about the update status.
 9.  **Log Rotation:** `LoxoneUtils.Logging` manages log file sizes and archives.
