@@ -22,7 +22,7 @@ graph TD
     K_ExecutePipeline --> S1;
 
     subgraph pipeline_steps [Update Pipeline Steps]
-        S1("S1: Download Loxone Config <br/> Get .zip; Verify CRC, <br/> filesize, cert (uses -EnableCRC, <br/> -SkipCertificateCheck) <br/> (LoxoneUtils.Network)") --> S2("S2: Extract Loxone Config <br/> Unzip archive <br/> (LoxoneUtils.Installation)");
+        S1("S1: Download Loxone Config <br/> Get .zip; Verify CRC, <br/> filesize, code signing cert <br/> (uses -EnableCRC) <br/> (LoxoneUtils.Network, LoxoneUtils.Utility)") --> S2("S2: Extract Loxone Config <br/> Unzip archive <br/> (LoxoneUtils.Installation)");
         S2 --> S3("S3: Install Loxone Config <br/> Run with -InstallMode <br/> (LoxoneUtils.Installation)");
         S3 --> S4("S4: Download Loxone App <br/> Get .exe/.msi (if -UpdateLoxoneApp) <br/> Verify CRC, filesize, cert <br/> (uses -EnableCRC, -SkipCertCheck) <br/> (LoxoneUtils.Network)");
         S4 --> S5("S5: Install Loxone App <br/> Run with -InstallMode <br/> (LoxoneUtils.Installation)");
@@ -113,7 +113,7 @@ graph TD
 *   `-SkipUpdateIfAnyProcessIsRunning`: (Optional) If set, the Loxone Config/App update will be skipped if `LoxoneConfig.exe` is detected running.
 *   `-UpdateLoxoneApp`: (Optional) A switch to control whether the Loxone App should also be updated as part of the pipeline.
 *   `-UpdateLoxoneAppChannel <String>`: (Optional) Specifies the update channel for the Loxone App if `-UpdateLoxoneApp` is used. Options: `Release`, `Beta`, `Test`.
-*   `-SkipCertificateCheck`: (Optional) If set, may bypass certain certificate validation steps during download or installation (use with caution).
+*   `-SkipCertificateCheck`: (Optional) If set, bypasses SSL/TLS certificate validation for connections to Loxone Miniservers (e.g., for version checks or triggering updates). Use with caution, as this can be a security risk. This parameter does not affect SSL/TLS validation for downloading Config/App installers from Loxone's servers.
 
 ## Usage
 
