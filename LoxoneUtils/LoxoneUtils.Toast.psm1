@@ -568,45 +568,6 @@ function Show-FinalStatusToast {
 }
 #endregion
 
-# Function to reset toast data without recreating the object
-function Reset-ToastDataBinding {
-    <#
-    .SYNOPSIS
-    Resets toast data to initial values WITHOUT recreating the object
-    .DESCRIPTION
-    This function updates individual keys to preserve the data binding.
-    Use this instead of recreating the hashtable.
-    #>
-    [CmdletBinding()]
-    param()
-    
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
-    
-    try {
-        Write-Log -Level Debug -Message "Resetting toast data values (preserving object reference)"
-    
-    # Reset each key individually to preserve the binding
-    $Global:PersistentToastData['StatusText'] = "Initializing..."
-    $Global:PersistentToastData['ProgressBarStatus'] = "Download: -"
-    $Global:PersistentToastData['ProgressBarValue'] = 0.0
-    $Global:PersistentToastData['OverallProgressStatus'] = "Overall: 0%"
-    $Global:PersistentToastData['OverallProgressValue'] = 0.0
-    $Global:PersistentToastData['StepNumber'] = 0
-    $Global:PersistentToastData['TotalSteps'] = 1
-    $Global:PersistentToastData['StepName'] = "Initializing..."
-    $Global:PersistentToastData['DownloadFileName'] = ""
-    $Global:PersistentToastData['DownloadNumber'] = 0
-    $Global:PersistentToastData['TotalDownloads'] = 0
-    $Global:PersistentToastData['CurrentWeight'] = 0
-    $Global:PersistentToastData['TotalWeight'] = 1
-    $Global:PersistentToastData['DownloadSpeedLine'] = ""
-    $Global:PersistentToastData['DownloadTimeLine'] = ""
-    $Global:PersistentToastData['DownloadSizeLine'] = ""
-    }
-    finally {
-        Exit-Function
-    }
-}
 
 # Export functions
 Export-ModuleMember -Function @(
@@ -614,5 +575,4 @@ Export-ModuleMember -Function @(
     'Update-PersistentToast'
     'Update-PreCheckToast'
     'Show-FinalStatusToast'
-    'Reset-ToastDataBinding'  # Export for testing scenarios
 )

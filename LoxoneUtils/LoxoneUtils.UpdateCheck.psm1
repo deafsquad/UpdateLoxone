@@ -310,22 +310,6 @@ function Test-LoxoneAppComponent {
     return $null
 }
 
-function Test-LoxoneMSComponents {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string[]]$MSEntries,
-        [Parameter(Mandatory = $false)]
-        [PSCustomObject]$MSData,
-        [Parameter(Mandatory = $true)]
-        [string]$LogFile,
-        [Parameter(Mandatory = $false)]
-        [switch]$DebugMode
-    )
-    Write-Log -Message "[DEPRECATED] Test-LoxoneMSComponents - Logic moved to Initialize-UpdatePipelineData. Returning empty list." -Level WARN
-    return [System.Collections.Generic.List[PSCustomObject]]::new()
-}
-
 function New-LoxoneComponentStatusObject {
     param(
         [Parameter(Mandatory = $true)]
@@ -393,30 +377,7 @@ function Get-UpdateStatusFromComparison {
     }
 }
 
-function Invoke-MSCheckLogic {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$MSEntry,
-        [Parameter(Mandatory = $false)]
-        [string]$TargetVersionString,
-        [Parameter(Mandatory = $false)]
-        [string]$NormalizedLatestMSVersionString,
-        [Parameter(Mandatory = $true)]
-        [string]$LogFile,
-        [Parameter(Mandatory = $false)]
-        [switch]$DebugMode
-    )
-    Write-Log -Message "[DEPRECATED] Invoke-MSCheckLogic - Helper function no longer used." -Level DEBUG
-    return [PSCustomObject]@{
-        Identifier     = "UnknownHost"
-        InitialVersion = $null
-        Status         = "Unknown"
-        UpdateNeeded   = $false
-        ErrorMessage   = "Function deprecated"
-    }
-}
-
 #endregion Deprecated Functions
 
 # Export only the active function and deprecated ones for backward compatibility
-Export-ModuleMember -Function Get-LoxoneUpdateData, Test-UpdateNeeded, Test-LoxoneConfigComponent, Test-LoxoneAppComponent, Test-LoxoneMSComponents, New-LoxoneComponentStatusObject, Get-UpdateStatusFromComparison, Invoke-MSCheckLogic
+Export-ModuleMember -Function Get-LoxoneUpdateData, Test-UpdateNeeded, Test-LoxoneConfigComponent, Test-LoxoneAppComponent, New-LoxoneComponentStatusObject, Get-UpdateStatusFromComparison

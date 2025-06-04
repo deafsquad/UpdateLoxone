@@ -167,10 +167,19 @@ function Get-TestCoverage {
         Write-Host ""
         Write-Host "Phase 3: Checking function usage in codebase..." -ForegroundColor Yellow
         
-        # Get all PowerShell files
+        # Get all PowerShell files in the entire project
+        $projectRoot = Split-Path -Parent $script:ModulePath
         $allPSFiles = @()
-        $allPSFiles += Get-ChildItem -Path $script:ModulePath -Filter "*.ps1" -File
-        $allPSFiles += Get-ChildItem -Path $modulePath -Filter "*.psm1" -File
+        # Search in module directory
+        $allPSFiles += Get-ChildItem -Path $script:ModulePath -Filter "*.ps1" -File -ErrorAction SilentlyContinue
+        $allPSFiles += Get-ChildItem -Path $modulePath -Filter "*.psm1" -File -ErrorAction SilentlyContinue
+        # Search in project root for main scripts
+        $allPSFiles += Get-ChildItem -Path $projectRoot -Filter "*.ps1" -File -ErrorAction SilentlyContinue
+        # Search in LoxoneUtils subdirectory for all modules
+        $loxoneUtilsPath = Join-Path $projectRoot "LoxoneUtils"
+        if (Test-Path $loxoneUtilsPath) {
+            $allPSFiles += Get-ChildItem -Path $loxoneUtilsPath -Filter "*.psm1" -File -ErrorAction SilentlyContinue
+        }
         
         $filesScanned = 0
         foreach ($funcName in $allFunctions.Keys) {
@@ -182,8 +191,27 @@ function Get-TestCoverage {
                     continue
                 }
                 
-                # Look for function calls
-                if ($fileContent -match "\b$funcName\b\s*(-|$|\s)") {
+                # Look for function calls with improved regex patterns
+                # Match: function name followed by space, parameter (-), pipe (|), newline, or in a command
+                $patterns = @(
+                    "\b$funcName\b\s*(-[\w]+|\s|$|\|)",  # Standard call with parameters or pipe
+                    "\b$funcName\b[\r\n]",                 # Function followed by newline
+                    "&\s*['\"]?$funcName['\"]?",          # Call operator & 'function' or & function
+                    "\.$funcName\s*\(",                    # Method-style call
+                    "\[$funcName\]",                       # Type accelerator style
+                    "Export-ModuleMember.*\b$funcName\b",  # Export statements
+                    "FunctionsToExport.*['\"]$funcName['\"]" # Module manifest exports
+                )
+                
+                $found = $false
+                foreach ($pattern in $patterns) {
+                    if ($fileContent -match $pattern) {
+                        $found = $true
+                        break
+                    }
+                }
+                
+                if ($found) {
                     $allFunctions[$funcName].UsedInCodebase = $true
                     $allFunctions[$funcName].UsageLocations += $psFile.Name
                 }

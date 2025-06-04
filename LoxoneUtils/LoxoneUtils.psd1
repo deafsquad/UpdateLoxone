@@ -89,16 +89,13 @@ NestedModules = @(
         'Show-FinalStatusToast',
         'Update-PersistentToast',
         'Update-PreCheckToast',
-        'Reset-ToastDataBinding',
         
         # LoxoneUtils.UpdateCheck.psm1
         'Get-LoxoneUpdateData',
         'Get-UpdateStatusFromComparison',
-        'Invoke-MSCheckLogic',
         'New-LoxoneComponentStatusObject',
         'Test-LoxoneAppComponent',
         'Test-LoxoneConfigComponent',
-        'Test-LoxoneMSComponents',
         'Test-UpdateNeeded',
         
         # LoxoneUtils.Utility.psm1
