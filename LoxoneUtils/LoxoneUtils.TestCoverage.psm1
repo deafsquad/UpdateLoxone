@@ -196,11 +196,11 @@ function Get-TestCoverage {
                 $patterns = @(
                     "\b$funcName\b\s*(-[\w]+|\s|$|\|)",  # Standard call with parameters or pipe
                     "\b$funcName\b[\r\n]",                 # Function followed by newline
-                    "&\s*['\"]?$funcName['\"]?",          # Call operator & 'function' or & function
+                    "&\s*[`'`"]?$funcName[`'`"]?",          # Call operator & 'function' or & function
                     "\.$funcName\s*\(",                    # Method-style call
-                    "\[$funcName\]",                       # Type accelerator style
+                    "\`[$funcName\`]",                       # Type accelerator style
                     "Export-ModuleMember.*\b$funcName\b",  # Export statements
-                    "FunctionsToExport.*['\"]$funcName['\"]" # Module manifest exports
+                    "FunctionsToExport.*[`'`"]$funcName[`'`"]" # Module manifest exports
                 )
                 
                 $found = $false
@@ -263,7 +263,7 @@ function Get-TestCoverage {
         
         # Pattern 1: Mock statements for functions that don't exist
         # This is the most reliable indicator of deprecated functions
-        $mockPattern = 'Mock\s+(?:-CommandName\s+)?[''"]?([A-Z][\w-]+)[''"]?\s*(?:-|{|\s|$)'
+        $mockPattern = 'Mock\s+(?:-CommandName\s+)?[`''"]?([A-Z][\w-]+)[`''"]?\s*(?:-|{|\s|$)'
         $mockMatches = [regex]::Matches($testContent, $mockPattern)
         foreach ($match in $mockMatches) {
             $funcName = $match.Groups[1].Value
@@ -282,7 +282,7 @@ function Get-TestCoverage {
         }
         
         # Pattern 2: Function calls in test assertions (Should -Contain, etc.)
-        $assertionPattern = 'Should\s+-Contain\s+[''"]([A-Z][\w-]+)[''"]'
+        $assertionPattern = 'Should\s+-Contain\s+[`''"]([A-Z][\w-]+)[`''"]'
         $assertionMatches = [regex]::Matches($testContent, $assertionPattern)
         foreach ($match in $assertionMatches) {
             $funcName = $match.Groups[1].Value
@@ -292,7 +292,7 @@ function Get-TestCoverage {
         }
         
         # Pattern 3: Get-Command checks for our functions  
-        $getCommandPattern = 'Get-Command\s+[''"]?([A-Z][\w-]+)[''"]?\s*-ErrorAction'
+        $getCommandPattern = 'Get-Command\s+[`''"]?([A-Z][\w-]+)[`''"]?\s*-ErrorAction'
         $getCommandMatches = [regex]::Matches($testContent, $getCommandPattern)
         foreach ($match in $getCommandMatches) {
             $funcName = $match.Groups[1].Value
