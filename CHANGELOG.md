@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER
+### Added
+- Comprehensive test suite with 100% module coverage
+  - Created 39 test files covering all 11 PowerShell modules
+  - Implemented four test types per module: Simple, Working, Characterization, and Full tests
+  - Added test runner scripts with CI/CD support
+  - Created test documentation and summaries
+  - All modules now have complete test coverage: Logging, Utility, Network, Installation, Miniserver, UpdateCheck, WorkflowSteps, ErrorHandling, System, Toast, and RunAsUser
+- Automated testing in release process
+  - Modified `publish_new_release.ps1` to run full test suite before proceeding
+  - Release now fails if any tests fail, ensuring quality
+  - Added `-CI` and `-PassThru` parameters to test runner for automation
+- Architectural analysis and recommendations
+  - Created `CLAUDE.md` with detailed code analysis and improvement recommendations
+  - Identified and documented dead code in UpdateCheck module
+  - Created `REFACTORING_ANALYSIS.md` documenting the architectural changes
+  - Created `REFACTOR_TO_PLUGIN_ARCHITECTURE.md` with detailed plugin architecture design
+- Test infrastructure improvements
+  - Set up Pester v5 testing framework
+  - Created proper test directory structure (Unit, Integration, Fixtures)
+  - Added characterization tests to document actual behavior
+  - Implemented test helpers and utilities
+
+### Changed
+- Reorganized test directory structure
+  - Removed obsolete `test/` folder completely
+  - Created new `tests/` structure with Unit, Integration, and Fixtures subdirectories
+  - Updated all test imports to use new module paths
+- Enhanced release process
+  - Release script now runs comprehensive test suite first
+  - Added test result summary display in release output
+  - Release aborts if tests fail or no tests pass
+
+### Fixed
+- Identified missing return statement in `New-LoxoneComponentStatusObject` (though function is dead code)
+- Documented parameter naming inconsistencies across modules
+- Identified and documented functions that are exported but not used
+- Fixed log rotation timestamp duplication issue
+  - Log files no longer get double timestamps during rotation (e.g., `file_20250603_120000_20250603_120500.log`)
+  - Files with existing timestamps are now rotated without adding additional timestamps
+  - Simplified cleanup logic to properly group files by prefix and clean up old logs
+  - Improved regex patterns to handle both legacy double-timestamp files and new single-timestamp files
+
+### Security
+- Documented secure credential handling patterns for Miniserver connections
+- Added recommendations for least-privilege Miniserver user setup
+- Identified webhook URL exposure (low risk - posting only)
+- Recommended credential encryption strategies for future implementation
+
+### Changed
+- Optimized `LoxoneUtils.Toast.psm1` module
+  - Reduced code size by ~50% through consolidation of redundant code
+  - Replaced custom logging with centralized logging functions (Write-Log, Enter-Function, Exit-Function)
+  - Improved function organization and separation of concerns
+  - Preserved critical data binding fix to prevent toast dismissal
+  - Fixed PowerShell 5.1 compatibility issues (removed null-coalescing operator)
+  - Module now properly handles initialization when loaded before logging module
+  - Removed `Get-LoxoneConfigToastAppId` from exports (now internal)
+  - Added `Reset-ToastDataBinding` to exports for testing scenarios
+
+### Fixed
+- Fixed toast notification auto-dismiss issue
+  - Toast notifications were dismissing after ~6 seconds during long operations
+  - Root cause: `New-BurntToastNotification` doesn't support scenarios that prevent auto-dismiss
+  - Solution: Switched to `Submit-BTNotification` with `Reminder` scenario
+  - Toast notifications now remain visible until user interaction or script updates
+
+### Documentation
+- Created comprehensive test documentation (`TEST_SUMMARY.md`)
+- Added module-specific test summaries for complex modules
+- Created testing progress tracking documentation
+- Updated all `.md` files with current project state
+- Added plugin architecture design document
+- Documented refactoring strategy and implementation phases
+
 ## [0.3.8] - 2025-06-01 04:03:09
 ### Changed
 - Enhanced `README.md` with a more detailed explanation of the Miniserver update process, including:

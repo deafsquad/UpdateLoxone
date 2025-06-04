@@ -722,6 +722,30 @@ try {
             Write-Log -Message "Skipping step: $($stepEntry.Name) (ShouldRun returned false or errored)" -Level INFO
             continue
         }
+        
+        # Send a toast update before starting each step to prevent auto-dismiss
+        if ($Global:PersistentToastInitialized -and $scriptContext.IsInteractive -and -not $scriptContext.IsSelfInvokedForUpdateCheck) {
+            try {
+                $currentStepName = if ($scriptGlobalState.currentStep -le $scriptGlobalState.totalSteps) { 
+                    $stepEntry.Name 
+                } else { 
+                    "Processing..."
+                }
+                Update-PersistentToast -StepNumber $scriptGlobalState.currentStep `
+                    -TotalSteps $scriptGlobalState.totalSteps `
+                    -StepName $currentStepName `
+                    -CurrentWeight $scriptGlobalState.CurrentWeight `
+                    -TotalWeight $scriptGlobalState.TotalWeight `
+                    -IsInteractive $scriptContext.IsInteractive `
+                    -ErrorOccurred $script:ErrorOccurred `
+                    -AnyUpdatePerformed $scriptGlobalState.anyUpdatePerformed `
+                    -CallingScriptIsInteractive $scriptContext.IsInteractive `
+                    -CallingScriptIsSelfInvoked $scriptContext.IsSelfInvokedForUpdateCheck
+                Write-Log -Level DEBUG -Message "Sent pre-step toast update for: $($stepEntry.Name)"
+            } catch {
+                Write-Log -Level WARN -Message "Failed to update toast before step: $_"
+            }
+        }
 
         Write-Log -Message "Starting step: $($stepEntry.Name)" -Level INFO
         $stepResult = $null

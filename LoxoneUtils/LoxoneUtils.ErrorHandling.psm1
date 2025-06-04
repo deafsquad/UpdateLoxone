@@ -7,9 +7,20 @@ function Invoke-ScriptErrorHandling {
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-    if (-not $ErrorRecord) { $ErrorRecord = $Error[0] }
+    
+    # If no error record provided, try to get from global Error collection
+    if (-not $ErrorRecord) { 
+        # Access the global Error collection
+        if ($global:Error.Count -gt 0) {
+            $ErrorRecord = $global:Error[0] 
+        }
+    }
+    
+    # Set error occurred flag
+    $Global:ErrorOccurred = $true
+    
     try {
-    $invInfo = $ErrorRecord.InvocationInfo
+    $invInfo = if ($ErrorRecord) { $ErrorRecord.InvocationInfo } else { $null }
     $command = if ($invInfo -and $invInfo.MyCommand) { $invInfo.MyCommand.ToString() } else { "N/A" }
     $scriptName = if ($invInfo -and $invInfo.ScriptName) { $invInfo.ScriptName } else { "N/A" }
     $lineNumber = if ($invInfo -and $invInfo.ScriptLineNumber) { $invInfo.ScriptLineNumber } else { "N/A" }
@@ -26,15 +37,26 @@ function Invoke-ScriptErrorHandling {
     Write-Log -Message "Full command line: ${fullCommandLine}" -Level ERROR
     Write-Log -Message "Local variables in scope:`n${localVars}" -Level ERROR
 
-    $Global:PersistentToastData['StatusText'] = "FAILED: $($ErrorRecord.Exception.Message) (Cmd: $command, Line: $lineNumber)"
+    $errorMessage = if ($ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
+        $ErrorRecord.Exception.Message
+    } elseif ($ErrorRecord -and $ErrorRecord.ToString()) {
+        $ErrorRecord.ToString()
+    } else {
+        "Unknown error"
+    }
+    $Global:PersistentToastData['StatusText'] = "FAILED: $errorMessage (Cmd: $command, Line: $lineNumber)"
     # Ensure all mandatory parameters for Update-PersistentToast are provided.
     # AnyUpdatePerformed defaults to $false in the function, but explicit here for clarity.
     Update-PersistentToast -IsInteractive $true -ErrorOccurred $true -AnyUpdatePerformed $false -CallingScriptIsInteractive $true -CallingScriptIsSelfInvoked $false
 
     # Log comprehensive error details
     Write-Log -Message "-------------------- SCRIPT ERROR DETAILS --------------------" -Level ERROR
-    Write-Log -Message "Full Error Record: $($ErrorRecord.ToString())" -Level ERROR
-    Write-Log -Message "Exception Message: ${($ErrorRecord.Exception.Message)}" -Level ERROR
+    if ($ErrorRecord) {
+        Write-Log -Message "Full Error Record: $($ErrorRecord.ToString())" -Level ERROR
+        Write-Log -Message "Exception Message: $($ErrorRecord.Exception.Message)" -Level ERROR
+    } else {
+        Write-Log -Message "No error record available" -Level ERROR
+    }
 
     if ($invInfo) {
         Write-Log -Message "Occurred in Command: ${command}" -Level ERROR

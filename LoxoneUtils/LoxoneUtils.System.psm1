@@ -98,8 +98,10 @@ function Start-ProcessInteractive {
     try {
     try {
         $shell = New-Object -ComObject "Shell.Application"
-        $process = $shell.ShellExecute($FilePath, $Arguments, "", "open", 1)
-        Wait-Process -Id $process.Id
+        # ShellExecute returns void, not a process object
+        $shell.ShellExecute($FilePath, $Arguments, "", "open", 1)
+        # Note: We cannot wait for the process since ShellExecute doesn't return a process ID
+        Write-Log -Message "Launched process interactively: $FilePath $Arguments" -Level INFO
     }
     catch {
         throw "Failed to launch process interactively: ${($_.Exception.Message)}"

@@ -46,9 +46,9 @@ graph TD
     *   **`LoxoneUtils.Network`:** Handles file downloads with progress indicators and verification.
     *   **`LoxoneUtils.Installation`:** Manages installer execution (silent/verysilent), version retrieval of installed software, finding installation paths, and ZIP file extraction.
     *   **`LoxoneUtils.Miniserver`:** Checks Miniserver versions and triggers updates on them.
-    *   **`LoxoneUtils.Logging`:** Provides robust logging capabilities with automatic log rotation.
+    *   **`LoxoneUtils.Logging`:** Provides comprehensive logging with automatic rotation based on file count and age, thread-safe operations, and multiple log levels (INFO, WARN, ERROR, DEBUG).
     *   **`LoxoneUtils.ErrorHandling`:** Implements detailed error logging to aid in troubleshooting.
-    *   **`LoxoneUtils.Toast`:** Delivers desktop toast notifications for status updates and errors using the `BurntToast` module.
+    *   **`LoxoneUtils.Toast`:** Delivers desktop toast notifications for status updates and errors using the `BurntToast` module. Recently optimized to reduce code size by ~50% and fixed auto-dismiss issue by using `Submit-BTNotification` with `Reminder` scenario, ensuring notifications remain visible during long operations.
     *   **`LoxoneUtils.Utility`:** Contains general helper functions for path manipulation, software signature checks, string and version formatting, CRC checksums, and registry interactions.
     *   **`LoxoneUtils.System`:** Manages system processes and Windows Scheduled Tasks.
     *   **`LoxoneUtils.RunAsUser`:** Facilitates running processes as the currently interactive user, primarily used for the initial re-launch from SYSTEM context.

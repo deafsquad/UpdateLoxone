@@ -1,7 +1,18 @@
 # Module for Loxone Update Script Logging Functions
 
-# Mutex for Log File Access (Local only now)
-$script:LogMutex = New-Object System.Threading.Mutex($false, 'UpdateLoxoneLogMutex')
+# Mutex for Log File Access - PID-based to allow multiple instances
+# Each process gets its own mutex for thread safety within that process
+# File locking will handle inter-process synchronization
+try {
+    # Create a mutex unique to this process
+    $mutexName = "UpdateLoxoneLogMutex_$PID"
+    $script:LogMutex = New-Object System.Threading.Mutex($false, $mutexName)
+    Write-Debug "Created process-specific mutex: $mutexName"
+} catch {
+    # If named mutex fails, create a local one
+    Write-Warning "Could not create named mutex. Using process-local mutex."
+    $script:LogMutex = New-Object System.Threading.Mutex($false)
+}
 $script:CallStack = [System.Collections.Generic.Stack[object]]::new() # Corrected type to hold objects
 
 #region Function Entry/Exit Logging
@@ -189,14 +200,73 @@ function Write-Log {
     }
 
     $mutexAcquired = $false
+    $retryCount = 0
+    $maxRetries = 3
+    
     try {
-        # Wait up to 5 seconds for the mutex
-        $mutexAcquired = $script:LogMutex.WaitOne(5000)
-        if ($mutexAcquired) {
-            # Use Out-File -Append which might be more robust with file locking
-            $logEntry | Out-File -FilePath $Global:LogFile -Encoding UTF8 -Append -ErrorAction Stop
-        } else {
-            Write-Warning "Write-Log: Timed out waiting for log file mutex. Log entry skipped: $logEntry"
+        while ($retryCount -lt $maxRetries -and -not $mutexAcquired) {
+            try {
+                # Try to acquire mutex with shorter timeout
+                $mutexAcquired = $script:LogMutex.WaitOne(1000) # 1 second timeout
+                if ($mutexAcquired) {
+                    # Use file locking for inter-process synchronization
+                    $fileWritten = $false
+                    $fileRetries = 0
+                    while (-not $fileWritten -and $fileRetries -lt 3) {
+                        try {
+                            # Open file with exclusive lock for append
+                            $fileStream = [System.IO.FileStream]::new($Global:LogFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+                            $writer = [System.IO.StreamWriter]::new($fileStream, [System.Text.Encoding]::UTF8)
+                            $writer.WriteLine($logEntry)
+                            $writer.Flush()
+                            $writer.Close()
+                            $fileStream.Close()
+                            $fileWritten = $true
+                        } catch [System.IO.IOException] {
+                            # File is locked by another process
+                            $fileRetries++
+                            if ($fileRetries -lt 3) {
+                                Start-Sleep -Milliseconds 50
+                            }
+                        } catch {
+                            # Other errors
+                            throw
+                        }
+                    }
+                    if (-not $fileWritten) {
+                        # Fall back to Out-File if file locking fails
+                        $logEntry | Out-File -FilePath $Global:LogFile -Encoding UTF8 -Append -ErrorAction Stop
+                    }
+                    break
+                } else {
+                    $retryCount++
+                    if ($retryCount -lt $maxRetries) {
+                        # Brief pause before retry
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
+            } catch [System.Threading.AbandonedMutexException] {
+                # This shouldn't happen with PID-based mutex, but handle it anyway
+                $mutexAcquired = $true
+                try {
+                    # Use the same file locking approach
+                    $fileStream = [System.IO.FileStream]::new($Global:LogFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+                    $writer = [System.IO.StreamWriter]::new($fileStream, [System.Text.Encoding]::UTF8)
+                    $writer.WriteLine($logEntry)
+                    $writer.Flush()
+                    $writer.Close()
+                    $fileStream.Close()
+                } catch {
+                    # Fall back to Out-File
+                    $logEntry | Out-File -FilePath $Global:LogFile -Encoding UTF8 -Append -ErrorAction Stop
+                }
+                Write-Warning "Write-Log: Recovered from abandoned mutex."
+                break
+            }
+        }
+        
+        if (-not $mutexAcquired) {
+            Write-Warning "Write-Log: Timed out waiting for log file mutex after $maxRetries retries. Log entry skipped: $logEntry"
         }
     } catch {
         # Avoid calling Write-Log within catch of Write-Log to prevent recursion on error
@@ -222,7 +292,10 @@ function Invoke-LogFileRotation {
         [int]$MaxArchiveCount = 10, # Default number of archives to keep
 
         [Parameter(Mandatory=$false)]
-        [long]$MaxSizeKB = 10240 # Default max size 10MB before rotation
+        [long]$MaxSizeKB = 10240, # Default max size 10MB before rotation
+        
+        [Parameter(Mandatory=$false)]
+        [int]$MaxAgeDays = 7 # Default to keep logs for 7 days
     )
     # Do not call Enter-Function here to avoid recursive logging if Write-Log fails
 
@@ -245,13 +318,24 @@ function Invoke-LogFileRotation {
             return $null # Return null if log file doesn't exist
         }
 
-        # Rotation logic moved outside the size check - runs every time if file exists
+        # Rotation logic - if file already has timestamp, just move it; otherwise add timestamp
         Write-Log -Level INFO -Message "Log file '$logFileName' exists. Rotating..."
-        $rotationTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss' # Renamed for clarity
         
-        $baseLogFileNameForArchive = [System.IO.Path]::GetFileNameWithoutExtension($logFileName) # Base name of the current log for creating the archive name
+        $baseLogFileName = [System.IO.Path]::GetFileNameWithoutExtension($logFileName)
         $logExtension = [System.IO.Path]::GetExtension($logFileName)
-        $archiveName = "${baseLogFileNameForArchive}_${rotationTimestamp}${logExtension}" # e.g., UpdateLoxone_SYSTEM_20230101_120000_20230101_120500.log
+        
+        # Check if the file already has a timestamp
+        if ($baseLogFileName -match '_\d{8}_\d{6}$') {
+            # File already has timestamp, use it as-is for the archive
+            $archiveName = $logFileName
+            Write-Log -Level DEBUG -Message "Log file already has timestamp, keeping original name for archive: '$archiveName'"
+        } else {
+            # No timestamp, add one for the archive
+            $rotationTimestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+            $archiveName = "${baseLogFileName}_${rotationTimestamp}${logExtension}"
+            Write-Log -Level DEBUG -Message "Adding timestamp to archive: '$archiveName'"
+        }
+        
         $archivePath = Join-Path -Path $logDir -ChildPath $archiveName
 
         $renameSuccess = $false # Initialize rename success flag
@@ -309,29 +393,29 @@ function Invoke-LogFileRotation {
         # --- Cleanup Old Archives ---
         Write-Log -Level INFO -Message "Starting cleanup of old archives in '$logDir' for series related to '$logFileName' (Max kept: $MaxArchiveCount)."
         try {
-            # Determine the series prefix for finding related archives
+            # Extract the prefix (everything before the timestamp) for grouping
             $seriesPrefixForCleanup = ""
-            if ($logFileName -match "^(UpdateLoxone_SYSTEM_).*") {
-                $seriesPrefixForCleanup = $matches[1] # e.g., "UpdateLoxone_SYSTEM_"
-            } elseif ($logFileName -match "^(UpdateLoxone_USER_[^_]+_).*") { # For UpdateLoxone_USER_Username_datetime.log
-                $seriesPrefixForCleanup = $matches[1] # e.g., "UpdateLoxone_USER_Username_"
-            } elseif ($logFileName -match "^(UpdateLoxone_USER_).*") { # For UpdateLoxone_USER_datetime.log
-                $seriesPrefixForCleanup = $matches[1] # e.g., "UpdateLoxone_USER_"
-            } elseif ($logFileName -match "^(UpdateLoxone_).*") { # For UpdateLoxone_datetime.log or UpdateLoxone.log (if it becomes UpdateLoxone_archiveTS.log)
-                $seriesPrefixForCleanup = $matches[1] # e.g., "UpdateLoxone_"
+            if ($logFileName -match '^(.+?)(_\d{8}_\d{6}.*)?\.(log|txt)$') {
+                # Get everything before the first timestamp (or the whole name if no timestamp)
+                $seriesPrefixForCleanup = $matches[1]
+                if (-not $seriesPrefixForCleanup.EndsWith("_")) { 
+                    $seriesPrefixForCleanup += "_" 
+                }
+                Write-Log -Level DEBUG -Message "Determined series prefix: '$seriesPrefixForCleanup'"
             } else {
-                # Fallback: use the part before the first underscore, or the whole name if no underscore
+                # Fallback for unusual filenames
                 $seriesPrefixForCleanup = ($logFileName.Split('_')[0])
-                if (-not $seriesPrefixForCleanup.EndsWith("_")) { $seriesPrefixForCleanup += "_" }
-                Write-Log -Level WARN -Message "Could not determine specific series prefix for '$logFileName', using fallback: '$seriesPrefixForCleanup'"
+                if (-not $seriesPrefixForCleanup.EndsWith("_")) { 
+                    $seriesPrefixForCleanup += "_" 
+                }
+                Write-Log -Level WARN -Message "Could not parse log filename '$logFileName', using fallback prefix: '$seriesPrefixForCleanup'"
             }
 
-            # Regex to match archived files: SeriesPrefix + (OriginalTimestamp_)? + ArchiveTimestamp + Extension
-            # OrigTS is \d{8}_\d{6}_ (optional)
-            # ArchiveTS is \d{8}_\d{6}
+            # Simple pattern: match any file that starts with our prefix and has a timestamp
             $escapedSeriesPrefix = [regex]::Escape($seriesPrefixForCleanup)
             $escapedLogExtension = [regex]::Escape($logExtension)
-            $archivePatternRegex = "^${escapedSeriesPrefix}(\d{8}_\d{6}_)?\d{8}_\d{6}${escapedLogExtension}$"
+            # This will match both old double-timestamp files and new single-timestamp files
+            $archivePatternRegex = "^${escapedSeriesPrefix}.*\d{8}_\d{6}.*${escapedLogExtension}$"
 
             Write-Log -Level DEBUG -Message "Cleanup: seriesPrefixForCleanup='$seriesPrefixForCleanup', archivePatternRegex='$archivePatternRegex', logExtension='$logExtension'"
 
@@ -344,6 +428,18 @@ function Invoke-LogFileRotation {
                                 Select-Object -SkipLast $MaxArchiveCount
             
             Write-Log -Level DEBUG -Message "After regex filter and sorting, $($archivesToDelete.Count) archives selected for deletion."
+            
+            # Also check for age-based cleanup
+            if ($MaxAgeDays -gt 0) {
+                $cutoffDate = (Get-Date).AddDays(-$MaxAgeDays)
+                $oldArchives = $allPotentialArchives |
+                               Where-Object { $_.Name -match $archivePatternRegex -and $_.LastWriteTime -lt $cutoffDate }
+                
+                if ($oldArchives.Count -gt 0) {
+                    Write-Log -Level INFO -Message "Found $($oldArchives.Count) archives older than $MaxAgeDays days for deletion."
+                    $archivesToDelete = @($archivesToDelete) + @($oldArchives) | Select-Object -Unique
+                }
+            }
 
             $deletedCount = 0
             foreach ($archive in $archivesToDelete) {
@@ -377,5 +473,35 @@ function Invoke-LogFileRotation {
 
 #endregion Log File Rotation
 
+#region Module Cleanup
+
+# Cleanup function to properly release mutex
+function Clear-LoggingResources {
+    [CmdletBinding()]
+    param()
+    
+    if ($script:LogMutex) {
+        try {
+            # Try to release if we own it
+            $script:LogMutex.ReleaseMutex()
+        } catch {
+            # Ignore errors - we might not own it
+        }
+        try {
+            $script:LogMutex.Dispose()
+        } catch {
+            # Ignore disposal errors
+        }
+        $script:LogMutex = $null
+    }
+}
+
+# Register cleanup on module removal
+$ExecutionContext.SessionState.Module.OnRemove = {
+    Clear-LoggingResources
+}
+
+#endregion Module Cleanup
+
 # Ensure functions are available
-Export-ModuleMember -Function Write-Log, Enter-Function, Exit-Function, Invoke-LogFileRotation
+Export-ModuleMember -Function Write-Log, Enter-Function, Exit-Function, Invoke-LogFileRotation, Clear-LoggingResources

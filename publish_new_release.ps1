@@ -329,6 +329,63 @@ $AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthor
 
 Write-Host "Starting release process for $script:PackageName version $ScriptVersion (Author: $AuthorName)..."
 
+# --- Run Tests First ---
+Write-Host "---"
+Write-Host "Running test suite before proceeding with release..."
+$testScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "tests\run-all-tests.ps1"
+if (-not (Test-Path $testScriptPath)) {
+    Write-Error "Test runner script not found at: $testScriptPath"
+    Write-Error "Cannot proceed with release without running tests."
+    exit 1
+}
+
+try {
+    Write-Host "Executing test suite..."
+    $testResult = & $testScriptPath -CI -PassThru
+    
+    if ($null -eq $testResult) {
+        Write-Error "Test execution did not return a result object."
+        exit 1
+    }
+    
+    Write-Host "---"
+    Write-Host "Test Results Summary:"
+    Write-Host "  Total Tests: $($testResult.TotalCount)"
+    Write-Host "  Passed: $($testResult.PassedCount)"
+    Write-Host "  Failed: $($testResult.FailedCount)"
+    Write-Host "  Skipped: $($testResult.SkippedCount)"
+    Write-Host "  Success Rate: $([math]::Round(($testResult.PassedCount / $testResult.TotalCount) * 100, 2))%"
+    Write-Host "---"
+    
+    if ($testResult.FailedCount -gt 0) {
+        Write-Error "Tests failed! Cannot proceed with release."
+        Write-Error "Please fix the failing tests before attempting to release."
+        
+        # Show failed test details
+        if ($testResult.Failed) {
+            Write-Host "Failed Tests:" -ForegroundColor Red
+            foreach ($failedTest in $testResult.Failed) {
+                Write-Host "  - $($failedTest.ExpandedPath)" -ForegroundColor Red
+                if ($failedTest.ErrorRecord) {
+                    Write-Host "    Error: $($failedTest.ErrorRecord.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+        exit 1
+    }
+    
+    if ($testResult.PassedCount -eq 0) {
+        Write-Error "No tests passed! This is suspicious. Cannot proceed with release."
+        exit 1
+    }
+    
+    Write-Host "All tests passed successfully! Proceeding with release..." -ForegroundColor Green
+} catch {
+    Write-Error "Error running test suite: $_"
+    Write-Error "Cannot proceed with release without successful test execution."
+    exit 1
+}
+
 # --- Pre-flight checks ---
 $changelogPath = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
 if (-not (Test-Path $changelogPath)) {
@@ -338,12 +395,21 @@ if (-not (Test-Path $changelogPath)) {
 $currentDateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $changelogLines = Get-Content $changelogPath
 $unreleasedHeaderPatternStrict = "^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER$" # Strict match for replacement
+$unreleasedHeaderPatternLoose = "^## \[Unreleased\]" # Loose match for any [Unreleased] header
 $changelogUpdatedByScript = $false # Flag to track if script made changes
 
 # Attempt to update [Unreleased] section first
 for ($i = 0; $i -lt $changelogLines.Length; $i++) {
     if ($changelogLines[$i] -match $unreleasedHeaderPatternStrict) {
         Write-Host "Found '[Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER'. Updating to version $ScriptVersion and timestamp $currentDateTime."
+        $changelogLines[$i] = "## [$ScriptVersion] - $currentDateTime"
+        Set-Content -Path $changelogPath -Value $changelogLines
+        $changelogUpdatedByScript = $true
+        break
+    }
+    elseif ($changelogLines[$i] -match $unreleasedHeaderPatternLoose) {
+        # Fallback: Handle [Unreleased] without timestamp placeholder
+        Write-Host "Found '[Unreleased]' header without timestamp placeholder. Updating to version $ScriptVersion and timestamp $currentDateTime."
         $changelogLines[$i] = "## [$ScriptVersion] - $currentDateTime"
         Set-Content -Path $changelogPath -Value $changelogLines
         $changelogUpdatedByScript = $true

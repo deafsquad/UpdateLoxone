@@ -15,4 +15,7 @@
 # !UpdateLoxone-v*.zip # No longer needed as ZIPs are in releases_archive and not committed
 releases_archive/
 
+# Ignore test temp folder
+tests/temp/
+
 # Keep this .gitignore file

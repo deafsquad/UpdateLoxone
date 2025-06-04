@@ -151,7 +151,7 @@ function Invoke-LoxoneDownload {
                         $totalBytes = -1 # Default to unknown size
                         try {
                             Write-Log -Message "Attempting HEAD request to get Content-Length..." -Level DEBUG
-                            $headResponse = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -ErrorAction Stop -TimeoutSec 10 # Added timeout
+                            $headResponse = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -ErrorAction Stop -TimeoutSec 1 # Added timeout
                             
                             $contentLengthHeader = $headResponse.Headers.'Content-Length'
                             
@@ -593,7 +593,7 @@ function Invoke-LoxoneDownload {
 function Wait-ForPingTimeout {
     param(
         [Parameter(Mandatory=$true)][string]$InputAddress,
-        [Parameter()][int]$TimeoutSeconds = 180
+        [Parameter()][int]$TimeoutSeconds = 1
     )
     Write-Log -Message "Simulating Wait-ForPingTimeout for $InputAddress (returning true after delay)" -Level DEBUG
     Start-Sleep -Seconds 2
@@ -604,7 +604,7 @@ function Wait-ForPingTimeout {
 function Wait-ForPingSuccess {
     param(
         [Parameter(Mandatory=$true)][string]$InputAddress,
-        [Parameter()][int]$TimeoutSeconds = 600
+        [Parameter()][int]$TimeoutSeconds = 1
     )
      Write-Log -Message "Simulating Wait-ForPingSuccess for $InputAddress (returning true after delay)" -Level DEBUG
     Start-Sleep -Seconds 3

@@ -122,7 +122,10 @@ function Initialize-ScriptWorkflow {
     } else {
         Write-Host "INFO: ($FunctionName) No log file passed. Generating new log file name." -ForegroundColor Cyan
         $userNameForFile = (([Security.Principal.WindowsIdentity]::GetCurrent()).Name -split '\\')[-1] -replace '[\\:]', '_'
-        $baseLogName = "UpdateLoxone_$userNameForFile.log"
+        
+        # Create timestamp-based log file name (similar to what log rotation would create)
+        $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $baseLogName = "UpdateLoxone_${userNameForFile}_${timestamp}.log"
         $invalidChars = [System.IO.Path]::GetInvalidFileNameChars() -join ''
         $regexInvalidChars = "[{0}]" -f [RegEx]::Escape($invalidChars)
         $sanitizedLogName = $baseLogName -replace $regexInvalidChars, '_'
@@ -696,6 +699,26 @@ Write-Log -Message "($FunctionName) INVOKE-EXTRACTLOXONECONFIG: Logging before U
         $originalProgressPreference = $ProgressPreference
         try {
             $ProgressPreference = 'SilentlyContinue' # Suppress console progress bar
+            
+            # Send a toast update right before extraction to keep it alive
+            if ($Global:PersistentToastInitialized) {
+                try {
+                    Update-PersistentToast -StepNumber $ScriptGlobalState.Value.currentStep `
+                        -TotalSteps $ScriptGlobalState.Value.totalSteps `
+                        -StepName "Extracting Config Installer..." `
+                        -CurrentWeight $ScriptGlobalState.Value.CurrentWeight `
+                        -TotalWeight $ScriptGlobalState.Value.TotalWeight `
+                        -IsInteractive ([bool]$WorkflowContext.IsInteractive) `
+                        -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) `
+                        -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) `
+                        -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) `
+                        -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
+                    Write-Log -Level DEBUG -Message "($FunctionName) Sent keep-alive toast update before extraction"
+                } catch {
+                    Write-Log -Level DEBUG -Message "($FunctionName) Failed to send keep-alive toast update: $_"
+                }
+            }
+            
             Expand-Archive -Path $zipFilePath -DestinationPath $destinationPath -Force -ErrorAction Stop
         } finally {
             $ProgressPreference = $originalProgressPreference
@@ -1524,9 +1547,9 @@ Write-Log -Message "($FunctionName) INVOKE-UPDATEMINISERVERSINBULK: Logging befo
     Write-Log -Message "($FunctionName) Processing MS entry $msCheckedCounter/$($msEntriesToProcess.Count): $msEntryForLog" -Level INFO
         Write-Log -Level DEBUG -Message "  ($FunctionName)   OriginalEntry (redacted for log): '$($msPlaceholderTarget.OriginalEntry -replace "([Pp]assword=)[^;]+", '$1********')'" # URL is part of OriginalEntry
         Write-Log -Level DEBUG -Message "  ($FunctionName)   SkipCertificateCheck: '$($WorkflowContext.Params.SkipCertificateCheck)'"
-        Write-Log -Level DEBUG -Message "  ($FunctionName)   TimeoutSec: 10"
+        Write-Log -Level DEBUG -Message "  ($FunctionName)   TimeoutSec: 1"
         
-        $msVersionInfo = Get-MiniserverVersion -MSEntry $msPlaceholderTarget.OriginalEntry -SkipCertificateCheck:$WorkflowContext.Params.SkipCertificateCheck -TimeoutSec 10 -ErrorAction SilentlyContinue # Get-MiniserverVersion is from LoxoneUtils.Miniserver
+        $msVersionInfo = Get-MiniserverVersion -MSEntry $msPlaceholderTarget.OriginalEntry -SkipCertificateCheck:$WorkflowContext.Params.SkipCertificateCheck -TimeoutSec 1 -ErrorAction SilentlyContinue # Get-MiniserverVersion is from LoxoneUtils.Miniserver
 
         # Log result from Get-MiniserverVersion
         if ($msVersionInfo.Error) {
@@ -1644,7 +1667,8 @@ function Invoke-UpdateMiniserversInBulk {
         return $overallResult
     }
     
-    $ScriptGlobalState.Value.currentStep++ # Increment step for the overall MS updating phase
+    # Don't increment currentStep here - it causes the "step 3/2" issue
+    # The step counter is already managed by the main pipeline loop
     $toastParamsMSUpdateStart = @{
         StepNumber    = $ScriptGlobalState.Value.currentStep
         TotalSteps    = $ScriptGlobalState.Value.totalSteps
@@ -2007,6 +2031,7 @@ Write-Log -Message "($FunctionName) TotalStepsUI: App update needed. Added 2 ste
 Write-Log -Message "($FunctionName) TotalStepsUI: Miniservers defined. Added 1 step (for MS Check). Current LocalTotalSteps: $LocalTotalSteps" -Level DEBUG
         if (($pipelineData.UpdateTargetsInfo | Where-Object {$_.Type -eq "Miniserver" -and $_.UpdateNeeded}).Count -gt 0) { $LocalTotalSteps += 1 }
 Write-Log -Message "($FunctionName) TotalStepsUI: Miniservers need update. Added 1 step (for MS Update bulk). Current LocalTotalSteps: $LocalTotalSteps" -Level DEBUG
+        # Note: The MS Update function increments currentStep internally, so we don't add an extra step here
         $LocalTotalSteps += 1
 Write-Log -Message "($FunctionName) TotalStepsUI: Added 1 step for Finalizing. Current LocalTotalSteps: $LocalTotalSteps" -Level DEBUG
 

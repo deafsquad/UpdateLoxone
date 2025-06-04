@@ -1,5 +1,32 @@
 # Module for Loxone Update Script MS Interaction Functions
 
+#region Internal Helper Functions
+
+# Wrapper function for Invoke-WebRequest to enable mocking in tests
+# Exported to allow mocking from test files
+function Invoke-MiniserverWebRequest {
+    [CmdletBinding()]
+    param(
+        [hashtable]$Parameters
+    )
+    
+    # This wrapper allows mocking in tests while maintaining the same functionality
+    # PowerShell 6+ requires explicit TLS for HTTPS
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and $Parameters.Uri -like "https://*") {
+        # Add TLS 1.2 for PS Core if not already specified
+        if (-not $Parameters.ContainsKey('SslProtocol')) {
+            Invoke-WebRequest @Parameters -SslProtocol Tls12
+        } else {
+            Invoke-WebRequest @Parameters
+        }
+    } else {
+        # PS 5.1 or HTTP requests
+        Invoke-WebRequest @Parameters
+    }
+}
+
+#endregion
+
 #region MS Update Logic
 
 function Get-MiniserverVersion {
@@ -12,7 +39,7 @@ function Get-MiniserverVersion {
         [switch]$SkipCertificateCheck,
 
         [Parameter()]
-        [int]$TimeoutSec = 15 # Default timeout
+        [int]$TimeoutSec = 1 # Default timeout
     )
     $FunctionName = $MyInvocation.MyCommand.Name
     Enter-Function -FunctionName $FunctionName -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
@@ -162,8 +189,8 @@ function Get-MiniserverVersion {
                 }
                 $iwrParams.UseBasicParsing = $true
                 Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: iwrParams before invoke: $($iwrParams | Out-String)")
-                $responseObject = Invoke-WebRequest @iwrParams
-                Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: Invoke-WebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
+                $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParams
+                Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: Invoke-MiniserverWebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
 
             } elseif ($originalScheme -eq 'https') {
                 # Original entry is HTTPS, try HTTPS first (using $credential object if present)
@@ -173,12 +200,9 @@ function Get-MiniserverVersion {
                 # For HTTPS, using $credential object is standard.
                 Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Attempt: iwrParams before invoke: $($iwrParams | Out-String)")
                 try {
-                    if ($PSVersionTable.PSVersion.Major -ge 6) {
-                        $responseObject = Invoke-WebRequest @iwrParams -SslProtocol Tls12
-                    } else {
-                        $responseObject = Invoke-WebRequest @iwrParams
-                    }
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Attempt: Invoke-WebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
+                    # Use wrapper function which handles PS version differences
+                    $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParams
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Attempt: Invoke-MiniserverWebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
                 } catch { # Catch for primary HTTPS attempt
                     $CaughtPrimaryHttpsError = $_
                     Write-Log -Level WARN -Message ("$($FunctionName): Primary HTTPS connection to '{0}' failed ('{1}')." -f $iwrParams.Uri, $CaughtPrimaryHttpsError.Exception.Message.Split([Environment]::NewLine)[0])
@@ -246,7 +270,7 @@ param(
     [switch]$SkipCertificateCheck,
 
     [Parameter()]
-    [int]$TimeoutSec = 15 # Default timeout
+    [int]$TimeoutSec = 1 # Default timeout
 )
 $FunctionName = $MyInvocation.MyCommand.Name
 Enter-Function -FunctionName $FunctionName -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
@@ -373,7 +397,7 @@ try {
 
         try {
             Write-Log -Level DEBUG -Message ("$($FunctionName): iwrParams for ${scheme}: $($iwrParams | Out-String)")
-            $responseObject = Invoke-WebRequest @iwrParams
+            $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParams
             Write-Log -Level DEBUG -Message ("$($FunctionName): $scheme connection successful. StatusCode: $($responseObject.StatusCode)")
             $lastException = $null # Clear last exception on success
             break # Success, exit loop
@@ -549,7 +573,7 @@ try { # Main function try
                 }
     
                 try { # For IWR calls
-                    $iwrParamsInitialCheck = @{ TimeoutSec = 15; ErrorAction = 'Stop'; Method = 'Get' }
+                    $iwrParamsInitialCheck = @{ TimeoutSec = 1; ErrorAction = 'Stop'; Method = 'Get' }
                     # $credential (with URL-decoded password) is NOT set here by default anymore.
                     # We will explicitly build headers if $usernameForAuthHeaderUpdateMS is available.
 
@@ -580,7 +604,7 @@ try { # Main function try
                         if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 }
                         Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Attempt): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
                         try {
-                            $responseObject = Invoke-WebRequest @iwrParamsInitialCheck
+                            $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParamsInitialCheck
                             $initialVersionCheckSuccess = $true
                             Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: HTTPS attempt successful for $msIP.")
                         } catch {
@@ -610,7 +634,7 @@ try { # Main function try
                             }
                             $iwrParamsInitialCheck.UseBasicParsing = $true
                             Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTP Fallback): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
-                            $responseObject = Invoke-WebRequest @iwrParamsInitialCheck # This will throw to the outer IWR catch if it fails
+                            $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParamsInitialCheck # This will throw to the outer IWR catch if it fails
                             $initialVersionCheckSuccess = $true
                             Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: HTTP fallback attempt successful for $msIP.")
                         }
@@ -636,7 +660,7 @@ try { # Main function try
                         }
                         if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 }
                         Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Direct): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
-                        $responseObject = Invoke-WebRequest @iwrParamsInitialCheck
+                        $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParamsInitialCheck
                         $initialVersionCheckSuccess = $true
                         Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: HTTPS direct attempt successful for $msIP.")
                     }
@@ -723,10 +747,10 @@ try { # Main function try
     Write-Log -Message ("Unexpected error in Update-MS: {0}" -f $CaughtError.Exception.Message) -Level ERROR
     $script:ErrorOccurredInUpdateMS = $true
 } finally {
-    Exit-Function
+    Write-Log -Message ("Update-MS returning {0} results. Overall Error: {1}" -f $allMSResults.Count, $script:ErrorOccurredInUpdateMS) -Level INFO
 }
-Write-Log -Message ("Update-MS returning {0} results. Overall Error: {1}" -f $allMSResults.Count, $script:ErrorOccurredInUpdateMS) -Level INFO
-return $allMSResults
+
+Exit-Function
 return $allMSResults
 }
 
@@ -772,7 +796,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     }
 
     try { # For IWR - Trigger
-            $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = 30; ErrorAction = 'Stop' }
+            $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = 1; ErrorAction = 'Stop' }
             
             if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null -and $PasswordForAuthHeader.Length -gt 0)) {
                 Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Trigger): Using manually parsed credentials for Authorization header."
@@ -815,7 +839,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             if ($schemeInInvoke -eq 'http') { $triggerParams.UseBasicParsing = $true }
     
             Write-Log -Level DEBUG -Message ("Invoke-MSUpdate (Trigger): triggerParams before invoke: $($triggerParams | Out-String)")
-            Invoke-WebRequest @triggerParams | Out-Null
+            Invoke-MiniserverWebRequest -Parameters $triggerParams | Out-Null
             Write-Log -Message ("Update trigger sent to '{0}'." -f $hostForPingInInvoke) -Level INFO
             $invokeResult.StatusMessage = "UpdateTriggered_WaitingForReboot"
         } catch {
@@ -829,7 +853,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         Update-PersistentToast -StepNumber $StepNumber -TotalSteps $TotalSteps -StepName $toastStepNameWait -IsInteractive $IsInteractive -ErrorOccurred $ErrorOccurred -AnyUpdatePerformed $AnyUpdatePerformed
         
         $startTime = Get-Date; $timeout = New-TimeSpan -Minutes 15; $msResponsive = $false; $loggedUpdatingStatus = $false
-        $verifyParams = @{ Uri = $verificationUriForPolling; UseBasicParsing = $true; TimeoutSec = 10; ErrorAction = 'Stop' }
+        $verifyParams = @{ Uri = $verificationUriForPolling; UseBasicParsing = $true; TimeoutSec = 1; ErrorAction = 'Stop' }
 
         if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null -and $PasswordForAuthHeader.Length -gt 0)) {
             Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Polling): Using manually parsed credentials for Authorization header."
@@ -875,7 +899,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         while (((Get-Date) - $startTime) -lt $timeout) {
             $Attempts++; Write-Host -NoNewline ("`rPolling MS $hostForPingInInvoke (Attempt $Attempts/$MaxAttempts): $LastPollStatusMessage".PadRight(120)); Start-Sleep -Seconds 10
             try {
-                $lastResponse = Invoke-WebRequest @verifyParams
+                $lastResponse = Invoke-MiniserverWebRequest -Parameters $verifyParams
                 $msResponsive = $true; $xmlCurrent = [xml]$lastResponse.Content; $versionCurrentPoll = $xmlCurrent.LL.value
                 if ([string]::IsNullOrEmpty($versionCurrentPoll)) { throw "LL.value empty in poll response." }
                 $normalizedVersionCurrentPoll = Convert-VersionString $versionCurrentPoll; $invokeResult.ReportedVersion = $normalizedVersionCurrentPoll

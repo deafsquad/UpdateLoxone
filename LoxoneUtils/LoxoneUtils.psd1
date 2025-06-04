@@ -39,93 +39,99 @@ NestedModules = @(
     '.\LoxoneUtils.RunAsUser.psm1',
     '.\LoxoneUtils.System.psm1',
     '.\LoxoneUtils.UpdateCheck.psm1',
-    '.\LoxoneUtils.WorkflowSteps.psm1'
+    '.\LoxoneUtils.WorkflowSteps.psm1',
+    '.\LoxoneUtils.TestCoverage.psm1'
 )
 # Functions to export from this module
-FunctionsToExport = @(
-    # ErrorHandling
-    'Invoke-ScriptErrorHandling', # Corrected name
-    # Installation
-    'Get-InstalledVersion',
-    'Get-AppVersionFromRegistry', # Corrected function name
-    'Start-LoxoneUpdateInstaller',
-    'Start-LoxoneForWindowsInstaller',
-    'Get-InstalledApplicationPath',
-    'Get-LoxoneExePath',
-    'Invoke-ZipFileExtraction',
-    'Expand-LoxoneConfigArchive', # Added
-    'Install-LoxoneConfig',       # Added
-    'Install-LoxoneApp',          # Added
-    # Logging
-    # Logging
-    'Write-Log',                  # Added missing function
-    'Enter-Function',             # Keep original name for now, will replace later
-    'Exit-Function',              # Keep original name for now, will replace later
-    'Invoke-LogFileRotation',
-    # Miniserver
-    'Update-MS',
-    'Get-MiniserverVersion',      # Added missing function (Removed duplicate below)
-    'Invoke-MiniserverUpdate',
-    'Invoke-MiniserverUpdateStep', # Added
-    # Network
-    'Invoke-LoxoneDownload', # Corrected name
-    'Get-LoxoneUpdateData',       # Added
-    'Start-LoxoneConfigDownload', # Added
-    'Start-LoxoneAppDownload',    # Added
-    'Wait-ForPingTimeout',
-    'Wait-ForPingSuccess',
-    # RunAsUser
-    'Invoke-AsCurrentUser',
-    'Invoke-ScriptAsCurrentUserIfSystem', # Added
-    'Get-CurrentUserSession',             # Add helper function if it needs to be directly callable (optional)
-    'Get-ProcessStatus',                  # Corrected name
-    'Test-ScheduledTask', # Added
-    'Start-ProcessInteractive', # Added
-    'Register-ScheduledTaskForScript', # Added
-    # Toast
-    'Initialize-LoxoneToastAppId',        # Added
-    'Get-LoxoneConfigToastAppId',         # Added (Internal helper, but export for now)
-    'Update-PersistentToast',
-    'Show-FinalStatusToast',
-    'Update-PreCheckToast',       # Added
-    # Utility / System (Regrouped for clarity)
-    'Complete-UpdateProcess',
-    'Get-ExecutableSignature',
-    'Format-TimeSpanFromSeconds',
-    'Convert-VersionString',
-    'Compare-LoxoneVersion',      # Added
-    'Get-RedactedPassword',
-    'Initialize-CRC32Type',
-    'Get-CRC32',
-    'ConvertTo-Expression',
-    'Get-RegistryValue',          # Added missing utility function
-    'Format-StatusLine',          # Added missing utility function for status reporting
-    'Get-InvocationTrace',        # Added utility function
-    'Test-ExistingFile',          # Added utility function
-    # UpdateCheck
-    'Test-ExistingInstaller',         # Added
-    'Test-UpdateNeeded',
-    'Test-LoxoneConfigComponent',     # Added
-    'Test-LoxoneAppComponent',        # Added
-    'Test-LoxoneMiniserverComponents', # Added
-    # Helper functions from UpdateCheck
-    'New-LoxoneComponentStatusObject',
-    'Get-UpdateStatusFromComparison',
-    'Invoke-MiniserverCheckLogic',
-    # WorkflowSteps
-    'Initialize-ScriptWorkflow',
-    'Get-LoxoneUpdatePrerequisites',
-    'Get-StepWeight',
-    'Invoke-DownloadLoxoneConfig',
-    'Invoke-ExtractLoxoneConfig',
-    'Invoke-InstallLoxoneConfig',
-    'Invoke-DownloadLoxoneApp',
-    'Invoke-InstallLoxoneApp',
-    'Invoke-CheckMiniserverVersions',
-    'Invoke-UpdateMiniserversInBulk',
-    'Initialize-UpdatePipelineData',
-    'Test-PipelineStepShouldRun'
-)
+    FunctionsToExport = @(
+        # LoxoneUtils.ErrorHandling.psm1
+        'Invoke-ScriptErrorHandling',
+        
+        # LoxoneUtils.Installation.psm1
+        'Get-InstalledApplicationPath',
+        'Get-InstalledVersion',
+        'Get-LoxoneExePath',
+        'Invoke-ZipFileExtraction',
+        'Start-LoxoneForWindowsInstaller',
+        'Start-LoxoneUpdateInstaller',
+        'Test-ExistingInstaller',
+        
+        # LoxoneUtils.Logging.psm1
+        'Enter-Function',
+        'Exit-Function',
+        'Invoke-LogFileRotation',
+        'Write-Log',
+        
+        # LoxoneUtils.Miniserver.psm1
+        'Get-MiniserverVersion',
+        'Invoke-MiniserverWebRequest',
+        'Invoke-MSUpdate',
+        'Test-LoxoneMiniserverUpdateLevel',
+        'Update-MS',
+        
+        # LoxoneUtils.Network.psm1
+        'Invoke-LoxoneDownload',
+        'Wait-ForPingSuccess',
+        'Wait-ForPingTimeout',
+        
+        # LoxoneUtils.RunAsUser.psm1
+        'Invoke-AsCurrentUser',
+        
+        # LoxoneUtils.System.psm1
+        'Get-ProcessStatus',
+        'Register-ScheduledTaskForScript',
+        'Start-ProcessInteractive',
+        'Test-LoxoneScheduledTaskExists',
+        'Test-ScheduledTask',
+        
+        # LoxoneUtils.Toast.psm1
+        'Initialize-LoxoneToastAppId',
+        'Show-FinalStatusToast',
+        'Update-PersistentToast',
+        'Update-PreCheckToast',
+        'Reset-ToastDataBinding',
+        
+        # LoxoneUtils.UpdateCheck.psm1
+        'Get-LoxoneUpdateData',
+        'Get-UpdateStatusFromComparison',
+        'Invoke-MSCheckLogic',
+        'New-LoxoneComponentStatusObject',
+        'Test-LoxoneAppComponent',
+        'Test-LoxoneConfigComponent',
+        'Test-LoxoneMSComponents',
+        'Test-UpdateNeeded',
+        
+        # LoxoneUtils.Utility.psm1
+        'Convert-VersionString',
+        'ConvertTo-Expression',
+        'Format-TimeSpanFromSeconds',
+        'Get-AppVersionFromRegistry',
+        'Get-CRC32',
+        'Get-ExecutableSignature',
+        'Get-InvocationTrace',
+        'Get-RedactedPassword',
+        'Get-ScriptSaveFolder',
+        'Initialize-CRC32Type',
+        'Test-ExistingFile',
+        
+        # LoxoneUtils.WorkflowSteps.psm1
+        'Get-LoxoneUpdatePrerequisites',
+        'Get-StepWeight',
+        'Initialize-ScriptWorkflow',
+        'Initialize-UpdatePipelineData',
+        'Invoke-CheckMiniserverVersions',
+        'Invoke-DownloadLoxoneApp',
+        'Invoke-DownloadLoxoneConfig',
+        'Invoke-ExtractLoxoneConfig',
+        'Invoke-InstallLoxoneApp',
+        'Invoke-InstallLoxoneConfig',
+        'Invoke-UpdateMiniserversInBulk',
+        'Test-PipelineStepShouldRun',
+        
+        # LoxoneUtils.TestCoverage.psm1
+        'Get-TestCoverage',
+        'New-TestCoverageReport'
+    )
 # Cmdlets to export from this module
 CmdletsToExport = @() # Explicitly export no cmdlets
 
