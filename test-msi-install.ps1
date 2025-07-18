@@ -1,4 +1,4 @@
-# Test MSI installation
+﻿# Test MSI installation
 param(
     [string]$MsiPath = ".\releases_archive\UpdateLoxone-v0.3.9.msi",
     [switch]$Uninstall
@@ -105,5 +105,5 @@ if ($process.ExitCode -eq 0) {
     Write-Host "Check log file: $logFile" -ForegroundColor Yellow
 }
 
-Write-Host "`nLog file: $logFile" -ForegroundColor Cyan
-}
+Write-Host ""
+Write-Host "Log file: $logFile" -ForegroundColor Cyan

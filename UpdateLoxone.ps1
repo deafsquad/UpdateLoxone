@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Automatically checks for Loxone Config updates, downloads, installs them, and updates MSs.
 

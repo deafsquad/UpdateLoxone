@@ -746,9 +746,7 @@ try {
                 New-InstallerDirectory -DirectoryName "UpdateLoxone" -Content {
                     New-InstallerShortcut -Name "UpdateLoxone" `
                         -FileId "MainScript" `
-                        -WorkingDirectoryId "INSTALLFOLDER" `
-                        -Description "Automatically update Loxone software" `
-                        -Arguments "-ExecutionPolicy Bypass"
+                        -Description "Automatically update Loxone software"
                 }
             }
         }
