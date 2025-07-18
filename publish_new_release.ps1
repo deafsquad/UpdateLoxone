@@ -625,6 +625,10 @@ try {
     Write-Host "Committing initial release files with message: '$commitMessage'..."
     git commit -m $commitMessage
     
+    # Capture the commit hash for the release
+    $releaseCommitHash = git rev-parse HEAD
+    Write-Host "Release commit hash: $releaseCommitHash"
+    
     if (-not $DryRun) {
         Write-Host "Pushing initial commit to remote repository..."
         git push
@@ -652,22 +656,32 @@ try {
         $getNotesParams.GetEnumerator() | ForEach-Object { Write-Host "DEBUG:   $($_.Key) = '$($_.Value)' (Type: $($_.Value.GetType().FullName))" }
         
         $releaseNotesBody = Get-ChangelogNotesForVersion @getNotesParams
+        
+        # Add commit link to release notes
+        $repoUrl = "https://github.com/$script:PublisherName/$script:PackageName"
+        $commitUrl = "$repoUrl/commit/$releaseCommitHash"
+        $enhancedReleaseNotes = if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
+            "Automated release of version $ScriptVersion. See CHANGELOG.md for details.`n`n**Release Commit:** $commitUrl"
+        } else {
+            "$releaseNotesBody`n`n---`n**Release Commit:** $commitUrl"
+        }
+        
         $tempNotesFilePath = Join-Path -Path $PSScriptRoot -ChildPath "temp_release_notes.md" # Or use $env:TEMP
 
         if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
             Write-Warning "Could not extract changelog notes for version $ScriptVersion from CHANGELOG.md. Using default notes string."
-            gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
+            gh release create $tagName --title $releaseTitle --notes $enhancedReleaseNotes
         } else {
             Write-Host "Successfully extracted changelog notes for version $ScriptVersion. Writing to temporary file for release body."
             try {
-                Set-Content -Path $tempNotesFilePath -Value $releaseNotesBody -Encoding UTF8
+                Set-Content -Path $tempNotesFilePath -Value $enhancedReleaseNotes -Encoding UTF8
                 Write-Host "DEBUG: Notes written to $tempNotesFilePath"
                 gh release create $tagName --title $releaseTitle --notes-file $tempNotesFilePath
             } catch {
                 Write-Error "Error during GitHub release creation with notes file: $($_.Exception.Message)"
-                # Fallback to simple notes if file method fails for some reason
-                Write-Warning "Falling back to default notes string due to error with notes file."
-                gh release create $tagName --title $releaseTitle --notes "Automated release of version $ScriptVersion. See CHANGELOG.md for details. (Error using notes file)"
+                # Fallback to enhanced notes if file method fails for some reason
+                Write-Warning "Falling back to enhanced notes string due to error with notes file."
+                gh release create $tagName --title $releaseTitle --notes "$enhancedReleaseNotes (Error using notes file)"
             } finally {
                 if (Test-Path $tempNotesFilePath) {
                     Write-Host "DEBUG: Removing temporary notes file: $tempNotesFilePath"

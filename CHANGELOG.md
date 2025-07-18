@@ -58,7 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixed System Test Skip Reason showing at top level when RunAsUser tests pass
   - Improved skip reason display logic to show contextually appropriate messages
 
+### Changed
+- Enhanced publish script to include release commit link in GitHub release notes
+  - Release notes now include a direct link to the actual branch commit
+  - Makes it easier to trace releases back to their source commits
+  - Improves transparency by linking to the real commit instead of just the tag
+
 ### Fixed
+- Fixed publish script error handling
+  - Fixed incorrect test runner parameter from `-GenerateCoverage` to `-Coverage`
+  - Added exit code checking after test execution to prevent releases when tests fail
+  - Added error handling for git push operations with helpful error messages
+  - Script now properly exits with code 1 when tests fail or git operations fail
+  - Prevents creating releases with broken code
 - Fixed app update showing rocket emoji (🚀) instead of update arrow (⬆️)
   - `Invoke-InstallLoxoneApp` and `Invoke-InstallLoxoneConfig` now properly detect updates vs new installs
   - Action type is determined dynamically based on InitialVersion presence
