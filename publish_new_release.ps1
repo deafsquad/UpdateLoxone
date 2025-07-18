@@ -358,16 +358,29 @@ try {
     $testError = $null
     
     # Run the test script with all tests and coverage
-    $testOutput = & $testScriptPath -TestType All -Coverage -CI -LiveProgress -LogToFile 2>&1
+    Write-Host "DEBUG: About to run test script..." -ForegroundColor Cyan
+    try {
+        $testOutput = & $testScriptPath -TestType All -Coverage -CI -LiveProgress -LogToFile 2>&1
+        Write-Host "DEBUG: Test script execution completed" -ForegroundColor Cyan
+        Write-Host "DEBUG: Output type: $($testOutput.GetType().FullName)" -ForegroundColor Cyan
+        Write-Host "DEBUG: Output is null: $($null -eq $testOutput)" -ForegroundColor Cyan
+    } catch {
+        Write-Host "DEBUG: Error during test script execution: $_" -ForegroundColor Red
+        throw
+    }
     
     # Check for errors in output
+    Write-Host "DEBUG: Checking for errors in output..." -ForegroundColor Cyan
     $errorFound = $false
     if ($testOutput) {
+        Write-Host "DEBUG: testOutput exists, checking if array..." -ForegroundColor Cyan
         # Ensure testOutput is an array
         if ($testOutput -isnot [Array]) {
+            Write-Host "DEBUG: Converting to array..." -ForegroundColor Cyan
             $testOutput = @($testOutput)
         }
         
+        Write-Host "DEBUG: Starting foreach loop..." -ForegroundColor Cyan
         foreach ($line in $testOutput) {
             if ($line -is [System.Management.Automation.ErrorRecord]) {
                 Write-Host "ERROR in test output: $($line.Exception.Message)" -ForegroundColor Red
@@ -375,6 +388,7 @@ try {
                 $errorFound = $true
             }
         }
+        Write-Host "DEBUG: Foreach loop completed" -ForegroundColor Cyan
     }
     
     # Check if the test script executed successfully
@@ -452,10 +466,19 @@ try {
     
     Write-Host "All tests passed successfully! Proceeding with release..." -ForegroundColor Green
 } catch {
+    Write-Host "DEBUG: Caught exception in test execution" -ForegroundColor Yellow
+    Write-Host "DEBUG: Exception type: $($_.Exception.GetType().FullName)" -ForegroundColor Yellow
+    Write-Host "DEBUG: Exception message: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "DEBUG: Target object: $($_.TargetObject)" -ForegroundColor Yellow
+    
+    # Check if this is the Count property error
+    if ($_.Exception.Message -like "*Count*") {
+        Write-Host "DEBUG: This is the Count property error" -ForegroundColor Magenta
+        Write-Host "DEBUG: Full error details:" -ForegroundColor Magenta
+        Write-Host $_ -ForegroundColor Magenta
+    }
+    
     Write-Error "Error running test suite: $_"
-    Write-Error "Error Type: $($_.Exception.GetType().FullName)"
-    Write-Error "Error at: $($_.InvocationInfo.PositionMessage)"
-    Write-Error "Stack Trace: $($_.ScriptStackTrace)"
     Write-Error "Cannot proceed with release without successful test execution."
     exit 1
 }

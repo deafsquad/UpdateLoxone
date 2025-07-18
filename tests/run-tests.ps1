@@ -433,8 +433,8 @@ function Invoke-TestResultRotation {
     }
     
     # Get all TestRun directories
-    $testRuns = Get-ChildItem -Path $resultsPath -Filter "TestRun_*" -Directory -ErrorAction SilentlyContinue | 
-                Sort-Object CreationTime -Descending
+    $testRuns = @(Get-ChildItem -Path $resultsPath -Filter "TestRun_*" -Directory -ErrorAction SilentlyContinue | 
+                Sort-Object CreationTime -Descending)
     
     $totalRuns = $testRuns.Count
     $runsToDelete = @()
@@ -477,8 +477,8 @@ function Invoke-TestResultRotation {
     # Clean up old coverage reports (keep only last 10)
     $coverageDir = Join-Path $resultsPath "coverage"
     if (Test-Path $coverageDir) {
-        $coverageFiles = Get-ChildItem -Path $coverageDir -Filter "coverage_*.md" -File -ErrorAction SilentlyContinue |
-                        Sort-Object CreationTime -Descending
+        $coverageFiles = @(Get-ChildItem -Path $coverageDir -Filter "coverage_*.md" -File -ErrorAction SilentlyContinue |
+                        Sort-Object CreationTime -Descending)
         
         if ($coverageFiles.Count -gt 10) {
             $coverageToDelete = $coverageFiles | Select-Object -Skip 10
@@ -497,8 +497,8 @@ function Invoke-TestResultRotation {
     # Clean up old TestRun folders in temp directory
     $tempPath = Join-Path $PSScriptRoot "temp"
     if (Test-Path $tempPath) {
-        $tempTestRuns = Get-ChildItem -Path $tempPath -Filter "TestRun_*" -Directory -ErrorAction SilentlyContinue | 
-                        Sort-Object CreationTime -Descending
+        $tempTestRuns = @(Get-ChildItem -Path $tempPath -Filter "TestRun_*" -Directory -ErrorAction SilentlyContinue | 
+                        Sort-Object CreationTime -Descending)
         
         $tempRunsToDelete = @()
         
