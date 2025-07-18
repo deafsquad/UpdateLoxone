@@ -141,7 +141,8 @@ if (-not $script:SuppressToastInit -or $script:IsTestMode) {
 # This prevents the toast from dismissing when transitioning between operations
 if (-not $script:SuppressToastInit -or $script:IsTestMode) {
     if (-not (Test-Path variable:Global:PersistentToastData)) {
-        if (Get-Command Write-Log -ErrorAction SilentlyContinue) {
+        # Only log if logging infrastructure is ready (prevents errors during module import)
+        if ((Get-Command Write-Log -ErrorAction SilentlyContinue) -and $Global:LogFile) {
             Write-Log -Level Debug -Message "Initializing Global:PersistentToastData for the first time"
         }
         $Global:PersistentToastData = [ordered]@{
@@ -965,7 +966,7 @@ function Show-FinalStatusToast {
         # Determine resources
         $appLogo = Join-Path (Join-Path $PSScriptRoot "..") $(if ($Success) { "ok.png" } else { "nok.png" })
         $toastId = "${Global:PersistentToastId}_Final"
-        $logPath = if ($LogFileToShow) { $LogFileToShow } else { $script:LogFilePath }
+        $logPath = if ($LogFileToShow) { $LogFileToShow } else { $Global:LogFile }
         
         # Build visual
         $text = New-BTText -Content $StatusMessage

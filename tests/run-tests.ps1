@@ -302,6 +302,21 @@ $script:StartTime = Get-Date
 $script:TestRunId = $script:StartTime.ToString('yyyyMMdd-HHmmss')
 $script:IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
 
+# Initialize logging variables early to prevent errors
+if ($LogToFile) {
+    # Ensure log directory exists
+    $script:LogPath = Join-Path ([System.IO.Path]::GetTempPath()) "UpdateLoxoneTests" 
+    if (-not (Test-Path $script:LogPath)) {
+        New-Item -ItemType Directory -Path $script:LogPath -Force | Out-Null
+    }
+    
+    # Initialize log file path early
+    $script:LogFile = Join-Path $script:LogPath "test-run-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    
+    # Also set Global:LogFile for modules that expect it (like LoxoneUtils.Toast)
+    $Global:LogFile = $script:LogFile
+}
+
 # Pre-load ScheduledTasks mocks if running in PowerShell 7 to avoid timeout issues
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     $mockPath = Join-Path $script:TestsPath "Helpers" | Join-Path -ChildPath "Mock-ScheduledTasks.ps1"
@@ -352,8 +367,8 @@ if ($TestType -in @('All', 'System')) {
     }
 }
 
-# Initialize logging early if needed
-if ($LogToFile -and -not $script:LogFile) {
+# Initialize logging early if needed (check both script and global)
+if ($LogToFile -and -not $script:LogFile -and -not $Global:LogFile) {
     # Ensure log directory exists
     if (-not (Test-Path $script:LogPath)) {
         New-Item -ItemType Directory -Path $script:LogPath -Force | Out-Null
@@ -361,6 +376,7 @@ if ($LogToFile -and -not $script:LogFile) {
     
     # Initialize log file path early
     $script:LogFile = Join-Path $script:LogPath "test-run-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $Global:LogFile = $script:LogFile
 }
 
 # Log admin status and test determination

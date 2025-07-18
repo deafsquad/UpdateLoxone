@@ -33,6 +33,9 @@ This script performs the following actions:
 .PARAMETER SubmitToWinget
 (Optional) If specified along with -WingetPkgsRepoPath, the script will copy manifests to your local 'winget-pkgs' clone, run 'winget validate', and prepare a local commit.
 
+.PARAMETER SkipTests
+(Optional) Skip running tests before release. USE WITH CAUTION - only for emergencies when tests are broken but release is needed.
+
 .EXAMPLE
 .\publish_new_release.ps1 -PackageIdentifier "deafsquad.UpdateLoxone"
 .\publish_new_release.ps1 -PackageIdentifier "deafsquad.UpdateLoxone" -DryRun
@@ -62,7 +65,9 @@ param(
     [switch]$DryRun,
     [string]$WingetPkgsRepoPath,
 
-    [switch]$SubmitToWinget
+    [switch]$SubmitToWinget,
+    
+    [switch]$SkipTests
 )
 
 if ([string]::IsNullOrWhiteSpace($PackageIdentifier)) {
@@ -330,8 +335,12 @@ $AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthor
 Write-Host "Starting release process for $script:PackageName version $ScriptVersion (Author: $AuthorName)..."
 
 # --- Run Tests First ---
-Write-Host "---"
-Write-Host "Running test suite before proceeding with release..."
+if ($SkipTests) {
+    Write-Warning "SKIPPING TESTS - This is not recommended for production releases!"
+    Write-Host ""
+} else {
+    Write-Host "---"
+    Write-Host "Running test suite before proceeding with release..."
 $testScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "tests\run-tests.ps1"
 if (-not (Test-Path $testScriptPath)) {
     Write-Error "Test runner script not found at: $testScriptPath"
@@ -341,12 +350,28 @@ if (-not (Test-Path $testScriptPath)) {
 
 try {
     Write-Host "Executing test suite with coverage analysis..."
+    Write-Host "Test script path: $testScriptPath"
+    Write-Host "Running command: & `"$testScriptPath`" -TestType All -Coverage -CI -LiveProgress -LogToFile"
+    
+    # Capture both output and error
+    $testOutput = $null
+    $testError = $null
     
     # Run the test script with all tests and coverage
-    $testOutput = & $testScriptPath -TestType All -Coverage -CI -LiveProgress -LogToFile
+    $testOutput = & $testScriptPath -TestType All -Coverage -CI -LiveProgress -LogToFile 2>&1
+    
+    # Check for errors in output
+    $errorFound = $false
+    foreach ($line in $testOutput) {
+        if ($line -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host "ERROR in test output: $($line.Exception.Message)" -ForegroundColor Red
+            Write-Host "ERROR location: $($line.InvocationInfo.PositionMessage)" -ForegroundColor Red
+            $errorFound = $true
+        }
+    }
     
     # Check if the test script executed successfully
-    if ($LASTEXITCODE -ne 0) {
+    if ($LASTEXITCODE -ne 0 -or $errorFound) {
         Write-Error "Test execution failed with exit code: $LASTEXITCODE"
         Write-Error "Cannot proceed with release when tests fail."
         exit 1
@@ -416,6 +441,7 @@ try {
     Write-Error "Cannot proceed with release without successful test execution."
     exit 1
 }
+} # End of test execution block
 
 # --- Pre-flight checks ---
 $changelogPath = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
@@ -533,14 +559,16 @@ try {
     # Create a stable UpgradeCode (same for all versions of this product)
     $upgradeCode = '1a73a1be-50e6-4e92-af03-586f4a9d9e82'
     
-    # Create MSI
-    New-Installer -ProductName $script:PackageName `
-        -UpgradeCode $upgradeCode `
-        -Version $ScriptVersion `
-        -Manufacturer $script:PublisherName `
-        -Description "Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers." `
-        -RequiresElevation `
-        -Content {
+    # Create MSI with simplified syntax
+    $installerParams = @{
+        ProductName = $script:PackageName
+        UpgradeCode = $upgradeCode
+        Version = $ScriptVersion
+        Manufacturer = $script:PublisherName
+        Description = "Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers."
+        RequiresElevation = $true
+        OutputDirectory = $releasesArchiveDir
+        Content = {
             # Install to Program Files
             New-InstallerDirectory -PredefinedDirectory "ProgramFilesFolder" -Content {
                 New-InstallerDirectory -DirectoryName $script:PackageName -Content {
@@ -584,7 +612,10 @@ try {
                         -Description "Automatically update Loxone software"
                 }
             }
-        } -OutputDirectory $releasesArchiveDir
+        }
+    }
+    
+    New-Installer @installerParams
     
     # PSMSI creates files with pattern: ProductName.Version.Architecture.msi
     $actualMsiPath = Join-Path $releasesArchiveDir "$script:PackageName.$ScriptVersion.x86.msi"
