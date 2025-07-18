@@ -735,9 +735,6 @@ try {
                     
                     # Google Chat script
                     New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\Send-GoogleChat.ps1"
-                    
-                    # Cleanup script for custom action
-                    New-InstallerFile -Source "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Id "CleanupScript"
                 }
             }
             

@@ -2282,6 +2282,11 @@ foreach ($test in $discoveryResult.Tests) {
     }
 }
 
+# Ensure all categories are arrays even if empty
+if ($null -eq $testCategories.Unit) { $testCategories.Unit = @() }
+if ($null -eq $testCategories.Integration) { $testCategories.Integration = @() }
+if ($null -eq $testCategories.System) { $testCategories.System = @() }
+
 Write-TestLog "Test discovery complete: Unit=$($testCategories.Unit.Count), Integration=$($testCategories.Integration.Count), System=$($testCategories.System.Count)" -Level "SUMMARY" -Color Green
 
 # If we already ran tests with unified progress, process the results now that we have categorization

@@ -82,10 +82,45 @@ function Initialize-ScriptWorkflow {
     }
 
     # --- Script Save Folder ---
-    $tempScriptSaveFolder = $scriptContext.Params.ScriptSaveFolder
+    # First, check if we're running from Program Files (always check this, regardless of parameter)
+    $isInProgramFiles = $false
+    if ($scriptContext.MyScriptRoot) {
+        $scriptRoot = $scriptContext.MyScriptRoot
+        
+        $programFilesPaths = @(
+            $env:ProgramFiles,
+            ${env:ProgramFiles(x86)},
+            "$env:SystemDrive\Program Files",
+            "$env:SystemDrive\Program Files (x86)"
+        )
+        
+        foreach ($pfPath in $programFilesPaths) {
+            if ($pfPath -and $scriptRoot.StartsWith($pfPath, [StringComparison]::OrdinalIgnoreCase)) {
+                $isInProgramFiles = $true
+                Write-Host "INFO: ($FunctionName) Script is running from Program Files: '$scriptRoot'" -ForegroundColor Yellow
+                break
+            }
+        }
+    }
+    
+    # Check if ScriptSaveFolder parameter was provided
+    $tempScriptSaveFolder = if ($scriptContext.Params.ContainsKey('ScriptSaveFolder')) { 
+        $scriptContext.Params.ScriptSaveFolder 
+    } else { 
+        $null 
+    }
+    
     if ([string]::IsNullOrWhiteSpace($tempScriptSaveFolder)) {
-        if ($scriptContext.MyScriptRoot) { $scriptContext.ScriptSaveFolder = $scriptContext.MyScriptRoot }
-        else { $scriptContext.ScriptSaveFolder = Join-Path -Path $env:USERPROFILE -ChildPath "UpdateLoxone" }
+        # No parameter provided, determine default
+        if ($isInProgramFiles) {
+            # Always redirect to user's local app data when in Program Files
+            $scriptContext.ScriptSaveFolder = Join-Path -Path $env:LOCALAPPDATA -ChildPath "UpdateLoxone"
+            Write-Host "INFO: ($FunctionName) Script is in Program Files. Logs will be saved to user profile." -ForegroundColor Cyan
+        } elseif ($scriptContext.MyScriptRoot) { 
+            $scriptContext.ScriptSaveFolder = $scriptContext.MyScriptRoot 
+        } else { 
+            $scriptContext.ScriptSaveFolder = Join-Path -Path $env:LOCALAPPDATA -ChildPath "UpdateLoxone" 
+        }
     } else {
         # Sanitize the provided ScriptSaveFolder to remove any leading/trailing quotes (single or double)
         $cleanedScriptSaveFolder = $tempScriptSaveFolder
@@ -113,6 +148,13 @@ function Initialize-ScriptWorkflow {
             Write-Host "INFO: ($FunctionName) [PathCleaning] Final cleaned path: '$cleanedScriptSaveFolder'" -ForegroundColor Green
         }
         $scriptContext.ScriptSaveFolder = $cleanedScriptSaveFolder
+        
+        # Always redirect logs when running from Program Files to avoid permission issues
+        if ($isInProgramFiles) {
+            Write-Host "INFO: ($FunctionName) Script is in Program Files. Redirecting logs to user profile." -ForegroundColor Yellow
+            $scriptContext.ScriptSaveFolder = Join-Path -Path $env:LOCALAPPDATA -ChildPath "UpdateLoxone"
+            Write-Host "INFO: ($FunctionName) Logs will be saved to: '$($scriptContext.ScriptSaveFolder)'" -ForegroundColor Cyan
+        }
     }
     Write-Host "INFO: ($FunctionName) ScriptSaveFolder set to: '$($scriptContext.ScriptSaveFolder)'" -ForegroundColor Cyan
 
