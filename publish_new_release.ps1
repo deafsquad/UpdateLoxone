@@ -343,7 +343,7 @@ try {
     Write-Host "Executing test suite with coverage analysis..."
     
     # Run the test script with all tests and coverage
-    $testOutput = & $testScriptPath -TestType All -Coverage -CI -LiveProgress
+    $testOutput = & $testScriptPath -TestType All -Coverage -CI -LiveProgress -LogToFile
     
     # Check if the test script executed successfully
     if ($LASTEXITCODE -ne 0) {
