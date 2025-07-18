@@ -59,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Improved skip reason display logic to show contextually appropriate messages
 
 ### Changed
+- Enhanced publish script to stage all project files instead of selective files
+  - Now uses `git add -A` to include all changes (new, modified, deleted)
+  - Added pre-flight check for untracked files with user confirmation
+  - Shows detailed list of files being staged with their status
+  - Prompts user to handle untracked files before proceeding
+  - Ensures all project changes are included in release commits
 - Replaced ZIP packaging with MSI installer for winget compatibility
   - Now creates proper MSI installer using PSMSI module
   - MSI installs to Program Files with Start Menu shortcut

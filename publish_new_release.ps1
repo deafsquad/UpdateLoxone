@@ -410,6 +410,9 @@ try {
     Write-Host "All tests passed successfully! Proceeding with release..." -ForegroundColor Green
 } catch {
     Write-Error "Error running test suite: $_"
+    Write-Error "Error Type: $($_.Exception.GetType().FullName)"
+    Write-Error "Error at: $($_.InvocationInfo.PositionMessage)"
+    Write-Error "Stack Trace: $($_.ScriptStackTrace)"
     Write-Error "Cannot proceed with release without successful test execution."
     exit 1
 }
@@ -687,16 +690,48 @@ $changelogRelativePath = ".\CHANGELOG.md"
 $installerManifestRelativePath = $installerManifestPath.Replace($PSScriptRoot, ".")
 
 try {
-    Write-Host "Staging files for initial commit (scripts, manifests, docs)..."
-    git add -f (Join-Path -Path $PSScriptRoot -ChildPath "UpdateLoxone.ps1")
-    git add -f (Join-Path -Path $PSScriptRoot -ChildPath "LoxoneUtils") # Stage the whole LoxoneUtils directory
-    git add -f $MyInvocation.MyCommand.Path # Stage the publish_new_release.ps1 script itself
-    git add -f $readmeRelativePath
-    git add -f $changelogRelativePath
-    git add -f $versionManifestPath
-    git add -f $localeManifestPath
-    git add -f $installerManifestPath
-    # Note: MSI file is NOT added to Git
+    # Check for untracked files first
+    Write-Host "Checking for untracked files..."
+    $untrackedFiles = git ls-files --others --exclude-standard
+    
+    if ($untrackedFiles) {
+        Write-Host "`nThe following untracked files were found:" -ForegroundColor Yellow
+        $untrackedFiles | ForEach-Object { Write-Host "  - $_" }
+        
+        if (-not $DryRun) {
+            Write-Host "`nDo you want to include these files in the release? (Y/N)" -ForegroundColor Cyan
+            $response = Read-Host
+            
+            if ($response -ne 'Y' -and $response -ne 'y') {
+                Write-Host "Aborting release. Please handle untracked files manually:" -ForegroundColor Yellow
+                Write-Host "  - Add them to .gitignore if they should be ignored"
+                Write-Host "  - Delete them if they're temporary files"
+                Write-Host "  - Commit them separately if they're needed but not for this release"
+                exit 1
+            }
+        } else {
+            Write-Host "DRY RUN: Would prompt about untracked files" -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host "Staging all files for release commit..."
+    git add -A  # Add all files (new, modified, deleted)
+    
+    # Show what's being staged
+    Write-Host "`nFiles staged for commit:" -ForegroundColor Green
+    git diff --cached --name-status | ForEach-Object {
+        $parts = $_ -split '\t'
+        $status = switch ($parts[0]) {
+            'A' { 'Added' }
+            'M' { 'Modified' }
+            'D' { 'Deleted' }
+            'R' { 'Renamed' }
+            default { $parts[0] }
+        }
+        Write-Host "  [$status] $($parts[1])"
+    }
+    
+    # Note: MSI file is NOT added to Git (handled by .gitignore)
 
     Write-Host "Committing initial release files with message: '$commitMessage'..."
     Write-Host "Committing initial release files with message: '$commitMessage'..."

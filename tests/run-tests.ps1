@@ -352,6 +352,17 @@ if ($TestType -in @('All', 'System')) {
     }
 }
 
+# Initialize logging early if needed
+if ($LogToFile -and -not $script:LogFile) {
+    # Ensure log directory exists
+    if (-not (Test-Path $script:LogPath)) {
+        New-Item -ItemType Directory -Path $script:LogPath -Force | Out-Null
+    }
+    
+    # Initialize log file path early
+    $script:LogFile = Join-Path $script:LogPath "test-run-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+}
+
 # Log admin status and test determination
 Write-TestLog "Admin check: IsAdmin=$($script:IsAdmin), Current User=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Color Cyan
 Write-TestLog "Test type determination: TestType=$TestType, SkipSystemTests=$SkipSystemTests" -Color Cyan
@@ -828,7 +839,11 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 # Initialize logging
 if ($LogToFile) {
     Invoke-LogRotation -LogDirectory $script:LogPath -MaxFiles $MaxLogFiles
-    $script:LogFile = Join-Path $script:LogPath "test-run-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    
+    # Only set if not already initialized
+    if (-not $script:LogFile) {
+        $script:LogFile = Join-Path $script:LogPath "test-run-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    }
     
     # Write header
     @"
