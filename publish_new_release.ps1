@@ -362,11 +362,18 @@ try {
     
     # Check for errors in output
     $errorFound = $false
-    foreach ($line in $testOutput) {
-        if ($line -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host "ERROR in test output: $($line.Exception.Message)" -ForegroundColor Red
-            Write-Host "ERROR location: $($line.InvocationInfo.PositionMessage)" -ForegroundColor Red
-            $errorFound = $true
+    if ($testOutput) {
+        # Ensure testOutput is an array
+        if ($testOutput -isnot [Array]) {
+            $testOutput = @($testOutput)
+        }
+        
+        foreach ($line in $testOutput) {
+            if ($line -is [System.Management.Automation.ErrorRecord]) {
+                Write-Host "ERROR in test output: $($line.Exception.Message)" -ForegroundColor Red
+                Write-Host "ERROR location: $($line.InvocationInfo.PositionMessage)" -ForegroundColor Red
+                $errorFound = $true
+            }
         }
     }
     
@@ -395,7 +402,18 @@ try {
         exit 1
     }
     
-    $testResult = Get-Content $resultsFile -Raw | ConvertFrom-Json
+    try {
+        $testResult = Get-Content $resultsFile -Raw | ConvertFrom-Json
+    } catch {
+        Write-Error "Failed to parse test results JSON: $_"
+        exit 1
+    }
+    
+    # Validate test result structure
+    if (-not $testResult -or -not $testResult.Overall) {
+        Write-Error "Test results file is missing expected structure"
+        exit 1
+    }
     
     Write-Host "---"
     Write-Host "Test Results Summary:"
