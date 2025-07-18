@@ -343,7 +343,14 @@ try {
     Write-Host "Executing test suite with coverage analysis..."
     
     # Run the test script with all tests and coverage
-    $testOutput = & $testScriptPath -TestType All -GenerateCoverage -CI -LiveProgress
+    $testOutput = & $testScriptPath -TestType All -Coverage -CI -LiveProgress
+    
+    # Check if the test script executed successfully
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Test execution failed with exit code: $LASTEXITCODE"
+        Write-Error "Cannot proceed with release when tests fail."
+        exit 1
+    }
     
     # Look for the results JSON file
     $resultsDir = Join-Path (Split-Path $testScriptPath) "TestResults"
@@ -621,6 +628,11 @@ try {
     if (-not $DryRun) {
         Write-Host "Pushing initial commit to remote repository..."
         git push
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Git push failed with exit code: $LASTEXITCODE"
+            Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current)"
+            exit 1
+        }
         Write-Host "Initial Git push successful."
         Write-Host "---"
 
@@ -687,6 +699,12 @@ try {
         
         Write-Host "Pushing updated installer manifest to remote repository..."
         git push
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Git push for installer manifest failed with exit code: $LASTEXITCODE"
+            Write-Error "The release was created but the installer manifest update could not be pushed."
+            Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current)"
+            exit 1
+        }
         Write-Host "All Git and GitHub operations completed successfully."
     } else {
             Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
