@@ -1296,9 +1296,9 @@ function Invoke-AsCurrentUser {
     # Determine PowerShell executable path
     # Removed logic for determining PowerShell path and constructing command line from ScriptBlock
 
-        # Determine appPath and commandLineArgs based on ParameterSet
-        $appPath = $null
-        $commandLineArgs = $null
+    # Determine appPath and commandLineArgs based on ParameterSet
+    $appPath = $null
+    $commandLineArgs = $null
 
         if ($PSCmdlet.ParameterSetName -eq 'ScriptBlock') {
             # Prepare for PowerShell execution

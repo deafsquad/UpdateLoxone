@@ -332,7 +332,7 @@ Write-Host "Starting release process for $script:PackageName version $ScriptVers
 # --- Run Tests First ---
 Write-Host "---"
 Write-Host "Running test suite before proceeding with release..."
-$testScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "tests\run-all-tests.ps1"
+$testScriptPath = Join-Path -Path $PSScriptRoot -ChildPath "tests\run-tests.ps1"
 if (-not (Test-Path $testScriptPath)) {
     Write-Error "Test runner script not found at: $testScriptPath"
     Write-Error "Cannot proceed with release without running tests."
@@ -340,41 +340,62 @@ if (-not (Test-Path $testScriptPath)) {
 }
 
 try {
-    Write-Host "Executing test suite..."
-    $testResult = & $testScriptPath -CI -PassThru
+    Write-Host "Executing test suite with coverage analysis..."
     
-    if ($null -eq $testResult) {
-        Write-Error "Test execution did not return a result object."
+    # Run the test script with all tests and coverage
+    $testOutput = & $testScriptPath -TestType All -GenerateCoverage -CI -LiveProgress
+    
+    # Look for the results JSON file
+    $resultsDir = Join-Path (Split-Path $testScriptPath) "TestResults"
+    $latestRun = Get-ChildItem -Path $resultsDir -Directory -ErrorAction SilentlyContinue | 
+        Where-Object { $_.Name -match "TestRun_" } | 
+        Sort-Object Name -Descending | 
+        Select-Object -First 1
+    
+    if (-not $latestRun) {
+        Write-Error "No test results directory found. Test execution may have failed."
         exit 1
     }
+    
+    $resultsFile = Join-Path $latestRun.FullName "test-results-summary.json"
+    if (-not (Test-Path $resultsFile)) {
+        Write-Error "Test results file not found at: $resultsFile"
+        exit 1
+    }
+    
+    $testResult = Get-Content $resultsFile -Raw | ConvertFrom-Json
     
     Write-Host "---"
     Write-Host "Test Results Summary:"
-    Write-Host "  Total Tests: $($testResult.TotalCount)"
-    Write-Host "  Passed: $($testResult.PassedCount)"
-    Write-Host "  Failed: $($testResult.FailedCount)"
-    Write-Host "  Skipped: $($testResult.SkippedCount)"
-    Write-Host "  Success Rate: $([math]::Round(($testResult.PassedCount / $testResult.TotalCount) * 100, 2))%"
+    Write-Host "  Total Tests: $($testResult.Overall.Total)"
+    Write-Host "  Passed: $($testResult.Overall.Passed)"
+    Write-Host "  Failed: $($testResult.Overall.Failed)"
+    Write-Host "  Skipped: $($testResult.Overall.Skipped)"
+    Write-Host "  Pass Rate: $($testResult.Overall.PassRate)%"
     Write-Host "---"
     
-    if ($testResult.FailedCount -gt 0) {
+    # Check for coverage report
+    $coverageFile = Get-ChildItem -Path (Join-Path $resultsDir "coverage") -Filter "*.md" -ErrorAction SilentlyContinue | 
+        Sort-Object Name -Descending | 
+        Select-Object -First 1
+    
+    if ($coverageFile) {
+        Write-Host "Coverage Report Generated: $($coverageFile.Name)"
+        # Extract coverage percentage from filename (format: coverage_YYYYMMDD-HHMMSS_TTTT-CCC-SSS-DDD-EEE-FFF.md)
+        if ($coverageFile.Name -match '_(\d{4})-(\d{3})-(\d{3})-(\d{3})-(\d{3})-(\d{3})\.md$') {
+            $coveragePercent = $matches[2]
+            Write-Host "  Function Coverage: $coveragePercent%"
+        }
+    }
+    Write-Host "---"
+    
+    if ($testResult.Overall.Failed -gt 0) {
         Write-Error "Tests failed! Cannot proceed with release."
         Write-Error "Please fix the failing tests before attempting to release."
-        
-        # Show failed test details
-        if ($testResult.Failed) {
-            Write-Host "Failed Tests:" -ForegroundColor Red
-            foreach ($failedTest in $testResult.Failed) {
-                Write-Host "  - $($failedTest.ExpandedPath)" -ForegroundColor Red
-                if ($failedTest.ErrorRecord) {
-                    Write-Host "    Error: $($failedTest.ErrorRecord.Exception.Message)" -ForegroundColor Red
-                }
-            }
-        }
         exit 1
     }
     
-    if ($testResult.PassedCount -eq 0) {
+    if ($testResult.Overall.Passed -eq 0) {
         Write-Error "No tests passed! This is suspicious. Cannot proceed with release."
         exit 1
     }

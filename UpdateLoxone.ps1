@@ -873,12 +873,66 @@ if (-not $script:ErrorOccurred) {
     $summaryLines = @()
     foreach ($targetInfo in $UpdateTargetsInfo) {
         $line = ""
+        # Use Name directly as it already contains the short names ("Conf", "APP", etc.)
         $processedName = $targetInfo.Name
-        if (($targetInfo.Type -eq "App" -or $targetInfo.Type -eq "Config") -and $targetInfo.Name.StartsWith("Loxone ")) {
-            $processedName = $targetInfo.Name.Substring("Loxone ".Length)
+        
+        # Add channel info for all component types
+        $channelInfo = ""
+        
+        # Debug: Log what we have
+        Write-Log -Message "Final notification - Type: $($targetInfo.Type), Name: $($targetInfo.Name), Channel: '$($targetInfo.Channel)'" -Level DEBUG
+        
+        # Always show channel if available (for Config, App, and MS)
+        if ($targetInfo.Channel) {
+            $channelInfo = "($($targetInfo.Channel))"
+        } else {
+            # Channel might not be set, try to get it from different sources
+            switch ($targetInfo.Type) {
+                "Config" {
+                    # For Config, use the script parameter Channel (default is "Test")
+                    $channelInfo = "($Channel)"
+                }
+                "Miniserver" {
+                    # For MS, also use the script parameter Channel
+                    $channelInfo = "($Channel)"
+                }
+                default {
+                    # For other types, leave empty if no channel
+                    $channelInfo = ""
+                }
+            }
         }
-        $channelInfo = if ($targetInfo.Channel) { "($($targetInfo.Channel))" } else { "" }
+        
+        # For Miniserver, ensure we use a short name with IP
+        if ($targetInfo.Type -eq "Miniserver") {
+            # Extract IP from the name or OriginalEntry to include in the display name
+            $msIP = ""
+            if ($targetInfo.Name -match '(\d+\.\d+\.\d+\.\d+)') {
+                $msIP = $matches[1]
+            } elseif ($targetInfo.OriginalEntry -match '@([\d.]+)') {
+                $msIP = $matches[1]
+            }
+            # Use "MS IP" as the display name
+            $processedName = if ($msIP) { "MS $msIP" } else { "MS" }
+        }
+        
         $targetNameDisplay = "$processedName $channelInfo".Trim()
+        
+        # Helper function to extract just the build date for APP
+        $extractBuildDate = {
+            param($versionString)
+            if ($versionString -match '\(Build ([^)]+)\)') {
+                # Format: "2025.07.15 (Build 2025-07-15)"
+                return $matches[1]
+            } elseif ($versionString -match '^(\d{4})\.(\d+)\.(\d+)') {
+                # Format: "2025.7.15.0" - convert to date format
+                $year = $matches[1]
+                $month = $matches[2].PadLeft(2, '0')
+                $day = $matches[3].PadLeft(2, '0')
+                return "$year-$month-$day"
+            }
+            return $versionString
+        }
 
 # --- Final Progress Toast Update to 100% ---
     if (-not $script:ErrorOccurred -and $Global:PersistentToastInitialized) {
@@ -957,26 +1011,56 @@ if (-not $script:ErrorOccurred) {
         }
     }
         switch ($targetInfo.Status) {
-            "UpdateSuccessful"              { $line = $targetNameDisplay + ": Updated to " + $targetInfo.VersionAfterUpdate }
-            "InstallSuccessful"             { $line = $targetNameDisplay + ": Successfully installed " + $targetInfo.VersionAfterUpdate }
-            "DownloadSuccessful"            { $line = $targetNameDisplay + ": Downloaded (Target: " + $targetInfo.TargetVersion + ")" }
-            "ExtractSuccessful"             { $line = $targetNameDisplay + ": Extracted (Target: " + $targetInfo.TargetVersion + ")" }
-            "UpToDate"                      { $line = $targetNameDisplay + ": Up-to-date " + $targetInfo.InitialVersion }
-            "NotInstalled"                  { $line = $targetNameDisplay + ": Not found (Target: " + $targetInfo.TargetVersion + ")" }
-            "NeedsUpdate"                   { $line = $targetNameDisplay + ": Update was pending (Target: " + $targetInfo.TargetVersion + ")" } # Should ideally not be seen if process completes
-            "InstallSkippedProcessRunning"  { $line = $targetNameDisplay + ": Install skipped (Loxone process running)" }
-            "DownloadSkippedExistingValid"  { $line = $targetNameDisplay + ": Using existing valid file (Version: " + $targetInfo.TargetVersion + ")" }
+            "UpdateSuccessful"              { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.VersionAfterUpdate } else { $targetInfo.VersionAfterUpdate }
+                $line = "🔄 " + $targetNameDisplay + " " + $displayVersion 
+            }
+            "InstallSuccessful"             { 
+                # Use VersionAfterUpdate if available, otherwise fall back to TargetVersion
+                $versionToUse = if ($targetInfo.VersionAfterUpdate) { $targetInfo.VersionAfterUpdate } else { $targetInfo.TargetVersion }
+                $displayVersion = if ($targetInfo.Type -eq "App" -and $versionToUse) { & $extractBuildDate $versionToUse } else { $versionToUse }
+                if ($displayVersion) {
+                    $line = "🚀 " + $targetNameDisplay + " " + $displayVersion
+                } else {
+                    $line = "🚀 " + $targetNameDisplay
+                }
+            }
+            "DownloadSuccessful"            { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.TargetVersion } else { $targetInfo.TargetVersion }
+                $line = "⬇️ " + $targetNameDisplay + " " + $displayVersion 
+            }
+            "ExtractSuccessful"             { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.TargetVersion } else { $targetInfo.TargetVersion }
+                $line = "📦 " + $targetNameDisplay + " " + $displayVersion 
+            }
+            "UpToDate"                      { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.InitialVersion } else { $targetInfo.InitialVersion }
+                $line = "✓ " + $targetNameDisplay + " " + $displayVersion 
+            }
+            "NotInstalled"                  { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.TargetVersion } else { $targetInfo.TargetVersion }
+                $line = "🔍 " + $targetNameDisplay + " " + $displayVersion 
+            }
+            "NeedsUpdate"                   { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.TargetVersion } else { $targetInfo.TargetVersion }
+                $line = "🔄 " + $targetNameDisplay + " " + $displayVersion 
+            } # Should ideally not be seen if process completes
+            "InstallSkippedProcessRunning"  { $line = "⚠️ " + $targetNameDisplay + " Skipped (process running)" }
+            "DownloadSkippedExistingValid"  { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.TargetVersion } else { $targetInfo.TargetVersion }
+                $line = "✓ " + $targetNameDisplay + " " + $displayVersion + " (cached)" 
+            }
             default {
                 if ($targetInfo.Status -like "*Failed*") { # More generic check for failure statuses
                     $reason = ($targetInfo.Status -split '\(|\)')[1]
-                    $reasonText = if ($reason) { " - Reason: " + $reason } else { "" }
+                    $reasonText = if ($reason) { " - " + $reason } else { "" }
                     $stillAt = if ($targetInfo.VersionAfterUpdate -and $targetInfo.VersionAfterUpdate -ne $targetInfo.InitialVersion) { $targetInfo.VersionAfterUpdate } else { $targetInfo.InitialVersion }
-                    $line = $targetNameDisplay + ": Action Failed (Target: " + $targetInfo.TargetVersion + ", Status: " + $targetInfo.Status + ", Initial: " + $stillAt + ")" + $reasonText
+                    $line = "✗ " + $targetNameDisplay + " " + $targetInfo.Status + $reasonText
                 } elseif ($targetInfo.UpdatePerformed -and $targetInfo.Status -eq "UpdateAttempted") {
-                    $line = $targetNameDisplay + ": Update attempted, outcome: " + $targetInfo.Status + " (Initial: " + $targetInfo.InitialVersion + ", Target: " + $targetInfo.TargetVersion + ")"
+                    $line = "⚠️ " + $targetNameDisplay + " " + $targetInfo.Status
                 }
                 else {
-                    $line = $targetNameDisplay + ": Status '" + $targetInfo.Status + "' (Initial: " + $targetInfo.InitialVersion + ", Target: " + $targetInfo.TargetVersion + ")"
+                    $line = "⚠️ " + $targetNameDisplay + " " + $targetInfo.Status
                 }
             }
         }
@@ -985,10 +1069,14 @@ if (-not $script:ErrorOccurred) {
     # Lines 734-737 (original positions) logging variable types have been moved
     # into the if block starting at line 639 to ensure variables are initialized.
     # They are now integrated into the logs just before the Update-PersistentToast call (around line 694).
-    $finalMessageText = "Loxone Update Process Finished." # Simplified initial message
+    $finalMessageText = ""
 
     if ($summaryLines.Count -gt 0) {
-        $finalMessageText += "`n" + ($summaryLines | Sort-Object | Out-String).Trim()
+        # Sort by the text after the emoji (first letter of component name)
+        $sortedLines = $summaryLines | Sort-Object { ($_ -split ' ', 2)[1] }
+        $finalMessageText = ($sortedLines | Out-String).Trim()
+    } else {
+        $finalMessageText = "Process complete, no updates."
     }
 
     Write-Log -Message "Final Summary (Success/No Error):`n$finalMessageText" -Level INFO

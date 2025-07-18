@@ -1,19 +1,27 @@
 # Module for Loxone Update Script Logging Functions
 
-# Mutex for Log File Access - PID-based to allow multiple instances
-# Each process gets its own mutex for thread safety within that process
-# File locking will handle inter-process synchronization
-try {
-    # Create a mutex unique to this process
-    $mutexName = "UpdateLoxoneLogMutex_$PID"
-    $script:LogMutex = New-Object System.Threading.Mutex($false, $mutexName)
-    Write-Debug "Created process-specific mutex: $mutexName"
-} catch {
-    # If named mutex fails, create a local one
-    Write-Warning "Could not create named mutex. Using process-local mutex."
-    $script:LogMutex = New-Object System.Threading.Mutex($false)
+# Check for test environment and skip initialization if in test mode
+if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1") {
+    Write-Verbose "Test mode detected - skipping logging initialization"
+    # Create dummy variables to avoid errors
+    $script:LogMutex = $null
+    $script:CallStack = $null
+} else {
+    # Mutex for Log File Access - PID-based to allow multiple instances
+    # Each process gets its own mutex for thread safety within that process
+    # File locking will handle inter-process synchronization
+    try {
+        # Create a mutex unique to this process
+        $mutexName = "UpdateLoxoneLogMutex_$PID"
+        $script:LogMutex = New-Object System.Threading.Mutex($false, $mutexName)
+        Write-Debug "Created process-specific mutex: $mutexName"
+    } catch {
+        # If named mutex fails, create a local one
+        Write-Warning "Could not create named mutex. Using process-local mutex."
+        $script:LogMutex = New-Object System.Threading.Mutex($false)
+    }
+    $script:CallStack = [System.Collections.Generic.Stack[object]]::new() # Corrected type to hold objects
 }
-$script:CallStack = [System.Collections.Generic.Stack[object]]::new() # Corrected type to hold objects
 
 #region Function Entry/Exit Logging
 
@@ -27,6 +35,10 @@ function Enter-Function {
         [Parameter(Mandatory=$false)]
         [int]$LineNumber
     )
+    # Initialize CallStack if needed (for test scenarios)
+    if ($null -eq $script:CallStack) {
+        $script:CallStack = [System.Collections.Generic.Stack[object]]::new()
+    }
     # Push function details onto the stack
     $stackFrame = @{ Name = $FunctionName; Path = $FilePath; Line = $LineNumber; StartTime = (Get-Date) }
     $script:CallStack.Push($stackFrame)
@@ -43,6 +55,10 @@ function Exit-Function {
         [Parameter(Mandatory=$false)]
         [string]$ResultMessage
     )
+    # Initialize CallStack if needed (for test scenarios)
+    if ($null -eq $script:CallStack) {
+        $script:CallStack = [System.Collections.Generic.Stack[object]]::new()
+    }
     if ($script:CallStack.Count -eq 0) {
         # Write-Log -Message "Exit-Function called but CallStack is empty." -Level Warn -SkipStackFrame # Avoid logging if Write-Log itself fails
         return

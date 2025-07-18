@@ -5,17 +5,32 @@
 !*.ps1
 !*.psm1
 !*.psd1
-!README.md
 !*.example
 !LoxoneUtils/
+!tests/
+!docs/
 !*.png
-!*.png
-!CHANGELOG.md
 !manifests/d/deafsquad/UpdateLoxone/ # Be very specific
 # !UpdateLoxone-v*.zip # No longer needed as ZIPs are in releases_archive and not committed
 releases_archive/
 
-# Ignore test temp folder
-tests/temp/
+# Keep README.md and CHANGELOG.md but ignore all other .md files
+!README.md
+!CHANGELOG.md
+*.md
+
+# CLAUDE files (AI assistant configuration)
+CLAUDE.md
+CLAUDE.local.md
+
+# Test folder specific rules
+# Keep the folder structure but ignore contents
+tests/temp/*
+!tests/temp/.gitkeep
+tests/TestResults/*
+!tests/TestResults/.gitkeep
+!tests/TestResults/README.md
+tests/Helpers/temp/*
+!tests/Helpers/temp/.gitkeep
 
 # Keep this .gitignore file

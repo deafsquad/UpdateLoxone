@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER
+## [0.3.9] - 2025-07-18 22:49:04
 ### Added
 - Comprehensive test suite with 100% module coverage
   - Created 39 test files covering all 11 PowerShell modules
@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Modified `publish_new_release.ps1` to run full test suite before proceeding
   - Release now fails if any tests fail, ensuring quality
   - Added `-CI` and `-PassThru` parameters to test runner for automation
+  - Added `-LiveProgress` parameter to show real-time test progress during release
 - Architectural analysis and recommendations
   - Created `CLAUDE.md` with detailed code analysis and improvement recommendations
   - Identified and documented dead code in UpdateCheck module
@@ -27,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Created proper test directory structure (Unit, Integration, Fixtures)
   - Added characterization tests to document actual behavior
   - Implemented test helpers and utilities
+  - Added UTF-8 BOM to test runner script to fix PowerShell 5.1 Unicode parsing issues
 
 ### Changed
 - Reorganized test directory structure
@@ -37,8 +39,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Release script now runs comprehensive test suite first
   - Added test result summary display in release output
   - Release aborts if tests fail or no tests pass
+- Test runner improvements
+  - Fixed coverage summary not displaying in CI mode
+  - Added special handling for COVERAGE and SUMMARY log levels in CI mode
+  - Improved coverage report positioning to appear before test summary
+  - Removed hardcoded verbose flags from TestCoverage module
+  - Fixed coverage module path resolution issue
+  - Suppressed Pester test discovery output in CI mode by redirecting console streams
+  - Fixed missing test statistics in CI mode by adding SUMMARY level to all test result outputs
+  - Fixed "Test discovery complete" not showing in CI mode by adding SUMMARY level
+  - Suppressed Pester discovery output ("Test run was skipped", "Tests completed in Xms") in all modes
+  - Refactored test summary display to use dynamic discovery instead of hardcoded test types
+  - Fixed System test duration not displaying by improving duration handling in dynamic summary
+  - Added duration placeholder (--:---.---) when tests ran but duration is missing
+  - Fixed System test skip reason showing when only some tests were skipped (now only shows when ALL are skipped)
+  - Fixed System test duration showing as 0 by ensuring minimum duration for categories that ran tests
+  - Added duration estimation for SYSTEM tests when no duration is reported by PsExec helper
+  - Fixed System Test Skip Reason showing at top level when RunAsUser tests pass
+  - Improved skip reason display logic to show contextually appropriate messages
 
 ### Fixed
+- Fixed app update showing rocket emoji (🚀) instead of update arrow (⬆️)
+  - `Invoke-InstallLoxoneApp` and `Invoke-InstallLoxoneConfig` now properly detect updates vs new installs
+  - Action type is determined dynamically based on InitialVersion presence
+  - Toast notifications and log messages now correctly reflect the action being performed
 - Identified missing return statement in `New-LoxoneComponentStatusObject` (though function is dead code)
 - Documented parameter naming inconsistencies across modules
 - Identified and documented functions that are exported but not used
@@ -47,6 +71,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Files with existing timestamps are now rotated without adding additional timestamps
   - Simplified cleanup logic to properly group files by prefix and clean up old logs
   - Improved regex patterns to handle both legacy double-timestamp files and new single-timestamp files
+- Toast notification fixes
+  - Fixed progress bar getting stuck at 98% when transitioning from download to installation
+  - Fixed toast losing foreground state and auto-dismissing after download completion
+  - Fixed stale text appearing when reusing existing toast notifications
+  - Added comprehensive runtime tracking for all workflow steps
+  - Made toast text configuration-driven with dynamic step categories
+  - Added visual symbols (✓, ✗, 🔍, ⬇️, 📦, ⚙️, 🔄, 🏁, ⏳, 🚀) throughout messages
+  - Fixed Loxone app icon missing in Start Menu shortcut
+- Final notification improvements
+  - Added proper sorting (APP first, then Conf, then MS)
+  - Fixed app build date display to show just the date (YYYY-MM-DD)
+  - Added channel information display for all components
+  - Replaced verbose status text with symbols
+  - Shortened final message to show only what was updated
 
 ### Security
 - Documented secure credential handling patterns for Miniserver connections

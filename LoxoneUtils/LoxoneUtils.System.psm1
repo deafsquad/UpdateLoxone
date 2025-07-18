@@ -1,4 +1,4 @@
-# Module for Loxone Update Script System/Process/Task Functions
+﻿# Module for Loxone Update Script System/Process/Task Functions
 
 #region Process and Task Helpers
 function Get-ProcessStatus {
@@ -96,7 +96,6 @@ function Start-ProcessInteractive {
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     try {
-    try {
         $shell = New-Object -ComObject "Shell.Application"
         # ShellExecute returns void, not a process object
         $shell.ShellExecute($FilePath, $Arguments, "", "open", 1)
@@ -105,7 +104,6 @@ function Start-ProcessInteractive {
     }
     catch {
         throw "Failed to launch process interactively: ${($_.Exception.Message)}"
-    }
     } finally {
         Exit-Function
     }
@@ -132,7 +130,7 @@ function Register-ScheduledTaskForScript {
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     Write-Log -Message "Register-ScheduledTaskForScript called. Received -DebugMode parameter value: $DebugMode" -Level DEBUG
     try {
-# Check if task exists using the dedicated function
+        # Check if task exists using the dedicated function
 Write-Log -Message "DEBUG (Elevated): Checking task existence using Test-LoxoneScheduledTaskExists for '$TaskName'." -Level DEBUG
 $taskActuallyExists = Test-LoxoneScheduledTaskExists -TaskName $TaskName
 Write-Log -Message "DEBUG (Elevated): Test-LoxoneScheduledTaskExists returned: $taskActuallyExists" -Level DEBUG

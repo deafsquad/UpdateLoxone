@@ -1,0 +1,104 @@
+{
+  "testInfrastructure": {
+    "description": "Functions that are part of the test infrastructure itself",
+    "reason": "Test infrastructure functions should not be required to have tests (avoiding test-inception)",
+    "categories": {
+      "testExecution": {
+        "description": "Functions that execute or coordinate test runs",
+        "functions": [
+          "Get-TestCoverage",
+          "Get-TestResults",
+          "Test-CoverageCompliance",
+          "Test-NewCodeCompliance",
+          "Get-ComplianceViolations",
+          "Get-ChangedFunctions"
+        ]
+      },
+      "assertionTracking": {
+        "description": "Functions that track individual test assertions",
+        "functions": [
+          "Enable-AssertionTracking",
+          "Disable-AssertionTracking",
+          "Set-TestContext",
+          "Get-TestAssertionResults",
+          "Export-TestAssertionResults",
+          "Import-AssertionResults",
+          "Merge-AssertionResults",
+          "Find-AssertionMatch",
+          "Get-AssertionMatchReport",
+          "Get-AssertionPerformanceMetrics",
+          "Export-AssertionPerformanceReport",
+          "Get-CachedAssertionResults",
+          "Set-CachedAssertionResults",
+          "ExtractKeywords",
+          "ExtractValues"
+        ]
+      },
+      "reportGeneration": {
+        "description": "Functions that generate test and coverage reports",
+        "functions": [
+          "New-TestCoverageReport",
+          "Format-TestCoverageReport",
+          "Get-TestContext",
+          "Get-FunctionDocumentation",
+          "ConvertFrom-JsonToHashtable"
+        ]
+      },
+      "testGeneration": {
+        "description": "Functions that generate test stubs and templates",
+        "functions": []
+      }
+    },
+    "allFunctions": [
+      "Get-TestCoverage",
+      "Get-TestResults",
+      "Test-CoverageCompliance",
+      "Test-NewCodeCompliance",
+      "Get-ComplianceViolations",
+      "Get-ChangedFunctions",
+      "Enable-AssertionTracking",
+      "Disable-AssertionTracking",
+      "Set-TestContext",
+      "Get-TestAssertionResults",
+      "Export-TestAssertionResults",
+      "Import-AssertionResults",
+      "Merge-AssertionResults",
+      "Find-AssertionMatch",
+      "Get-AssertionMatchReport",
+      "Get-AssertionPerformanceMetrics",
+      "Export-AssertionPerformanceReport",
+      "Get-CachedAssertionResults",
+      "Set-CachedAssertionResults",
+      "ExtractKeywords",
+      "ExtractValues",
+      "New-TestCoverageReport",
+      "Format-TestCoverageReport",
+      "Get-TestContext",
+      "Get-FunctionDocumentation",
+      "ConvertFrom-JsonToHashtable"
+    ],
+    "genuinelyUnused": [
+      "Should-Tracked",
+      "Enable-ShouldTracking",
+      "Disable-ShouldTracking",
+      "Initialize-TestAssertionHooks"
+    ],
+    "mockFunctions": {
+      "description": "Mock functions defined in test files for testing purposes",
+      "functions": [
+        "Check-ApplicationsForUpdates",
+        "Check-LoxoneConfigUpdates",
+        "Register-LoxoneScheduledTask",
+        "Write-ToastError"
+      ]
+    }
+  },
+  "grandfathered": {
+    "description": "Existing functions temporarily exempted from test coverage requirements",
+    "functions": {}
+  },
+  "permanent": {
+    "description": "Functions permanently exempted from test coverage requirements",
+    "functions": {}
+  }
+}

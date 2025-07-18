@@ -26,7 +26,7 @@ function Invoke-ScriptErrorHandling {
     $lineNumber = if ($invInfo -and $invInfo.ScriptLineNumber) { $invInfo.ScriptLineNumber } else { "N/A" }
     $line = if ($invInfo -and $invInfo.Line) { $invInfo.Line } else { "N/A" }
     $position = if ($invInfo -and $invInfo.PositionMessage) { $invInfo.PositionMessage } else { "N/A" }
-    $fullCommandLine = if ($line) { $line.Trim() } else { "N/A" }
+    $fullCommandLine = if ($line -and $line -ne "N/A") { $line.Trim() } else { "N/A" }
     $localVars = Get-Variable -Scope 1 | ForEach-Object { "$($_.Name) = $($_.Value)" } | Out-String
 
     Write-Log -Message "ERROR in command: ${command}" -Level ERROR

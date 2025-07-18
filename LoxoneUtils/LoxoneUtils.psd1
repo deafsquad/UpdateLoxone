@@ -1,4 +1,4 @@
-@{
+﻿@{
 # Script module or binary module file associated with this manifest.
 # RootModule is empty because we are using NestedModules
 RootModule = 'LoxoneUtils.psm1'
@@ -40,7 +40,8 @@ NestedModules = @(
     '.\LoxoneUtils.System.psm1',
     '.\LoxoneUtils.UpdateCheck.psm1',
     '.\LoxoneUtils.WorkflowSteps.psm1',
-    '.\LoxoneUtils.TestCoverage.psm1'
+    '.\LoxoneUtils.TestCoverage.psm1',
+    '.\LoxoneUtils.TestTracking.psm1'
 )
 # Functions to export from this module
     FunctionsToExport = @(
@@ -85,10 +86,10 @@ NestedModules = @(
         'Test-ScheduledTask',
         
         # LoxoneUtils.Toast.psm1
+        'Get-LoxoneToastAppId',
         'Initialize-LoxoneToastAppId',
         'Show-FinalStatusToast',
         'Update-PersistentToast',
-        'Update-PreCheckToast',
         
         # LoxoneUtils.UpdateCheck.psm1
         'Get-LoxoneUpdateData',
@@ -107,7 +108,6 @@ NestedModules = @(
         'Get-ExecutableSignature',
         'Get-InvocationTrace',
         'Get-RedactedPassword',
-        'Get-ScriptSaveFolder',
         'Initialize-CRC32Type',
         'Test-ExistingFile',
         
@@ -127,7 +127,25 @@ NestedModules = @(
         
         # LoxoneUtils.TestCoverage.psm1
         'Get-TestCoverage',
-        'New-TestCoverageReport'
+        'Get-TestResults',
+        'New-TestCoverageReport',
+        'Test-CoverageCompliance',
+        'Get-ComplianceViolations',
+        'Get-ChangedFunctions',
+        'Test-NewCodeCompliance',
+        
+        # LoxoneUtils.TestTracking.psm1
+        'Enable-AssertionTracking',
+        'Disable-AssertionTracking',
+        'Set-TestContext','Get-TestAssertionResults',
+        'Export-TestAssertionResults','Get-CachedAssertionResults',
+        'Set-CachedAssertionResults',
+        'Import-AssertionResults',
+        'Merge-AssertionResults',
+        'Find-AssertionMatch',
+        'Get-AssertionMatchReport',
+        'Get-AssertionPerformanceMetrics',
+        'Export-AssertionPerformanceReport'
     )
 # Cmdlets to export from this module
 CmdletsToExport = @() # Explicitly export no cmdlets

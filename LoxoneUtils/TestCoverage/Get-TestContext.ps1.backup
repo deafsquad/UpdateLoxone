@@ -1,0 +1,266 @@
+﻿function Get-TestContext {
+    <#
+    .SYNOPSIS
+        Extracts test context information from test content
+    
+    .DESCRIPTION
+        Parses test file content to extract Describe/Context/It blocks
+        that reference a specific function, including test expectations
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$TestContent,
+        [string]$FunctionName,
+        [string]$TestFileName
+    )
+    
+    $contexts = @()
+    
+    # Use a much simpler approach - find Context and It blocks independently
+    # Find the Describe block title
+    $describePattern = 'Describe\s+["'']([^"'']+)["'']'
+    $describeMatch = [regex]::Match($TestContent, $describePattern)
+    $describeTitle = if ($describeMatch.Success) { $describeMatch.Groups[1].Value } else { "Unknown" }
+    
+    # Only process if the test content mentions our function
+    if ($TestContent -match "\b$FunctionName\b") {
+        
+        # Find all Context blocks
+        $contextPattern = 'Context\s+["'']([^"'']+)["'']'
+        $contextMatches = [regex]::Matches($TestContent, $contextPattern)
+        
+        # Find all It blocks
+        $itPattern = 'It\s+["'']([^"'']+)["'']'
+        $itMatches = [regex]::Matches($TestContent, $itPattern)
+        
+        # If we have Context blocks, pair them with It blocks
+        if ($contextMatches.Count -gt 0) {
+            foreach ($contextMatch in $contextMatches) {
+                $contextTitle = $contextMatch.Groups[1].Value
+                $contextStart = $contextMatch.Index
+                
+                # Find the next Context block or end of file to determine this Context's range
+                $nextContextIndex = $TestContent.Length
+                foreach ($nextContext in $contextMatches) {
+                    if ($nextContext.Index -gt $contextStart -and $nextContext.Index -lt $nextContextIndex) {
+                        $nextContextIndex = $nextContext.Index
+                    }
+                }
+                
+                # Find It blocks within this Context range
+                $contextItBlocks = @()
+                foreach ($itMatch in $itMatches) {
+                    if ($itMatch.Index -gt $contextStart -and $itMatch.Index -lt $nextContextIndex) {
+                        $contextItBlocks += $itMatch
+                    }
+                }
+                
+                # Create entries for each It block in this Context
+                if ($contextItBlocks.Count -gt 0) {
+                    foreach ($it in $contextItBlocks) {
+                        $itTitle = $it.Groups[1].Value
+                        
+                        # Extract expectations (comprehensive)
+                        $expectations = @()
+                        $itContent = ""
+                        
+                        # Try to get the content after the It statement (larger window)
+                        $itEnd = $it.Index + $it.Length
+                        if ($itEnd -lt $TestContent.Length) {
+                            $itContent = $TestContent.Substring($itEnd, [Math]::Min(1500, $TestContent.Length - $itEnd))
+                            
+                            # Comprehensive Should assertion parsing
+                            $shouldMatches = [regex]::Matches($itContent, 'Should\s+(-\w+)(?:\s+([^;\n}]+))?')
+                            foreach ($shouldMatch in $shouldMatches) {
+                                $assertion = $shouldMatch.Groups[1].Value
+                                $value = if ($shouldMatch.Groups[2].Success) { $shouldMatch.Groups[2].Value.Trim() } else { "" }
+                                
+                                switch ($assertion) {
+                                    "-Be" { 
+                                        if ($value -match '^\$?(true|false)$') {
+                                            $expectations += "expects boolean result: $value"
+                                        } elseif ($value -match '^\d+$') {
+                                            $expectations += "expects numeric value: $value"
+                                        } else {
+                                            $expectations += "expects exact value: $value"
+                                        }
+                                    }
+                                    "-BeExactly" { $expectations += "expects exact match: $value" }
+                                    "-BeLike" { $expectations += "expects pattern match: $value" }
+                                    "-BeOfType" { $expectations += "expects specific type: $value" }
+                                    "-BeGreaterThan" { $expectations += "expects value greater than: $value" }
+                                    "-BeLessThan" { $expectations += "expects value less than: $value" }
+                                    "-BeNullOrEmpty" { $expectations += "expects null or empty result" }
+                                    "-Contain" { $expectations += "expects output to contain: $value" }
+                                    "-Match" { $expectations += "expects regex match: $value" }
+                                    "-Exist" { $expectations += "expects file/path to exist" }
+                                    "-Throw" { 
+                                        if ($value) {
+                                            $expectations += "expects exception: $value"
+                                        } else {
+                                            $expectations += "expects to throw any exception"
+                                        }
+                                    }
+                                    "-Not" { 
+                                        # Handle -Not assertions
+                                        if ($itContent -match 'Should\s+-Not\s+-(\w+)(?:\s+([^;\n}]+))?') {
+                                            $notAssertion = $matches[1]
+                                            $notValue = if ($matches[2]) { $matches[2].Trim() } else { "" }
+                                            $expectations += "expects NOT ${notAssertion}: ${notValue}"
+                                        }
+                                    }
+                                    default { $expectations += "expects assertion: $assertion $value" }
+                                }
+                            }
+                            
+                            # Look for Mock assertions
+                            $mockMatches = [regex]::Matches($itContent, 'Assert-MockCalled\s+(?:-CommandName\s+)?([A-Z][\w-]+)(?:\s+-Times\s+(\d+))?')
+                            foreach ($mockMatch in $mockMatches) {
+                                $mockCmd = $mockMatch.Groups[1].Value
+                                $times = if ($mockMatch.Groups[2].Success) { $mockMatch.Groups[2].Value } else { "any number of" }
+                                $expectations += "expects $mockCmd to be called $times times"
+                            }
+                            
+                            # Look for parameter validation tests
+                            if ($itContent -match 'ParameterArgumentValidationError') {
+                                $expectations += "expects parameter validation error"
+                            }
+                            
+                            # Look for specific error patterns
+                            if ($itContent -match '-ErrorId\s+"([^"]+)"') {
+                                $expectations += "expects specific error ID: $($matches[1])"
+                            }
+                            
+                            # Look for file operations
+                            if ($itContent -match 'Out-File|Set-Content|Add-Content') {
+                                $expectations += "expects file write operation"
+                            }
+                            if ($itContent -match 'Get-Content|Test-Path') {
+                                $expectations += "expects file read/check operation"
+                            }
+                        }
+                        
+                        $contexts += @{
+                            Describe = $describeTitle
+                            It = $itTitle
+                            TestFile = $TestFileName
+                            Expectations = $expectations
+                        }
+                    }
+                } else {
+                    # No It blocks found in this Context, use fallback
+                    $contexts += @{
+                        Describe = $describeTitle
+                        It = "Tests within context ($contextTitle)"
+                        TestFile = $TestFileName
+                        Expectations = @()
+                    }
+                }
+            }
+        } else {
+            # No Context blocks, look for standalone It blocks
+            foreach ($itMatch in $itMatches) {
+                $itTitle = $itMatch.Groups[1].Value
+                
+                # Extract expectations (comprehensive)
+                $expectations = @()
+                $itContent = ""
+                
+                # Try to get the content after the It statement (larger window)
+                $itEnd = $itMatch.Index + $itMatch.Length
+                if ($itEnd -lt $TestContent.Length) {
+                    $itContent = $TestContent.Substring($itEnd, [Math]::Min(1500, $TestContent.Length - $itEnd))
+                    
+                    # Comprehensive Should assertion parsing
+                    $shouldMatches = [regex]::Matches($itContent, 'Should\s+(-\w+)(?:\s+([^;\n}]+))?')
+                    foreach ($shouldMatch in $shouldMatches) {
+                        $assertion = $shouldMatch.Groups[1].Value
+                        $value = if ($shouldMatch.Groups[2].Success) { $shouldMatch.Groups[2].Value.Trim() } else { "" }
+                        
+                        switch ($assertion) {
+                            "-Be" { 
+                                if ($value -match '^\$?(true|false)$') {
+                                    $expectations += "expects boolean result: $value"
+                                } elseif ($value -match '^\d+$') {
+                                    $expectations += "expects numeric value: $value"
+                                } else {
+                                    $expectations += "expects exact value: $value"
+                                }
+                            }
+                            "-BeExactly" { $expectations += "expects exact match: $value" }
+                            "-BeLike" { $expectations += "expects pattern match: $value" }
+                            "-BeOfType" { $expectations += "expects specific type: $value" }
+                            "-BeGreaterThan" { $expectations += "expects value greater than: $value" }
+                            "-BeLessThan" { $expectations += "expects value less than: $value" }
+                            "-BeNullOrEmpty" { $expectations += "expects null or empty result" }
+                            "-Contain" { $expectations += "expects output to contain: $value" }
+                            "-Match" { $expectations += "expects regex match: $value" }
+                            "-Exist" { $expectations += "expects file/path to exist" }
+                            "-Throw" { 
+                                if ($value) {
+                                    $expectations += "expects exception: $value"
+                                } else {
+                                    $expectations += "expects to throw any exception"
+                                }
+                            }
+                            "-Not" { 
+                                # Handle -Not assertions
+                                if ($itContent -match 'Should\s+-Not\s+-(\w+)(?:\s+([^;\n}]+))?') {
+                                    $notAssertion = $matches[1]
+                                    $notValue = if ($matches[2]) { $matches[2].Trim() } else { "" }
+                                    $expectations += "expects NOT ${notAssertion}: ${notValue}"
+                                }
+                            }
+                            default { $expectations += "expects assertion: $assertion $value" }
+                        }
+                    }
+                    
+                    # Look for Mock assertions
+                    $mockMatches = [regex]::Matches($itContent, 'Assert-MockCalled\s+(?:-CommandName\s+)?([A-Z][\w-]+)(?:\s+-Times\s+(\d+))?')
+                    foreach ($mockMatch in $mockMatches) {
+                        $mockCmd = $mockMatch.Groups[1].Value
+                        $times = if ($mockMatch.Groups[2].Success) { $mockMatch.Groups[2].Value } else { "any number of" }
+                        $expectations += "expects $mockCmd to be called $times times"
+                    }
+                    
+                    # Look for parameter validation tests
+                    if ($itContent -match 'ParameterArgumentValidationError') {
+                        $expectations += "expects parameter validation error"
+                    }
+                    
+                    # Look for specific error patterns
+                    if ($itContent -match '-ErrorId\s+"([^"]+)"') {
+                        $expectations += "expects specific error ID: $($matches[1])"
+                    }
+                    
+                    # Look for file operations
+                    if ($itContent -match 'Out-File|Set-Content|Add-Content') {
+                        $expectations += "expects file write operation"
+                    }
+                    if ($itContent -match 'Get-Content|Test-Path') {
+                        $expectations += "expects file read/check operation"
+                    }
+                }
+                
+                $contexts += @{
+                    Describe = $describeTitle
+                    It = $itTitle
+                    TestFile = $TestFileName
+                    Expectations = $expectations
+                }
+            }
+        }
+    }
+    
+    # If still no contexts found but function is mentioned, create a fallback
+    if ($contexts.Count -eq 0 -and $TestContent -match "\b$FunctionName\b") {
+        $contexts += @{
+            Describe = $describeTitle
+            It = "Referenced in test file"
+            TestFile = $TestFileName
+            Expectations = @()
+        }
+    }
+    
+    return $contexts
+}

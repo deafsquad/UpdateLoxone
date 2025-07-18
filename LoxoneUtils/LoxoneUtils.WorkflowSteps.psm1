@@ -87,10 +87,30 @@ function Initialize-ScriptWorkflow {
         if ($scriptContext.MyScriptRoot) { $scriptContext.ScriptSaveFolder = $scriptContext.MyScriptRoot }
         else { $scriptContext.ScriptSaveFolder = Join-Path -Path $env:USERPROFILE -ChildPath "UpdateLoxone" }
     } else {
-        # Sanitize the provided ScriptSaveFolder to remove any leading/trailing single quotes
+        # Sanitize the provided ScriptSaveFolder to remove any leading/trailing quotes (single or double)
         $cleanedScriptSaveFolder = $tempScriptSaveFolder
+        Write-Host "INFO: ($FunctionName) [PathCleaning] Original path: '$tempScriptSaveFolder'" -ForegroundColor Cyan
+        
+        # Remove single quotes
+        $singleQuoteRemovalCount = 0
         while ($cleanedScriptSaveFolder.Length -ge 2 -and $cleanedScriptSaveFolder.StartsWith("'") -and $cleanedScriptSaveFolder.EndsWith("'")) {
             $cleanedScriptSaveFolder = $cleanedScriptSaveFolder.Substring(1, $cleanedScriptSaveFolder.Length - 2)
+            $singleQuoteRemovalCount++
+            Write-Host "INFO: ($FunctionName) [PathCleaning] Removed single quotes (pass $singleQuoteRemovalCount): '$cleanedScriptSaveFolder'" -ForegroundColor Cyan
+        }
+        
+        # Remove double quotes  
+        $doubleQuoteRemovalCount = 0
+        while ($cleanedScriptSaveFolder.Length -ge 2 -and $cleanedScriptSaveFolder.StartsWith('"') -and $cleanedScriptSaveFolder.EndsWith('"')) {
+            $cleanedScriptSaveFolder = $cleanedScriptSaveFolder.Substring(1, $cleanedScriptSaveFolder.Length - 2)
+            $doubleQuoteRemovalCount++
+            Write-Host "INFO: ($FunctionName) [PathCleaning] Removed double quotes (pass $doubleQuoteRemovalCount): '$cleanedScriptSaveFolder'" -ForegroundColor Cyan
+        }
+        
+        if ($singleQuoteRemovalCount -eq 0 -and $doubleQuoteRemovalCount -eq 0) {
+            Write-Host "INFO: ($FunctionName) [PathCleaning] No quotes found - path unchanged" -ForegroundColor Cyan
+        } else {
+            Write-Host "INFO: ($FunctionName) [PathCleaning] Final cleaned path: '$cleanedScriptSaveFolder'" -ForegroundColor Green
         }
         $scriptContext.ScriptSaveFolder = $cleanedScriptSaveFolder
     }
@@ -419,10 +439,10 @@ $configChannelActual = if ($WorkflowContext.Params.ContainsKey('Channel')) {
                     $result.ConfigUpdateNeeded = $true
                     Write-Log -Message "($FunctionName) [Config] Update required (Installed: '$($WorkflowContext.InitialInstalledConfigVersion)', Available: '$($result.LatestConfigVersionNormalized)')." -Level INFO
                 } else {
-                    Write-Log -Message "($FunctionName) [Config] Installed Config version '$($WorkflowContext.InitialInstalledConfigVersion)' is newer or same as available '$($result.LatestConfigVersionNormalized)'. No update." -Level INFO
+                    Write-Log -Message "($FunctionName) [Config] Installed Config version '$($WorkflowContext.InitialInstalledConfigVersion)' is current or newer than available '$($result.LatestConfigVersionNormalized)'." -Level INFO
                 }
             } else {
-                Write-Log -Message "($FunctionName) [Config] Loxone Config is already up-to-date (Version: $($WorkflowContext.InitialInstalledConfigVersion))." -Level INFO
+                Write-Log -Message "($FunctionName) [Config] Loxone Config is current (Version: $($WorkflowContext.InitialInstalledConfigVersion))." -Level INFO
             }
         } else {
             Write-Log -Message "($FunctionName) [Config] Latest Config version could not be determined. Cannot assess if update is needed." -Level WARN
@@ -459,10 +479,10 @@ $configChannelActual = if ($WorkflowContext.Params.ContainsKey('Channel')) {
                             $result.AppUpdateNeeded = $true
                             Write-Log -Message "($FunctionName) [App] Update needed (Latest '$normalizedLatestApp' > Installed '$normalizedInstalledApp'). Set AppUpdateNeeded=True" -Level INFO
                         } else {
-                            Write-Log -Message "($FunctionName) [App] No update needed (Latest '$normalizedLatestApp' <= Installed '$normalizedInstalledApp'). AppUpdateNeeded remains False (or was already False)" -Level INFO
+                            Write-Log -Message "($FunctionName) [App] No update needed (Latest '$normalizedLatestApp' <= Installed '$normalizedInstalledApp')" -Level INFO
                         }
                     } else {
-                        Write-Log -Message "($FunctionName) [App] Loxone App versions match ('$normalizedLatestApp'). No update needed. AppUpdateNeeded remains False (or was already False)" -Level INFO
+                        Write-Log -Message "($FunctionName) [App] Loxone App is current (version '$normalizedLatestApp')" -Level INFO
                     }
                 } catch {
                     Write-Log -Message "($FunctionName) [AppDebug] ERROR during version comparison or casting: $($_.Exception.Message)" -Level ERROR
@@ -812,19 +832,22 @@ function Invoke-InstallLoxoneConfig {
         [ref]$ScriptGlobalState
     )
     $FunctionName = $MyInvocation.MyCommand.Name
+    # Determine if this is an update or install based on InitialVersion
+    $isUpdate = -not [string]::IsNullOrWhiteSpace($WorkflowContext.InitialInstalledConfigVersion)
+    
     $result = [pscustomobject]@{
         Succeeded          = $false
         Reason             = ""
         Error              = $null
         Component          = "Config"
-        Action             = "Install"
+        Action             = if ($isUpdate) { "Update" } else { "Install" }
         InitialVersion     = $WorkflowContext.InitialInstalledConfigVersion
         TargetVersion      = $ConfigTargetInfo.TargetVersion
         VersionAfterUpdate = $null
         UpdatePerformed    = $true
         InstallSkipped     = $false
     }
-    Write-Log -Message "($FunctionName) Starting Loxone Config installation step." -Level INFO
+    Write-Log -Message "($FunctionName) Starting Loxone Config $($result.Action.ToLower()) step." -Level INFO
 
     try { # MAIN FUNCTION TRY BLOCK
         $installerPath = $ConfigTargetInfo.InstallerPath
@@ -899,11 +922,15 @@ function Invoke-InstallLoxoneConfig {
         }
 
         $toastParamsInstall = @{
-            StepNumber    = $ScriptGlobalState.Value.currentStep
-            TotalSteps    = $ScriptGlobalState.Value.totalSteps
-            StepName      = "Installing Loxone Config"
-            CurrentWeight = $ScriptGlobalState.Value.CurrentWeight
-            TotalWeight   = $ScriptGlobalState.Value.TotalWeight
+            StepNumber        = $ScriptGlobalState.Value.currentStep
+            TotalSteps        = $ScriptGlobalState.Value.totalSteps
+            StepName          = "$($result.Action)ing Loxone Config"
+            CurrentWeight     = $ScriptGlobalState.Value.CurrentWeight
+            TotalWeight       = $ScriptGlobalState.Value.TotalWeight
+            ProgressPercentage = 0           # Reset progress bar for installation phase
+            DownloadFileName  = ""           # Clear download-specific fields
+            DownloadNumber    = 0
+            TotalDownloads    = 0
         }
         try {
             Update-PersistentToast @toastParamsInstall -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
@@ -987,9 +1014,9 @@ function Invoke-InstallLoxoneConfig {
 
         if ($normalizedNewInstalled -eq $normalizedTarget) {
             $result.Succeeded = $true
-            Write-Log -Message "($FunctionName) Successfully updated and verified Loxone Config to version $newlyInstalledVersion." -Level INFO
+            Write-Log -Message "($FunctionName) Successfully $($result.Action.ToLower())ed and verified Loxone Config to version $newlyInstalledVersion." -Level INFO
             $ScriptGlobalState.Value.CurrentWeight += Get-StepWeight -StepID 'VerifyConfig'
-            $toastParamsSuccess = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="Config Update Complete (v$newlyInstalledVersion)"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
+            $toastParamsSuccess = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="Conf v$newlyInstalledVersion"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
             try {
                 Update-PersistentToast @toastParamsSuccess -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed $true -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
             } catch {
@@ -1157,19 +1184,22 @@ function Invoke-InstallLoxoneApp {
         [ref]$ScriptGlobalState
     )
     $FunctionName = $MyInvocation.MyCommand.Name
+    # Determine if this is an update or install based on InitialVersion
+    $isUpdate = -not [string]::IsNullOrWhiteSpace($AppTargetInfo.InitialVersion)
+    
     $result = [pscustomobject]@{
         Succeeded          = $false
         Reason             = ""
         Error              = $null
         Component          = "App"
-        Action             = "Install"
+        Action             = if ($isUpdate) { "Update" } else { "Install" }
         InitialVersion     = $AppTargetInfo.InitialVersion # FileVersion from registry
         TargetVersion      = $AppTargetInfo.TargetVersion  # FileVersion from XML
         VersionAfterUpdate = $null
         UpdatePerformed    = $true
         InstallSkipped     = $false
     }
-    Write-Log -Message "($FunctionName) Starting Loxone App installation step." -Level INFO
+    Write-Log -Message "($FunctionName) Starting Loxone App $($result.Action.ToLower()) step." -Level INFO
 
     try {
         $appInstallerFileName = $AppTargetInfo.InstallerFileName
@@ -1236,11 +1266,15 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
             $progressValueForLogInstallApp = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
             Write-Log -Message "($FunctionName)   Calculated ProgressValue (Install App percentage) = $progressValueForLogInstallApp %" -Level DEBUG
         $toastParamsInstall = @{
-            StepNumber    = $ScriptGlobalState.Value.currentStep
-            TotalSteps    = $ScriptGlobalState.Value.totalSteps
-            StepName      = "Installing Loxone App"
-            CurrentWeight = $ScriptGlobalState.Value.CurrentWeight
-            TotalWeight   = $ScriptGlobalState.Value.TotalWeight
+            StepNumber        = $ScriptGlobalState.Value.currentStep
+            TotalSteps        = $ScriptGlobalState.Value.totalSteps
+            StepName          = "$($result.Action)ing Loxone App"
+            CurrentWeight     = $ScriptGlobalState.Value.CurrentWeight
+            TotalWeight       = $ScriptGlobalState.Value.TotalWeight
+            ProgressPercentage = 0           # Reset progress bar for installation phase
+            DownloadFileName  = ""           # Clear download-specific fields
+            DownloadNumber    = 0
+            TotalDownloads    = 0
     }
     Write-Log -Level DEBUG -Message "($FunctionName) Intent: Update toast for Loxone App installation."
     Write-Log -Level DEBUG -Message "($FunctionName) Attempting to update progress toast (Invoke-InstallLoxoneApp - Install). Initialized: $($Global:PersistentToastInitialized)"
@@ -1332,9 +1366,9 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
 
             if ($normalizedNewInstalledApp -eq $normalizedTargetApp) {
                 $result.Succeeded = $true
-                Write-Log -Message "($FunctionName) Successfully updated and verified Loxone App to FileVersion $($newAppDetails.FileVersion)." -Level INFO
+                Write-Log -Message "($FunctionName) Successfully $($result.Action.ToLower())ed and verified Loxone App to FileVersion $($newAppDetails.FileVersion)." -Level INFO
                 $ScriptGlobalState.Value.CurrentWeight += Get-StepWeight -StepID 'VerifyApp' # Assuming a VerifyApp step weight
-                $toastParamsSuccess = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="Loxone App Update Complete (v$($newAppDetails.FileVersion))"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
+                $toastParamsSuccess = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="APP v$($newAppDetails.FileVersion)"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
                 Write-Log -Level DEBUG -Message "($FunctionName) Intent: Update toast for successful Loxone App installation."
                 Write-Log -Level DEBUG -Message "($FunctionName) Attempting to update progress toast (Invoke-InstallLoxoneApp - Success). Initialized: $($Global:PersistentToastInitialized)"
                 Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-InstallLoxoneApp - Success): toastParamsSuccess='$($toastParamsSuccess | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$true'")
@@ -1358,6 +1392,64 @@ Write-Log -Message "($FunctionName) INVOKE-CHECKMINISERVERVERSIONS: Logging befo
         Write-Log -Message "($FunctionName)   Constructed StatusText (MS Check) = '$statusTextForLogMSCheck'" -Level DEBUG
         $progressValueForLogMSCheck = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
         Write-Log -Message "($FunctionName)   Calculated ProgressValue (MS Check percentage) = $progressValueForLogMSCheck %" -Level DEBUG
+                # Fix the Start Menu shortcut icon after installation
+                Write-Log -Message "($FunctionName) Fixing Loxone shortcut icon after installation..." -Level INFO
+                try {
+                    # Get the executable path from the new app details
+                    $exePath = $newAppDetails.InstallLocation
+                    if ($exePath -and (Test-Path $exePath)) {
+                        # Build shortcut paths dynamically
+                        $userProfile = [Environment]::GetFolderPath("UserProfile")
+                        $shortcutPath = Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone.lnk"
+                        
+                        if (Test-Path $shortcutPath) {
+                            # Fix the Start Menu shortcut
+                            $shell = New-Object -ComObject WScript.Shell
+                            $shortcut = $shell.CreateShortcut($shortcutPath)
+                            
+                            # Update shortcut properties
+                            $shortcut.TargetPath = $exePath
+                            $shortcut.WorkingDirectory = Split-Path $exePath -Parent
+                            $shortcut.IconLocation = "$exePath,0"
+                            $shortcut.Description = "Loxone Smart Home App"
+                            $shortcut.Save()
+                            
+                            # Release COM object
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) | Out-Null
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
+                            
+                            Write-Log -Message "($FunctionName) Successfully fixed Start Menu shortcut icon." -Level INFO
+                            
+                            # Also fix desktop shortcut if it exists
+                            $desktopPath = [Environment]::GetFolderPath("Desktop")
+                            $desktopShortcut = Join-Path $desktopPath "Loxone.lnk"
+                            
+                            if (Test-Path $desktopShortcut) {
+                                $shell2 = New-Object -ComObject WScript.Shell
+                                $desktop = $shell2.CreateShortcut($desktopShortcut)
+                                
+                                $desktop.TargetPath = $exePath
+                                $desktop.WorkingDirectory = Split-Path $exePath -Parent
+                                $desktop.IconLocation = "$exePath,0"
+                                $desktop.Description = "Loxone Smart Home App"
+                                $desktop.Save()
+                                
+                                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($desktop) | Out-Null
+                                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell2) | Out-Null
+                                
+                                Write-Log -Message "($FunctionName) Also fixed desktop shortcut icon." -Level INFO
+                            }
+                        } else {
+                            Write-Log -Message "($FunctionName) Start Menu shortcut not found at: $shortcutPath" -Level WARN
+                        }
+                    } else {
+                        Write-Log -Message "($FunctionName) Loxone executable not found for icon fix." -Level WARN
+                    }
+                } catch {
+                    Write-Log -Message "($FunctionName) Error fixing shortcut icon: $($_.Exception.Message)" -Level WARN
+                    # Non-critical error, continue with the process
+                }
+                
                 # Restart app if it was running (original script lines 695-709)
                 if ($wasAppRunning -and -not [string]::IsNullOrWhiteSpace($newAppDetails.InstallLocation)) {
                     Write-Log -Message  "($FunctionName) Loxone App was running before update. Attempting restart of '$($newAppDetails.InstallLocation)'..." -Level INFO
@@ -1804,7 +1896,7 @@ function Initialize-UpdatePipelineData {
         # --- Populate UpdateTargetsInfo based on prerequisites ---
         # Config Target
         $configTargetEntry = [PSCustomObject]@{
-            Name                = "Loxone Config"
+            Name                = "Conf"
             Type                = "Config"
             InitialVersion      = $WorkflowContext.InitialInstalledConfigVersion
             TargetVersion       = $Prerequisites.LatestConfigVersionNormalized
@@ -1847,7 +1939,7 @@ function Initialize-UpdatePipelineData {
             }
             
             $appTargetEntry = [PSCustomObject]@{
-                Name                = "Loxone App"
+                Name                = "APP"
                 Type                = "App"
                 InitialVersion      = $appInitialVersionFromFile
                 TargetVersion       = $Prerequisites.LatestAppVersion

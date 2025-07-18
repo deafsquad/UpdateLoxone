@@ -325,6 +325,11 @@ function Get-AppVersionFromRegistry {
                             if ($null -ne $fileItem -and $null -ne $fileItem.VersionInfo) {
                                 if (-not ([string]::IsNullOrWhiteSpace($fileItem.VersionInfo.FileVersion))) {
                                      $output.FileVersion = $fileItem.VersionInfo.FileVersion
+                                     # Add build date from file's LastWriteTime
+                                     if ($fileItem.LastWriteTime) {
+                                         $buildDate = $fileItem.LastWriteTime.ToString("yyyy-MM-dd")
+                                         $output.FileVersion = "$($output.FileVersion) (Build $buildDate)"
+                                     }
                                      Write-Verbose "Found FileVersion: $($output.FileVersion)"
                                 } else {
                                      $output.Error = "FileVersion property is null or empty for '$($output.InstallLocation)'."
@@ -360,6 +365,11 @@ function Get-AppVersionFromRegistry {
                     if ($null -ne $fileItem -and $null -ne $fileItem.VersionInfo) {
                         if (-not ([string]::IsNullOrWhiteSpace($fileItem.VersionInfo.FileVersion))) {
                              $output.FileVersion = $fileItem.VersionInfo.FileVersion
+                             # Add build date from file's LastWriteTime
+                             if ($fileItem.LastWriteTime) {
+                                 $buildDate = $fileItem.LastWriteTime.ToString("yyyy-MM-dd")
+                                 $output.FileVersion = "$($output.FileVersion) (Build $buildDate)"
+                             }
                              Write-Verbose "Found FileVersion: $($output.FileVersion)"
                         } else {
                              $output.Error = "FileVersion property is null or empty for '$($output.InstallLocation)'."

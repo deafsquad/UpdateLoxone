@@ -1,4 +1,13 @@
-# Module for Loxone Update Script Installation Functions
+﻿# Module for Loxone Update Script Installation Functions
+
+# Test mode detection - must be at the very top
+$script:IsTestMode = ($env:PESTER_TEST_RUN -eq "1") -or 
+                     ($Global:IsTestRun -eq $true) -or 
+                     ($env:LOXONE_TEST_MODE -eq "1")
+
+if ($script:IsTestMode) {
+    Write-Verbose "Test mode detected - Installation operations will be mocked"
+}
 
 #region Installation Helpers
 function Get-InstalledVersion {
@@ -7,6 +16,12 @@ function Get-InstalledVersion {
         [string]$ExePath
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    # Check test mode
+    if ($script:IsTestMode) {
+        Write-Log -Message "[MOCK] Returning mock version for: $ExePath" -Level INFO
+        Exit-Function
+        return "14.0.0.0"
+    }
     if (-not $ExePath.EndsWith(".exe")) {
         $ExePath = Join-Path -Path $ExePath -ChildPath "LoxoneConfig.exe"
     }
@@ -40,7 +55,15 @@ function Start-LoxoneUpdateInstaller {
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     Write-Log -Message "Starting update installer: ${InstallerPath} with install mode ${InstallMode}." -Level INFO
     try {
-    try {
+        # Check test mode
+        if ($script:IsTestMode) {
+            Write-Log -Message "[MOCK] Would start update installer: $InstallerPath with mode $InstallMode" -Level INFO
+            return @{
+                ExitCode = 0
+                Success = $true
+                Mock = $true
+            }
+        }
         Write-Log -Message "Executing Start-Process: '$InstallerPath' /${InstallMode} -Wait" -Level DEBUG
         $process = Start-Process -FilePath $InstallerPath -ArgumentList "/${InstallMode}" -Wait -PassThru -ErrorAction Stop
         Write-Log -Message "Start-Process completed. PID: $($process.Id), ExitCode: $($process.ExitCode)" -Level DEBUG
@@ -54,7 +77,6 @@ function Start-LoxoneUpdateInstaller {
     catch {
         Write-Log -Message "Error executing update installer: ${($_.Exception.Message)}" -Level ERROR
         throw $_
-    }
     } finally {
         Exit-Function
     }
@@ -72,6 +94,15 @@ function Start-LoxoneForWindowsInstaller {
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     Write-Log -Message "Starting Loxone for Windows installer: ${InstallerPath} with install mode ${InstallMode}." -Level INFO
     try {
+        # Check test mode
+        if ($script:IsTestMode) {
+            Write-Log -Message "[MOCK] Would start Windows installer: $InstallerPath with mode $InstallMode" -Level INFO
+            return @{
+                ExitCode = 0
+                Success = $true
+                Mock = $true
+            }
+        }
         # Assuming the same silent switches work. This might need adjustment based on the actual installer.
         # Use /S based on the provided XML example's likely installer type (InnoSetup often uses /VERYSILENT or /SILENT, but /S is common too)
         # We'll use the $InstallMode parameter passed in, assuming it's correctly set ('silent' or 'verysilent')
@@ -100,6 +131,12 @@ function Get-InstalledApplicationPath {
         [string]$AppName = "Loxone Config"
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
+    # Check test mode
+    if ($script:IsTestMode) {
+        Write-Log -Message "[MOCK] Returning mock path for: $AppName" -Level INFO
+        Exit-Function
+        return "C:\Program Files (x86)\Loxone\LoxoneConfig"
+    }
     try {
         $registryPaths = @(
             "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -211,6 +248,18 @@ function Test-ExistingInstaller {
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
 
+    # Check test mode
+    if ($script:IsTestMode) {
+        Write-Log -Message "[MOCK] Returning mock existence check for: $InstallerPath" -Level INFO
+        Exit-Function
+        return @{
+            IsValid        = $true
+            Reason         = "Mock - file exists"
+            SkipDownload   = $true
+            SkipExtraction = $true
+        }
+    }
+
     $result = @{
         IsValid        = $false
         Reason         = "Not found"
@@ -303,6 +352,18 @@ function Invoke-ZipFileExtraction {
         [Parameter(Mandatory=$true)][string]$DestinationPath
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    
+    # Check test mode
+    if ($script:IsTestMode) {
+        Write-Log -Message "[MOCK] Would extract: $ZipPath to $DestinationPath" -Level INFO
+        # Create destination directory in test mode
+        if (-not (Test-Path $DestinationPath)) {
+            New-Item -ItemType Directory -Path $DestinationPath -Force | Out-Null
+        }
+        Exit-Function
+        return
+    }
+    
     Write-Log -Message "Extracting '$ZipPath' to '$DestinationPath'..." -Level INFO
     try {
         if (-not (Test-Path $ZipPath -PathType Leaf)) {
