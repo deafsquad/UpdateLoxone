@@ -212,6 +212,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Ensure array parameters are properly initialized to avoid Count property errors
+if ($null -eq $Tag) { $Tag = @() }
+if ($null -eq $ExcludeTag) { $ExcludeTag = @() }
+
 # Validate parameter combinations
 if ($PSCmdlet.ParameterSetName -eq "CleanupOnly" -and (-not $CleanupOnly)) {
     throw "When using -WhatIf, you must also specify -CleanupOnly"
@@ -1768,6 +1772,12 @@ function Invoke-TestCategory {
     $categoryConfig.Run.PassThru = $true
     
     # Apply tags
+    # Ensure arrays are properly initialized
+    if ($null -eq $Tag) { $Tag = @() }
+    if ($null -eq $ExcludeTag) { $ExcludeTag = @() }
+    if ($null -eq $IncludeTags) { $IncludeTags = @() }
+    if ($null -eq $ExcludeTags) { $ExcludeTags = @() }
+    
     if ($IncludeTags.Count -gt 0 -or $Tag.Count -gt 0) {
         $allIncludeTags = $IncludeTags + $Tag | Select-Object -Unique
         $categoryConfig.Filter.Tag = $allIncludeTags

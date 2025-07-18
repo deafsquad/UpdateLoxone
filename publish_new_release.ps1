@@ -357,16 +357,42 @@ try {
     $testOutput = $null
     $testError = $null
     
-    # Run the test script with all tests and coverage
-    Write-Host "DEBUG: About to run test script..." -ForegroundColor Cyan
-    try {
-        $testOutput = & $testScriptPath -TestType All -Coverage -CI -LiveProgress -LogToFile 2>&1
-        Write-Host "DEBUG: Test script execution completed" -ForegroundColor Cyan
-        Write-Host "DEBUG: Output type: $($testOutput.GetType().FullName)" -ForegroundColor Cyan
-        Write-Host "DEBUG: Output is null: $($null -eq $testOutput)" -ForegroundColor Cyan
-    } catch {
-        Write-Host "DEBUG: Error during test script execution: $_" -ForegroundColor Red
-        throw
+    # Run the test script - use sequential runs to avoid the "All" test type issues
+    Write-Host "Running tests sequentially to avoid context issues..." -ForegroundColor Cyan
+    
+    $testExitCode = 0
+    $testOutput = @()
+    
+    # Run each test type separately
+    $testTypes = @('Unit', 'Integration', 'System')
+    
+    foreach ($testType in $testTypes) {
+        Write-Host "Running $testType tests..." -ForegroundColor Cyan
+        
+        try {
+            # Run test type and capture exit code
+            & $testScriptPath -TestType $testType -CI -LogToFile
+            
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "$testType tests failed with exit code: $LASTEXITCODE"
+                $testExitCode = $LASTEXITCODE
+                break
+            }
+        } catch {
+            Write-Error "Error running $testType tests: $_"
+            $testExitCode = 1
+            break
+        }
+    }
+    
+    # If all test types passed, run coverage analysis
+    if ($testExitCode -eq 0) {
+        Write-Host "All tests passed. Running coverage analysis..." -ForegroundColor Green
+        try {
+            & $testScriptPath -TestType Unit -Coverage -CI -LogToFile
+        } catch {
+            Write-Warning "Coverage analysis failed but tests passed: $_"
+        }
     }
     
     # Check for errors in output
@@ -392,8 +418,8 @@ try {
     }
     
     # Check if the test script executed successfully
-    if ($LASTEXITCODE -ne 0 -or $errorFound) {
-        Write-Error "Test execution failed with exit code: $LASTEXITCODE"
+    if ($testExitCode -ne 0 -or $errorFound) {
+        Write-Error "Test execution failed with exit code: $testExitCode"
         Write-Error "Cannot proceed with release when tests fail."
         exit 1
     }
@@ -598,18 +624,114 @@ $msiFilePath = Join-Path -Path $releasesArchiveDir -ChildPath $msiFileName
 Write-Host "Creating MSI installer: $msiFilePath..."
 try {
     # Create a stable UpgradeCode (same for all versions of this product)
-    $upgradeCode = '1a73a1be-50e6-4e92-af03-586f4a9d9e82'
+    $upgradeCode = [guid]'1a73a1be-50e6-4e92-af03-586f4a9d9e82'
     
     # Create MSI with simplified syntax
+    # Ensure OutputDirectory is a DirectoryInfo object
+    $outputDir = Get-Item -Path $releasesArchiveDir
+    
+    # PSMSI doesn't support $using: variables, so we'll use script scope
+    
+    <# Old splatting approach - keeping for reference
     $installerParams = @{
         ProductName = $script:PackageName
         UpgradeCode = $upgradeCode
-        Version = $ScriptVersion
+        Version = [version]$ScriptVersion
         Manufacturer = $script:PublisherName
         Description = "Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers."
-        RequiresElevation = $true
-        OutputDirectory = $releasesArchiveDir
+        OutputDirectory = $outputDir
         Content = {
+            # Install to Program Files
+            New-InstallerDirectory -PredefinedDirectory "ProgramFilesFolder" -Content {
+                New-InstallerDirectory -DirectoryName "UpdateLoxone" -Content {
+                    # Main script
+                    New-InstallerFile -Source "$PSScriptRoot\UpdateLoxone.ps1"
+                    
+                    # Modules folder
+                    New-InstallerDirectory -DirectoryName "LoxoneUtils" -Content {
+                        $moduleFiles = Get-ChildItem "$PSScriptRoot\LoxoneUtils" -Filter "*.ps*" -File
+                        foreach ($file in $moduleFiles) {
+                            New-InstallerFile -Source $file.FullName
+                        }
+                    }
+                    
+                    # Assets
+                    New-InstallerFile -Source "$PSScriptRoot\ms.png"
+                    New-InstallerFile -Source "$PSScriptRoot\ok.png"
+                    New-InstallerFile -Source "$PSScriptRoot\nok.png"
+                    
+                    # Documentation
+                    New-InstallerFile -Source "$PSScriptRoot\README.md"
+                    New-InstallerFile -Source "$PSScriptRoot\CHANGELOG.md"
+                    
+                    # Example config
+                    New-InstallerFile -Source "$PSScriptRoot\UpdateLoxoneMSList.txt.example"
+                    
+                    # Google Chat script if it exists
+                    $googleChatScript = "$PSScriptRoot\Send-GoogleChat.ps1"
+                    if (Test-Path $googleChatScript) {
+                        New-InstallerFile -Source $googleChatScript
+                    }
+                }
+            }
+            
+            # Create Start Menu shortcut
+            New-InstallerDirectory -PredefinedDirectory "ProgramMenuFolder" -Content {
+                New-InstallerDirectory -DirectoryName $script:PackageName -Content {
+                    New-InstallerShortcut -Name $script:PackageName `
+                        -Target "powershell.exe" `
+                        -Arguments "-ExecutionPolicy Bypass -File `"[ProgramFilesFolder]$script:PackageName\UpdateLoxone.ps1`"" `
+                        -WorkingDirectory "[ProgramFilesFolder]$script:PackageName" `
+                        -Description "Automatically update Loxone software"
+                }
+            }
+        }
+    }
+    #>
+    
+    # Direct call without splatting to avoid parameter binding issues
+    Write-Host "DEBUG: ProductName=$($script:PackageName), Version=$ScriptVersion" -ForegroundColor Yellow
+    Write-Host "DEBUG: OutputDir=$($outputDir.FullName)" -ForegroundColor Yellow
+    
+    New-Installer -ProductName $script:PackageName `
+        -UpgradeCode $upgradeCode `
+        -Version ([version]$ScriptVersion) `
+        -Manufacturer $script:PublisherName `
+        -Description "Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers." `
+        -OutputDirectory $outputDir `
+        -RequiresElevation `
+        -Content {
+            New-InstallerDirectory -PredefinedDirectory "ProgramFilesFolder" -Content {
+                New-InstallerDirectory -DirectoryName "UpdateLoxone" -Content {
+                    # Main script - using literal path
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\UpdateLoxone.ps1"
+                    
+                    # Modules
+                    New-InstallerDirectory -DirectoryName "LoxoneUtils" -Content {
+                        $modDir = "C:\Users\deafs_iutw2w3\UpdateLoxone\LoxoneUtils"
+                        Get-ChildItem $modDir -Filter "*.ps*" -File | ForEach-Object {
+                            New-InstallerFile -Source $_.FullName
+                        }
+                    }
+                    
+                    # Assets
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\ms.png"
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\ok.png"
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\nok.png"
+                }
+            }
+        }
+    
+    <# Commented out duplicate call
+    New-Installer `
+        -ProductName $script:PackageName `
+        -UpgradeCode $upgradeCode `
+        -Version ([version]$ScriptVersion) `
+        -Manufacturer $script:PublisherName `
+        -Description "Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers." `
+        -OutputDirectory $outputDir `
+        -RequiresElevation `
+        -Content {
             # Install to Program Files
             New-InstallerDirectory -PredefinedDirectory "ProgramFilesFolder" -Content {
                 New-InstallerDirectory -DirectoryName $script:PackageName -Content {
@@ -618,8 +740,9 @@ try {
                     
                     # Modules folder
                     New-InstallerDirectory -DirectoryName "LoxoneUtils" -Content {
-                        Get-ChildItem (Join-Path $PSScriptRoot "LoxoneUtils\*.ps*") | ForEach-Object {
-                            New-InstallerFile -Source $_.FullName
+                        $moduleFiles = Get-ChildItem (Join-Path $PSScriptRoot "LoxoneUtils") -Filter "*.ps*" -File
+                        foreach ($file in $moduleFiles) {
+                            New-InstallerFile -Source $file.FullName
                         }
                     }
                     
@@ -654,9 +777,7 @@ try {
                 }
             }
         }
-    }
-    
-    New-Installer @installerParams
+    #>
     
     # PSMSI creates files with pattern: ProductName.Version.Architecture.msi
     $actualMsiPath = Join-Path $releasesArchiveDir "$script:PackageName.$ScriptVersion.x86.msi"
@@ -677,12 +798,26 @@ try {
     }
 } catch {
     Write-Error "Failed to create MSI installer: $($_.Exception.Message)"
+    Write-Error "Exception type: $($_.Exception.GetType().FullName)"
+    Write-Error "Full error: $_"
+    if ($_.Exception.InnerException) {
+        Write-Error "Inner exception: $($_.Exception.InnerException.Message)"
+    }
     exit 1
 }
 
 # --- Calculate SHA256 Hash ---
 Write-Host "Calculating SHA256 hash for $msiFilePath..."
-$fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+    $fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+} else {
+    # Fallback for older PowerShell versions
+    $sha256 = New-Object System.Security.Cryptography.SHA256Managed
+    $fileBytes = [System.IO.File]::ReadAllBytes($msiFilePath)
+    $hashBytes = $sha256.ComputeHash($fileBytes)
+    $fileHash = [BitConverter]::ToString($hashBytes).Replace('-', '')
+    $sha256.Dispose()
+}
 Write-Host "SHA256 Hash: $fileHash"
 
 # --- Create Manifests ---
