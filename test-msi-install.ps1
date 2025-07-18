@@ -106,3 +106,4 @@ if ($process.ExitCode -eq 0) {
 }
 
 Write-Host "`nLog file: $logFile" -ForegroundColor Cyan
+}

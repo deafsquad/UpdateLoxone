@@ -603,8 +603,15 @@ Write-Host "All required project files seem to be present."
 Write-Host "IMPORTANT: Ensure you have manually updated README.md if necessary for version $ScriptVersion."
 
 # --- Define Archive Path ---
-$releasesArchiveDirName = "releases_archive"
-$releasesArchiveDir = Join-Path -Path $PSScriptRoot -ChildPath $releasesArchiveDirName
+if ($DryRun) {
+    $releasesArchiveDirName = "dryrun_archive"
+    $releasesArchiveDir = Join-Path -Path $PSScriptRoot -ChildPath $releasesArchiveDirName
+    Write-Host "DRY RUN: Using dry run archive directory: $releasesArchiveDir" -ForegroundColor Yellow
+} else {
+    $releasesArchiveDirName = "releases_archive"
+    $releasesArchiveDir = Join-Path -Path $PSScriptRoot -ChildPath $releasesArchiveDirName
+}
+
 if (-not (Test-Path $releasesArchiveDir)) {
     Write-Host "Creating local releases archive directory: $releasesArchiveDir"
     New-Item -ItemType Directory -Path $releasesArchiveDir | Out-Null
@@ -702,9 +709,9 @@ try {
         -RequiresElevation `
         -Content {
             New-InstallerDirectory -PredefinedDirectory "ProgramFilesFolder" -Content {
-                New-InstallerDirectory -DirectoryName "UpdateLoxone" -Content {
-                    # Main script - using literal path
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\UpdateLoxone.ps1"
+                New-InstallerDirectory -DirectoryName "UpdateLoxone" -Id "INSTALLFOLDER" -Content {
+                    # Main script - using literal path with ID for shortcut
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\UpdateLoxone.ps1" -Id "MainScript"
                     
                     # Modules
                     New-InstallerDirectory -DirectoryName "LoxoneUtils" -Content {
@@ -728,6 +735,20 @@ try {
                     
                     # Google Chat script
                     New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\Send-GoogleChat.ps1"
+                    
+                    # Cleanup script for custom action
+                    New-InstallerFile -Source "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Id "CleanupScript"
+                }
+            }
+            
+            # Create Start Menu shortcut
+            New-InstallerDirectory -PredefinedDirectory "ProgramMenuFolder" -Content {
+                New-InstallerDirectory -DirectoryName "UpdateLoxone" -Content {
+                    New-InstallerShortcut -Name "UpdateLoxone" `
+                        -FileId "MainScript" `
+                        -WorkingDirectoryId "INSTALLFOLDER" `
+                        -Description "Automatically update Loxone software" `
+                        -Arguments "-ExecutionPolicy Bypass"
                 }
             }
         }
@@ -806,6 +827,12 @@ try {
             throw "MSI file not found after creation. Expected pattern: $script:PackageName.$ScriptVersion.*.msi"
         }
     }
+    
+    # Clean up WiX intermediate files
+    Write-Host "Cleaning up build artifacts..."
+    Get-ChildItem -Path $releasesArchiveDir -Filter "*.wxs" | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $releasesArchiveDir -Filter "*.wxsobj" | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $releasesArchiveDir -Filter "*.wixpdb" | Remove-Item -Force -ErrorAction SilentlyContinue
 } catch {
     Write-Error "Failed to create MSI installer: $($_.Exception.Message)"
     Write-Error "Exception type: $($_.Exception.GetType().FullName)"
@@ -1112,8 +1139,56 @@ if ($SubmitToWinget.IsPresent) {
 }
 
 Write-Host "---"
-Write-Host "Release process for $script:PackageName v$ScriptVersion completed."
-if (-not $DryRun) {
-    Write-Host "Please verify the GitHub release, tag, and asset: https://github.com/$script:PublisherName/$script:PackageName/releases/tag/$tagName"
-    Write-Host "Verify the installer manifest URL has been updated in your repository."
+Write-Host ""
+if ($DryRun) {
+    Write-Host "===============================================" -ForegroundColor Green
+    Write-Host "     DRY RUN COMPLETED SUCCESSFULLY! " -ForegroundColor Green
+    Write-Host "===============================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Release v$ScriptVersion is ready to publish." -ForegroundColor Cyan
+    Write-Host "MSI installer created: $msiFileName" -ForegroundColor Cyan
+    Write-Host "SHA256: $fileHash" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "To create the actual release, run without -DryRun:" -ForegroundColor Yellow
+    Write-Host "  .\publish_new_release.ps1 -PackageIdentifier '$PackageIdentifier'" -ForegroundColor White
+} else {
+    Write-Host "===============================================" -ForegroundColor Green
+    Write-Host "     RELEASE v$ScriptVersion PUBLISHED! " -ForegroundColor Green
+    Write-Host "===============================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "✓ MSI installer created: $msiFileName" -ForegroundColor Green
+    Write-Host "✓ GitHub release created with tag: $tagName" -ForegroundColor Green
+    Write-Host "✓ Manifests updated with download URL" -ForegroundColor Green
+    Write-Host "✓ All changes committed and pushed" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Next steps:" -ForegroundColor Cyan
+    Write-Host "1. Verify the release: https://github.com/$script:PublisherName/$script:PackageName/releases/tag/$tagName" -ForegroundColor White
+    Write-Host "2. Test the MSI download link" -ForegroundColor White
+    if ($SubmitToWinget) {
+        Write-Host "3. Submit PR to winget-pkgs repository" -ForegroundColor White
+    }
+}
+
+# --- Revert version for dry runs ---
+if ($DryRun) {
+    Write-Host ""
+    Write-Host "Reverting manifest versions back to $currentVersion for next run..." -ForegroundColor Yellow
+    
+    # Update version manifest
+    $versionContent = Get-Content $versionManifestPath -Raw
+    $versionContent = $versionContent -replace "PackageVersion: $ScriptVersion", "PackageVersion: $currentVersion"
+    Set-Content -Path $versionManifestPath -Value $versionContent -Encoding UTF8
+    
+    # Update installer manifest
+    $installerContent = Get-Content $installerManifestPath -Raw
+    $installerContent = $installerContent -replace "PackageVersion: $ScriptVersion", "PackageVersion: $currentVersion"
+    $installerContent = $installerContent -replace "UpdateLoxone-v$ScriptVersion\.msi", "UpdateLoxone-v$currentVersion.msi"
+    Set-Content -Path $installerManifestPath -Value $installerContent -Encoding UTF8
+    
+    # Update locale manifest
+    $localeContent = Get-Content $localeManifestPath -Raw
+    $localeContent = $localeContent -replace "PackageVersion: $ScriptVersion", "PackageVersion: $currentVersion"
+    Set-Content -Path $localeManifestPath -Value $localeContent -Encoding UTF8
+    
+    Write-Host "Manifest versions reverted to $currentVersion" -ForegroundColor Green
 }
