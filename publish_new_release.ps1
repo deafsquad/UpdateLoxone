@@ -718,6 +718,16 @@ try {
                     New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\ms.png"
                     New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\ok.png"
                     New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\nok.png"
+                    
+                    # Documentation
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\README.md"
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\CHANGELOG.md"
+                    
+                    # Example configuration
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\UpdateLoxoneMSList.txt.example"
+                    
+                    # Google Chat script
+                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\Send-GoogleChat.ps1"
                 }
             }
         }
