@@ -630,8 +630,12 @@ $msiFilePath = Join-Path -Path $releasesArchiveDir -ChildPath $msiFileName
 
 Write-Host "Creating MSI installer: $msiFilePath..."
 try {
-    # Create a stable UpgradeCode (same for all versions of this product)
+    # Create stable GUIDs for proper upgrade behavior
+    # UpgradeCode must be the same for all versions to enable upgrades
     $upgradeCode = [guid]'1a73a1be-50e6-4e92-af03-586f4a9d9e82'
+    
+    # PSMSI generates ProductCode automatically based on ProductName + Version
+    # The stable UpgradeCode ensures proper upgrade behavior
     
     # Create MSI with simplified syntax
     # Ensure OutputDirectory is a DirectoryInfo object
@@ -700,7 +704,7 @@ try {
     Write-Host "DEBUG: ProductName=$($script:PackageName), Version=$ScriptVersion" -ForegroundColor Yellow
     Write-Host "DEBUG: OutputDir=$($outputDir.FullName)" -ForegroundColor Yellow
     
-    New-Installer -ProductName $script:PackageName `
+    New-Installer -ProductName "$script:PackageName" `
         -UpgradeCode $upgradeCode `
         -Version ([version]$ScriptVersion) `
         -Manufacturer $script:PublisherName `
