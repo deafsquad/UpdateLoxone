@@ -583,7 +583,23 @@ try {
             }
         } -OutputDirectory $releasesArchiveDir
     
-    Write-Host "Successfully created MSI installer: $msiFilePath"
+    # PSMSI creates files with pattern: ProductName.Version.Architecture.msi
+    $actualMsiPath = Join-Path $releasesArchiveDir "$script:PackageName.$ScriptVersion.x86.msi"
+    
+    # Rename to our expected filename
+    if (Test-Path $actualMsiPath) {
+        Move-Item -Path $actualMsiPath -Destination $msiFilePath -Force
+        Write-Host "Successfully created MSI installer: $msiFilePath"
+    } else {
+        # Check for x64 version
+        $actualMsiPath = Join-Path $releasesArchiveDir "$script:PackageName.$ScriptVersion.x64.msi"
+        if (Test-Path $actualMsiPath) {
+            Move-Item -Path $actualMsiPath -Destination $msiFilePath -Force
+            Write-Host "Successfully created MSI installer: $msiFilePath"
+        } else {
+            throw "MSI file not found after creation. Expected pattern: $script:PackageName.$ScriptVersion.*.msi"
+        }
+    }
 } catch {
     Write-Error "Failed to create MSI installer: $($_.Exception.Message)"
     exit 1
