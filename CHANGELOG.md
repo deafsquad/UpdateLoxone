@@ -59,6 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Improved skip reason display logic to show contextually appropriate messages
 
 ### Changed
+- Replaced ZIP packaging with MSI installer for winget compatibility
+  - Now creates proper MSI installer using PSMSI module
+  - MSI installs to Program Files with Start Menu shortcut
+  - Supports proper uninstallation through Windows Add/Remove Programs
+  - Enables future submission to winget-pkgs repository
+  - Updated all publish script references from ZIP to MSI
+  - Installer manifest now uses `InstallerType: msi` instead of `zip`
 - Enhanced publish script to include release commit link in GitHub release notes
   - Release notes now include a direct link to the actual branch commit
   - Makes it easier to trace releases back to their source commits

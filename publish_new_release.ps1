@@ -8,18 +8,18 @@ This script performs the following actions:
 2. Bumps the version (patch, then minor, then major, with rollover at .9 for patch/minor).
 3. Takes publisher name as input.
 4. Automatically determines author name from existing locale manifest or defaults to publisher name.
-5. Packages the necessary files into a ZIP archive, storing it locally in './releases_archive/'.
-6. Calculates the SHA256 hash of the ZIP archive.
+5. Packages the necessary files into an MSI installer, storing it locally in './releases_archive/'.
+6. Calculates the SHA256 hash of the MSI installer.
 7. Generates a multi-file winget manifest for the new version in the './manifests' directory.
 8. Checks if CHANGELOG.md contains an entry for the new version; exits if not.
-9. Stages README.md, CHANGELOG.md, and the new manifest files using Git (ZIPs are not committed).
+9. Stages README.md, CHANGELOG.md, and the new manifest files using Git (MSI files are not committed).
 10. Commits the staged files with a message "Release vX.Y.Z".
 11. Pushes the commit to the remote repository.
 12. Creates a GitHub Tag and Release using 'gh' CLI.
-13. Uploads the locally created ZIP as an asset to the GitHub Release.
+13. Uploads the locally created MSI as an asset to the GitHub Release.
 14. Updates the local installer manifest with the public URL of the uploaded asset.
 15. Commits and pushes the updated installer manifest.
-16. Rotates local ZIP archives in './releases_archive/', keeping the latest 10.
+16. Rotates local MSI installers in './releases_archive/', keeping the latest 10.
 
 .PARAMETER PackageIdentifier
 (Required) The winget package identifier (e.g., YourGitHubUser.UpdateLoxone).
@@ -50,8 +50,8 @@ BEFORE RUNNING THIS SCRIPT:
 .NOTES
 The script automates most of the release process.
 If any Git or GitHub CLI step fails, you may need to perform subsequent steps manually.
-Local ZIP archives are stored in './releases_archive/' and rotated (default: keep 10).
-ZIP files themselves are NOT committed to the Git repository; they are uploaded to GitHub Releases.
+Local MSI installers are stored in './releases_archive/' and rotated (default: keep 10).
+MSI files themselves are NOT committed to the Git repository; they are uploaded to GitHub Releases.
 #>
 [CmdletBinding()]
 [CmdletBinding()]
@@ -299,7 +299,7 @@ function Limit-LocalReleaseArchives {
         Write-Host "Archive directory '$ArchiveDirectory' does not exist. Skipping rotation."
         return
     }
-    $archives = @(Get-ChildItem -Path $ArchiveDirectory -Filter "UpdateLoxone-v*.zip" | Sort-Object -Property Name -Descending)
+    $archives = @(Get-ChildItem -Path $ArchiveDirectory -Filter "UpdateLoxone-v*.msi" | Sort-Object -Property Name -Descending)
     if ($archives.Count -gt $KeepCount) {
         $archivesToRemove = $archives | Select-Object -Skip $KeepCount
         foreach ($archiveToRemove in $archivesToRemove) {
@@ -513,21 +513,85 @@ if (-not (Test-Path $releasesArchiveDir)) {
     Write-Host "Creating local releases archive directory: $releasesArchiveDir"
     New-Item -ItemType Directory -Path $releasesArchiveDir | Out-Null
 }
-$zipFileName = "UpdateLoxone-v$ScriptVersion.zip"
-$zipFilePath = Join-Path -Path $releasesArchiveDir -ChildPath $zipFileName
 
-# --- Create ZIP Archive ---
-$filesToZip = @(
-    ".\UpdateLoxone.ps1", ".\LoxoneUtils", ".\ms.png", ".\nok.png", ".\ok.png",
-    ".\UpdateLoxoneMSList.txt.example", ".\Send-GoogleChat.ps1", ".\README.md", ".\CHANGELOG.md"
-)
-Write-Host "Creating ZIP archive: $zipFilePath..."
-Compress-Archive -Path $filesToZip -DestinationPath $zipFilePath -Force
-Write-Host "Successfully created ZIP archive: $zipFilePath"
+# --- Create MSI Package ---
+Write-Host "Checking for PSMSI module..."
+if (-not (Get-Module -ListAvailable -Name PSMSI)) {
+    Write-Host "Installing PSMSI module..."
+    Install-Module -Name PSMSI -Force -Scope CurrentUser
+}
+Import-Module PSMSI -Force
+
+$msiFileName = "UpdateLoxone-v$ScriptVersion.msi"
+$msiFilePath = Join-Path -Path $releasesArchiveDir -ChildPath $msiFileName
+
+Write-Host "Creating MSI installer: $msiFilePath..."
+try {
+    # Create a stable UpgradeCode (same for all versions of this product)
+    $upgradeCode = '1a73a1be-50e6-4e92-af03-586f4a9d9e82'
+    
+    # Create MSI
+    New-Installer -ProductName $script:PackageName `
+        -UpgradeCode $upgradeCode `
+        -Version $ScriptVersion `
+        -Manufacturer $script:PublisherName `
+        -Description "Automatically checks for Loxone Config updates, downloads, installs them, and updates Miniservers." `
+        -RequiresElevation `
+        -Content {
+            # Install to Program Files
+            New-InstallerDirectory -PredefinedDirectory "ProgramFilesFolder" -Content {
+                New-InstallerDirectory -DirectoryName $script:PackageName -Content {
+                    # Main script
+                    New-InstallerFile -Source (Join-Path $PSScriptRoot "UpdateLoxone.ps1")
+                    
+                    # Modules folder
+                    New-InstallerDirectory -DirectoryName "LoxoneUtils" -Content {
+                        Get-ChildItem (Join-Path $PSScriptRoot "LoxoneUtils\*.ps*") | ForEach-Object {
+                            New-InstallerFile -Source $_.FullName
+                        }
+                    }
+                    
+                    # Assets
+                    New-InstallerFile -Source (Join-Path $PSScriptRoot "ms.png")
+                    New-InstallerFile -Source (Join-Path $PSScriptRoot "ok.png")
+                    New-InstallerFile -Source (Join-Path $PSScriptRoot "nok.png")
+                    
+                    # Documentation
+                    New-InstallerFile -Source (Join-Path $PSScriptRoot "README.md")
+                    New-InstallerFile -Source (Join-Path $PSScriptRoot "CHANGELOG.md")
+                    
+                    # Example config
+                    New-InstallerFile -Source (Join-Path $PSScriptRoot "UpdateLoxoneMSList.txt.example")
+                    
+                    # Google Chat script if it exists
+                    $googleChatScript = Join-Path $PSScriptRoot "Send-GoogleChat.ps1"
+                    if (Test-Path $googleChatScript) {
+                        New-InstallerFile -Source $googleChatScript
+                    }
+                }
+            }
+            
+            # Create Start Menu shortcut
+            New-InstallerDirectory -PredefinedDirectory "ProgramMenuFolder" -Content {
+                New-InstallerDirectory -DirectoryName $script:PackageName -Content {
+                    New-InstallerShortcut -Name $script:PackageName `
+                        -Target "powershell.exe" `
+                        -Arguments "-ExecutionPolicy Bypass -File `"[ProgramFilesFolder]$script:PackageName\UpdateLoxone.ps1`"" `
+                        -WorkingDirectory "[ProgramFilesFolder]$script:PackageName" `
+                        -Description "Automatically update Loxone software"
+                }
+            }
+        } -OutputDirectory $releasesArchiveDir
+    
+    Write-Host "Successfully created MSI installer: $msiFilePath"
+} catch {
+    Write-Error "Failed to create MSI installer: $($_.Exception.Message)"
+    exit 1
+}
 
 # --- Calculate SHA256 Hash ---
-Write-Host "Calculating SHA256 hash for $zipFilePath..."
-$fileHash = Get-FileHash -Path $zipFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+Write-Host "Calculating SHA256 hash for $msiFilePath..."
+$fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
 Write-Host "SHA256 Hash: $fileHash"
 
 # --- Create Manifests ---
@@ -572,15 +636,12 @@ $installerManifestContent = @"
 PackageIdentifier: $PackageIdentifier
 PackageVersion: $ScriptVersion
 InstallerLocale: en-US
-InstallerType: zip
-NestedInstallerType: portable
-NestedInstallerFiles:
-  - RelativeFilePath: UpdateLoxone.ps1
-    PortableCommandAlias: UpdateLoxone.ps1
+InstallerType: msi
 Installers:
   - Architecture: x64
-    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/$zipFileName 
+    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/$msiFileName 
     InstallerSha256: $fileHash
+    ProductCode: '{00000000-0000-0000-0000-000000000000}'
 ManifestType: installer
 ManifestVersion: 1.6.0
 "@
@@ -619,7 +680,7 @@ try {
     git add -f $versionManifestPath
     git add -f $localeManifestPath
     git add -f $installerManifestPath
-    # Note: ZIP file is NOT added to Git
+    # Note: MSI file is NOT added to Git
 
     Write-Host "Committing initial release files with message: '$commitMessage'..."
     Write-Host "Committing initial release files with message: '$commitMessage'..."
@@ -690,16 +751,16 @@ try {
             }
         }
         
-        Write-Host "Uploading '$zipFileName' from '$zipFilePath' to GitHub Release '$tagName'..."
-        gh release upload $tagName $zipFilePath --clobber
+        Write-Host "Uploading '$msiFileName' from '$msiFilePath' to GitHub Release '$tagName'..."
+        gh release upload $tagName $msiFilePath --clobber
         Write-Host "Asset upload successful."
 
-        $InstallerUrl = "https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$zipFileName"
+        $InstallerUrl = "https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
         Write-Host "Constructed InstallerUrl: $InstallerUrl"
 
         Write-Host "Updating installer manifest '$installerManifestRelativePath' with new URL..."
         $installerContent = Get-Content $installerManifestPath -Raw
-        $placeholderUrl = "REPLACE_WITH_PUBLIC_URL_TO/$zipFileName"
+        $placeholderUrl = "REPLACE_WITH_PUBLIC_URL_TO/$msiFileName"
         $updatedInstallerContent = $installerContent -replace [regex]::Escape($placeholderUrl), $InstallerUrl
         Set-Content -Path $installerManifestPath -Value $updatedInstallerContent -Encoding UTF8
         Write-Host "Installer manifest updated."
@@ -722,7 +783,7 @@ try {
         Write-Host "All Git and GitHub operations completed successfully."
     } else {
             Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
-            Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$zipFileName"
+            Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
             Write-Host "DRY RUN: Installer manifest at '$installerManifestPath' still contains placeholder URL."
         }
 } catch {
