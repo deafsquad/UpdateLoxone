@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.6] - 2025-07-19 07:29:58
+## [0.4.7] - 2025-07-19 22:26:49
 ### Fixed
 - Added comprehensive carriage return protection to publish script
   - All version strings are now sanitized when read from manifests, state files, or CHANGELOG
@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CHANGELOG parsing handles version headers with embedded carriage returns
   - Prevents version string corruption that could break release process
   - Ensures consistent version formatting across all script operations
+
+### Changed
+- Simplified release process to single-push approach
+  - Eliminated second commit/push for installer URL update
+  - Uses predictable GitHub release URL pattern in manifests
+  - Creates and pushes tag with the release commit
+  - Removed redundant commit link from release notes
+  - Cleaner, more atomic release process
+
+## [0.4.6] - 2025-07-19 07:29:58
+### Fixed
+- Test coverage enforcement compliance
+  - Added workaround for Get-ScheduledTask timeout issue in PowerShell 7
+  - Fixed test runner to properly handle CI mode with live progress
+  - Resolved duplicate test execution in coverage mode
 
 ## [0.4.5] - 2025-07-19 06:29:23
 ### Added

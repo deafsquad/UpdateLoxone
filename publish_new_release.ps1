@@ -1066,6 +1066,10 @@ ManifestVersion: 1.6.0
 "@
 Set-Content -Path $localeManifestPath -Value $localeManifestContent -Encoding UTF8
 
+# Construct the predictable GitHub release URL
+$InstallerUrl = "https://github.com/$script:PublisherName/$script:PackageName/releases/download/v$ScriptVersion/$msiFileName"
+Write-Host "Using predictable installer URL: $InstallerUrl" -ForegroundColor Cyan
+
 $installerManifestContent = @"
 PackageIdentifier: $PackageIdentifier
 PackageVersion: $ScriptVersion
@@ -1073,7 +1077,7 @@ InstallerLocale: en-US
 InstallerType: msi
 Installers:
   - Architecture: x64
-    InstallerUrl: REPLACE_WITH_PUBLIC_URL_TO/$msiFileName 
+    InstallerUrl: $InstallerUrl
     InstallerSha256: $fileHash
     ProductCode: '{00000000-0000-0000-0000-000000000000}'
 ManifestType: installer
@@ -1117,14 +1121,15 @@ try {
         
         # Check if it's been pushed
         if ((-not $script:ResumeState.ContainsKey("commit_pushed") -or $script:ResumeState.commit_pushed -ne "true") -and -not $DryRun) {
-            Write-Host "Commit not yet pushed, attempting push..." -ForegroundColor Yellow
-            git push
+            Write-Host "Commit/tag not yet pushed, attempting push..." -ForegroundColor Yellow
+            git push --follow-tags
             if ($LASTEXITCODE -eq 0) {
                 Set-ReleaseState -Key "commit_pushed" -Value "true"
-                Write-Host "Git push successful." -ForegroundColor Green
+                Set-ReleaseState -Key "tag_pushed" -Value "true"
+                Write-Host "Git push successful (commit and tag)." -ForegroundColor Green
             } else {
                 Write-Error "Git push failed with exit code: $LASTEXITCODE"
-                Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current)"
+                Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current) --follow-tags"
                 exit 1
             }
         }
@@ -1186,20 +1191,30 @@ try {
     $releaseCommitHash = git rev-parse HEAD
     Write-Host "Release commit hash: $releaseCommitHash"
     
+    # Create the tag locally
+    Write-Host "Creating local tag: $tagName"
+    git tag $tagName
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to create tag $tagName"
+        exit 1
+    }
+    
     # Save commit state
     Set-ReleaseState -Key "commit_created" -Value "true"
     Set-ReleaseState -Key "commit_hash" -Value $releaseCommitHash
+    Set-ReleaseState -Key "tag_created" -Value "true"
     
     if (-not $DryRun) {
-        Write-Host "Pushing initial commit to remote repository..."
-        git push
+        Write-Host "Pushing commit and tag to remote repository..."
+        git push --follow-tags
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Git push failed with exit code: $LASTEXITCODE"
-            Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current)"
+            Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current) --follow-tags"
             exit 1
         }
-        Write-Host "Initial Git push successful."
+        Write-Host "Git push successful (commit and tag)." -ForegroundColor Green
         Set-ReleaseState -Key "commit_pushed" -Value "true"
+        Set-ReleaseState -Key "tag_pushed" -Value "true"
     }
     } # End of commit creation if/else block
     
@@ -1242,13 +1257,11 @@ try {
         
         $releaseNotesBody = Get-ChangelogNotesForVersion @getNotesParams
         
-        # Add commit link to release notes
-        $repoUrl = "https://github.com/$script:PublisherName/$script:PackageName"
-        $commitUrl = "$repoUrl/commit/$releaseCommitHash"
+        # Use release notes as-is (no commit link needed with single-push approach)
         $enhancedReleaseNotes = if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
-            "Automated release of version $ScriptVersion. See CHANGELOG.md for details.`n`n**Release Commit:** $commitUrl"
+            "Automated release of version $ScriptVersion. See CHANGELOG.md for details."
         } else {
-            "$releaseNotesBody`n`n---`n**Release Commit:** $commitUrl"
+            $releaseNotesBody
         }
         
         $tempNotesFilePath = Join-Path -Path $PSScriptRoot -ChildPath "temp_release_notes.md" # Or use $env:TEMP
@@ -1283,41 +1296,15 @@ try {
         Write-Host "Asset upload successful."
         Set-ReleaseState -Key "asset_uploaded" -Value "true"
         } # End of release creation block
-
-        $InstallerUrl = "https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
-        Write-Host "Constructed InstallerUrl: $InstallerUrl"
-
-        Write-Host "Updating installer manifest '$installerManifestRelativePath' with new URL..."
-        $installerContent = Get-Content $installerManifestPath -Raw
-        $placeholderUrl = "REPLACE_WITH_PUBLIC_URL_TO/$msiFileName"
-        $updatedInstallerContent = $installerContent -replace [regex]::Escape($placeholderUrl), $InstallerUrl
-        Set-Content -Path $installerManifestPath -Value $updatedInstallerContent -Encoding UTF8
-        Write-Host "Installer manifest updated."
-
-        Write-Host "Staging updated installer manifest..."
-        git add -f $installerManifestPath
         
-        $commitMessageUrlUpdate = "Update installer URL for v$ScriptVersion"
-        Write-Host "Committing updated installer manifest with message: '$commitMessageUrlUpdate'..."
-        git commit -m $commitMessageUrlUpdate
-        
-        Write-Host "Pushing updated installer manifest to remote repository..."
-        git push
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Git push for installer manifest failed with exit code: $LASTEXITCODE"
-            Write-Error "The release was created but the installer manifest update could not be pushed."
-            Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current)"
-            exit 1
-        }
         Write-Host "All Git and GitHub operations completed successfully."
         
         # Clean up state file on successful completion
         Clear-ReleaseState
         Write-Host "Release state cleared." -ForegroundColor Green
     } else {
-        Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
-        Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
-        Write-Host "DRY RUN: Installer manifest at '$installerManifestPath' still contains placeholder URL."
+        Write-Host "DRY RUN: Skipping git push, GitHub release creation, and asset upload."
+        Write-Host "DRY RUN: Installer manifest already contains the correct URL: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
     }
 } catch {
     Write-Warning "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
