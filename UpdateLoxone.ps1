@@ -1050,6 +1050,14 @@ if (-not $script:ErrorOccurred) {
                 $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.TargetVersion } else { $targetInfo.TargetVersion }
                 $line = "✓ " + $targetNameDisplay + " " + $displayVersion + " (cached)" 
             }
+            "InstallSuccessful"             { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.VersionAfterUpdate } else { $targetInfo.VersionAfterUpdate }
+                $line = "✓ " + $targetNameDisplay + " " + $displayVersion 
+            }
+            "UpdateSuccessful"              { 
+                $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.VersionAfterUpdate } else { $targetInfo.VersionAfterUpdate }
+                $line = "✓ " + $targetNameDisplay + " " + $displayVersion 
+            }
             default {
                 if ($targetInfo.Status -like "*Failed*") { # More generic check for failure statuses
                     $reason = ($targetInfo.Status -split '\(|\)')[1]

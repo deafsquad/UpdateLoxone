@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2025-07-19 06:29:23
+### Added
+- Resumability feature for release script
+  - Added state tracking system using `.release-progress` file
+  - Script can now resume from any interruption point
+  - Automatic detection of completed steps (tests, CHANGELOG, MSI creation, etc.)
+  - Environment variable `RESUME_RELEASE=true` for CI/automation
+  - Proper cleanup of state file on successful completion
+
+### Fixed
+- Fixed missing App version in final update notification
+  - Added cases for "InstallSuccessful" and "UpdateSuccessful" statuses
+  - Final summary now correctly shows "✓ APP (InternalV2) 2025.7.18.0" instead of "🔄 APP (InternalV2)"
+- Fixed test runner Count property errors under strict mode
+  - Added null checks before accessing .Count properties throughout test runner
+  - Tests now run successfully when called from publish script with strict mode enabled
+- Fixed GitHub release creation being skipped when resuming
+  - Moved release creation logic outside of commit creation block
+  - Release creation now runs regardless of resume state
+
 ## [0.4.4] - 2025-07-19 02:53:24
 ### Added
 - Dry run version management improvements

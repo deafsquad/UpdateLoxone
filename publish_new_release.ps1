@@ -389,8 +389,8 @@ $localeManifestPathForAuthorDetection = Join-Path -Path $finalManifestDir -Child
 # --- Determine and Bump Version ---
 if ($script:IsResuming -and $script:ResumeState.version) {
     # Use the version from the saved state
-    $ScriptVersion = $script:ResumeState.version
-    $currentVersion = $script:ResumeState.current_version
+    $ScriptVersion = $script:ResumeState.version.Trim()
+    $currentVersion = if ($script:ResumeState.current_version) { $script:ResumeState.current_version.Trim() } else { "0.0.0" }
     Write-Host "Resuming with version: $ScriptVersion (current: $currentVersion)" -ForegroundColor Yellow
 } else {
     $currentVersion = Get-CurrentVersion -BaseManifestPath $versionManifestPathForVersionDetection
@@ -425,7 +425,7 @@ $AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthor
 Write-Host "Starting release process for $script:PackageName version $ScriptVersion (Author: $AuthorName)..."
 
 # --- Run Tests First ---
-if ($script:IsResuming -and $script:ResumeState.tests_completed -eq "true") {
+if ($script:IsResuming -and $script:ResumeState.ContainsKey("tests_completed") -and $script:ResumeState.tests_completed -eq "true") {
     Write-Host "Tests were already completed in previous run, skipping..." -ForegroundColor Green
 } elseif ($SkipTests) {
     Write-Warning "SKIPPING TESTS - This is not recommended for production releases!"
@@ -451,37 +451,38 @@ try {
     $testOutput = $null
     $testError = $null
     
-    # Run the test script - use sequential runs to avoid the "All" test type issues
-    Write-Host "Running tests sequentially to avoid context issues..." -ForegroundColor Cyan
+    # Run all tests at once
+    Write-Host "Running all tests (Unit, Integration, System)..." -ForegroundColor Cyan
     
     $testExitCode = 0
-    $testOutput = @()
     
-    # Run each test type separately
-    $testTypes = @('Unit', 'Integration', 'System')
-    
-    foreach ($testType in $testTypes) {
-        Write-Host "Running $testType tests..." -ForegroundColor Cyan
+    try {
+        # Run test script in a separate process to avoid strict mode and transcript issues
+        Write-Host "DEBUG: Running test script: $testScriptPath" -ForegroundColor Yellow
+        Write-Host "DEBUG: Current directory: $(Get-Location)" -ForegroundColor Yellow
         
-        try {
-            # Run test type and capture exit code
-            Write-Host "DEBUG: Running test script: $testScriptPath" -ForegroundColor Yellow
-            Write-Host "DEBUG: Current directory: $(Get-Location)" -ForegroundColor Yellow
-            
-            # Run test script in a separate scope to avoid strict mode issues
-            $testResult = & {
-                param($ScriptPath, $TestType)
-                $ErrorActionPreference = 'Continue'
-                & $ScriptPath -TestType $TestType -CI -LogToFile
-                return $LASTEXITCODE
-            } -ScriptPath $testScriptPath -TestType $testType
-            
-            if ($testResult -ne 0) {
-                Write-Warning "$testType tests failed with exit code: $testResult"
-                $testExitCode = $testResult
-                break
-            }
-        } catch {
+        # Use Start-Process to run in a completely separate process
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName = "powershell.exe"
+        $pinfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$testScriptPath`" -TestType All -Coverage -CI -LiveProgress -LogToFile"
+        $pinfo.UseShellExecute = $false
+        $pinfo.RedirectStandardOutput = $false
+        $pinfo.RedirectStandardError = $false
+        $pinfo.WorkingDirectory = $PSScriptRoot
+        
+        $p = New-Object System.Diagnostics.Process
+        $p.StartInfo = $pinfo
+        $p.Start() | Out-Null
+        $p.WaitForExit()
+        
+        $testExitCode = $p.ExitCode
+        
+        if ($testExitCode -ne 0) {
+            Write-Warning "Tests failed with exit code: $testExitCode"
+        } else {
+            Write-Host "All tests passed successfully!" -ForegroundColor Green
+        }
+    } catch {
             Write-Host "DEBUG: Caught exception in test execution" -ForegroundColor Red
             Write-Host "DEBUG: Exception type: $($_.Exception.GetType().FullName)" -ForegroundColor Red
             Write-Host "DEBUG: Exception message: $($_.Exception.Message)" -ForegroundColor Red
@@ -491,26 +492,11 @@ try {
                 Write-Host "DEBUG: Full error details:" -ForegroundColor Red
                 Write-Host $_.Exception.ToString() -ForegroundColor Red
             }
-            Write-Error "Error running $testType tests: $_"
+            Write-Error "Error running tests: $_"
             $testExitCode = 1
-            break
         }
-    }
     
-    # If all test types passed, run coverage analysis
-    if ($testExitCode -eq 0) {
-        Write-Host "All tests passed. Running coverage analysis..." -ForegroundColor Green
-        try {
-            # Run coverage analysis in a separate scope
-            & {
-                param($ScriptPath)
-                $ErrorActionPreference = 'Continue'
-                & $ScriptPath -TestType Unit -Coverage -CI -LogToFile
-            } -ScriptPath $testScriptPath
-        } catch {
-            Write-Warning "Coverage analysis failed but tests passed: $_"
-        }
-    }
+    # Coverage is already included in the main test run with -TestType All
     
     # Check for errors in output
     Write-Host "DEBUG: Checking for errors in output..." -ForegroundColor Cyan
@@ -635,7 +621,7 @@ if (-not (Test-Path $changelogPath)) {
     exit 1
 }
 
-if ($script:IsResuming -and $script:ResumeState.changelog_updated -eq "true") {
+if ($script:IsResuming -and $script:ResumeState.ContainsKey("changelog_updated") -and $script:ResumeState.changelog_updated -eq "true") {
     Write-Host "CHANGELOG was already updated in previous run, skipping..." -ForegroundColor Green
     $changelogUpdatedByScript = $true
 } else {
@@ -759,17 +745,17 @@ Import-Module PSMSI -Force
 $msiFileName = "UpdateLoxone-v$ScriptVersion.msi"
 $msiFilePath = Join-Path -Path $releasesArchiveDir -ChildPath $msiFileName
 
-if ($script:IsResuming -and $script:ResumeState.msi_created -eq "true" -and (Test-Path $msiFilePath)) {
-    Write-Host "MSI installer already exists from previous run, skipping creation..." -ForegroundColor Green
-    # Load the hash from state
-    if ($script:ResumeState.msi_hash) {
-        $fileHash = $script:ResumeState.msi_hash
-        Write-Host "Using saved SHA256 hash: $fileHash" -ForegroundColor Gray
-    } else {
-        # Recalculate if not in state
-        Write-Host "Recalculating SHA256 hash..." -ForegroundColor Yellow
-        $fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
-    }
+if ($script:IsResuming -and $script:ResumeState.ContainsKey("msi_created") -and $script:ResumeState.msi_created -eq "true" -and (Test-Path -LiteralPath $msiFilePath)) {
+        Write-Host "MSI installer already exists from previous run, skipping creation..." -ForegroundColor Green
+        # Load the hash from state
+        if ($script:ResumeState.msi_hash) {
+            $fileHash = $script:ResumeState.msi_hash
+            Write-Host "Using saved SHA256 hash: $fileHash" -ForegroundColor Gray
+        } else {
+            # Recalculate if not in state
+            Write-Host "Recalculating SHA256 hash..." -ForegroundColor Yellow
+            $fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+        }
 } else {
     Write-Host "Creating MSI installer: $msiFilePath..."
     try {
@@ -953,21 +939,35 @@ if ($script:IsResuming -and $script:ResumeState.msi_created -eq "true" -and (Tes
     #>
     
     # PSMSI creates files with pattern: ProductName.Version.Architecture.msi
-    $actualMsiPath = Join-Path $releasesArchiveDir "$script:PackageName.$ScriptVersion.x86.msi"
+    try {
+        # PSMSI creates files with pattern: ProductName.Version.Architecture.msi
+        $actualMsiPath = Join-Path $releasesArchiveDir "$script:PackageName.$ScriptVersion.x86.msi"
     
     # Rename to our expected filename
-    if (Test-Path $actualMsiPath) {
+    if (Test-Path -LiteralPath $actualMsiPath) {
         Move-Item -Path $actualMsiPath -Destination $msiFilePath -Force
-        Write-Host "Successfully created MSI installer: $msiFilePath"
+        Write-Host "Successfully found and renamed MSI installer: $msiFilePath"
     } else {
         # Check for x64 version
         $actualMsiPath = Join-Path $releasesArchiveDir "$script:PackageName.$ScriptVersion.x64.msi"
-        if (Test-Path $actualMsiPath) {
+        
+        if (Test-Path -LiteralPath $actualMsiPath) {
             Move-Item -Path $actualMsiPath -Destination $msiFilePath -Force
             Write-Host "Successfully created MSI installer: $msiFilePath"
         } else {
-            throw "MSI file not found after creation. Expected pattern: $script:PackageName.$ScriptVersion.*.msi"
+            # More detailed error with actual files found
+            $foundMsis = Get-ChildItem -Path $releasesArchiveDir -Filter "*.msi" | Select-Object -ExpandProperty Name
+            if ($foundMsis) {
+                throw "ERROR: Could not find MSI package created by PSMSI. Expected $script:PackageName.$ScriptVersion.x86.msi or x64.msi but found: $($foundMsis -join ', ')"
+            } else {
+                throw "ERROR: No MSI files found in archive directory. PSMSI may have failed to create the installer."
+            }
         }
+    }
+    
+    } catch {
+        Write-Error "Error during MSI file detection: $($_.Exception.Message)"
+        throw
     }
     
     # Clean up WiX intermediate files
@@ -1009,7 +1009,7 @@ $versionManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIde
 $localeManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.locale.en-US.yaml"
 $installerManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.installer.yaml"
 
-if ($script:IsResuming -and $script:ResumeState.manifests_created -eq "true") {
+if ($script:IsResuming -and $script:ResumeState.ContainsKey("manifests_created") -and $script:ResumeState.manifests_created -eq "true") {
     Write-Host "Manifests were already created in previous run, skipping..." -ForegroundColor Green
 } else {
     $currentDate = Get-Date -Format "yyyy-MM-dd"
@@ -1089,7 +1089,7 @@ $installerManifestRelativePath = $installerManifestPath.Replace($PSScriptRoot, "
 
 try {
     # Check if we've already committed
-    if ($script:IsResuming -and $script:ResumeState.commit_created -eq "true") {
+    if ($script:IsResuming -and $script:ResumeState.ContainsKey("commit_created") -and $script:ResumeState.commit_created -eq "true") {
         Write-Host "Release commit was already created in previous run..." -ForegroundColor Green
         $releaseCommitHash = $script:ResumeState.commit_hash
         Write-Host "Using saved commit hash: $releaseCommitHash" -ForegroundColor Gray
@@ -1117,15 +1117,21 @@ try {
         $untrackedFiles | ForEach-Object { Write-Host "  - $_" }
         
         if (-not $DryRun) {
-            Write-Host "`nDo you want to include these files in the release? (Y/N)" -ForegroundColor Cyan
-            $response = Read-Host
-            
-            if ($response -ne 'Y' -and $response -ne 'y') {
-                Write-Host "Aborting release. Please handle untracked files manually:" -ForegroundColor Yellow
-                Write-Host "  - Add them to .gitignore if they should be ignored"
-                Write-Host "  - Delete them if they're temporary files"
-                Write-Host "  - Commit them separately if they're needed but not for this release"
-                exit 1
+            # In CI/automated mode, skip untracked files prompt
+            if ($env:RESUME_RELEASE -eq 'true' -or $script:IsResuming) {
+                Write-Host "CI/Automated mode: Ignoring untracked files (not including them in release)" -ForegroundColor Yellow
+                # Don't exit, just continue without including untracked files
+            } else {
+                Write-Host "`nDo you want to include these files in the release? (Y/N)" -ForegroundColor Cyan
+                $response = Read-Host
+                
+                if ($response -ne 'Y' -and $response -ne 'y') {
+                    Write-Host "Aborting release. Please handle untracked files manually:" -ForegroundColor Yellow
+                    Write-Host "  - Add them to .gitignore if they should be ignored"
+                    Write-Host "  - Delete them if they're temporary files"
+                    Write-Host "  - Commit them separately if they're needed but not for this release"
+                    exit 1
+                }
             }
         } else {
             Write-Host "DRY RUN: Would prompt about untracked files" -ForegroundColor Gray
@@ -1173,10 +1179,15 @@ try {
         }
         Write-Host "Initial Git push successful."
         Set-ReleaseState -Key "commit_pushed" -Value "true"
+    }
+    } # End of commit creation if/else block
+    
+    # --- GitHub Release Creation (runs regardless of resume state) ---
+    if (-not $DryRun) {
         Write-Host "---"
         
         # Check if release already exists
-        if ($script:IsResuming -and $script:ResumeState.release_created -eq "true") {
+        if ($script:IsResuming -and $script:ResumeState.ContainsKey("release_created") -and $script:ResumeState.release_created -eq "true") {
             Write-Host "GitHub release was already created in previous run..." -ForegroundColor Green
             
             # Check if asset was uploaded
@@ -1283,11 +1294,10 @@ try {
         Clear-ReleaseState
         Write-Host "Release state cleared." -ForegroundColor Green
     } else {
-            Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
-            Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
-            Write-Host "DRY RUN: Installer manifest at '$installerManifestPath' still contains placeholder URL."
-        }
-    } # End of else block for non-resuming path
+        Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
+        Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
+        Write-Host "DRY RUN: Installer manifest at '$installerManifestPath' still contains placeholder URL."
+    }
 } catch {
     Write-Warning "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
     Write-Warning "Please review the Git status and GitHub releases, then perform any remaining steps manually."
