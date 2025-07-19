@@ -1,9 +1,80 @@
 # Changelog
 
+## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER
+### Added
+- Automated commit squashing for cleaner release history
+  - Automatically detects and combines all unpushed commits into a single release commit
+  - Uses git soft reset for reliable commit combining
+  - Eliminates manual squashing steps and potential errors
+  - Maintains clean, single-commit releases in git history
+
+### Changed
+- Enhanced handling of uncommitted changes in publish script
+  - Script now detects uncommitted changes before starting release process
+  - Offers interactive options to include changes in release, commit separately, or abort
+  - Prevents accidental commits from being created without user awareness
+  - Ensures all changes are intentionally included in releases
+
+### Added
+- AI-assisted changelog verification workflow
+  - Automatically generates prompts for AI review of commit messages vs CHANGELOG
+  - Verifies all commits are properly documented in CHANGELOG
+  - Saves prompt to temporary file for manual AI interaction
+  - Processes AI responses to update CHANGELOG with missing entries
+  - Ensures comprehensive documentation of all changes before release
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.5.0] - 2025-07-20 00:22:58
+### Fixed
+- Fixed test categorization discrepancy in test runner
+  - Unit tests with "System" in filename were incorrectly categorized as System tests
+  - Test discovery showed System=8 but only 6 were actual System tests (2 were Unit tests)
+  - Updated categorization logic to check folder path before filename pattern
+  - Now correctly excludes Unit folder files from System test categorization
+  - Consistent categorization priority: Tags > Folder Path > Filename Pattern
+- Fixed git diff syntax error in publish script
+  - Changed from incorrect `origin/branch...HEAD` to correct `origin/branch..HEAD`
+  - Prevented script from continuing with broken state when commands fail
+
+### Added
+- Comprehensive error handling for ALL commands in publish script
+  - Every git command now checks $LASTEXITCODE
+  - Every gh (GitHub CLI) command has error handling
+  - File operations (Get-Content) use -ErrorAction Stop
+  - Script exits immediately on any command failure
+  - Clear error messages indicate exactly what failed
+  - Prevents silent failures and broken release states
+
+### Changed
+- Improved automated commit squashing in publish script
+  - Removed manual prompt for squashing - now automatically combines commits
+  - Integrated Claude CLI for automatic changelog verification
+  - Uses `claude -p` command with piped input for seamless integration
+  - Falls back gracefully if Claude CLI is not available
+  - Eliminates manual copy-paste step for AI verification
+
+### Added
+- Comprehensive changelog generation with full git diff analysis
+  - Claude now receives complete git diff from origin/master to HEAD
+  - Analyzes actual code changes, not just commit messages
+  - Ensures 100% coverage of all changes in the changelog
+  - Generates complete Unreleased section from scratch
+  - Captures changes that might be missed in commit messages
+  - No size limits - sends full diff for complete analysis
+  - Proper error handling with exit on Claude failures
+  - Saves prompt to file on error for manual processing
+
+## [0.4.9] - 2025-07-19 23:24:39
+### Changed
+- Allow release process to continue when CHANGELOG is empty but unpushed commits exist
+  - Script now recognizes that changes may be documented in commit messages
+  - AI verification will merge commit messages with CHANGELOG entries
+  - Prevents blocking releases when changes are in commits but not yet in CHANGELOG
+  - Supports mixed documentation workflow (some in CHANGELOG, some in commits)
 
 ## [0.4.8] - 2025-07-19 22:51:32
 ### Fixed

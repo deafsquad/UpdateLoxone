@@ -641,7 +641,7 @@ if ($script:IsResuming -and $script:ResumeState.ContainsKey("changelog_updated")
     $changelogUpdatedByScript = $true
 } else {
     $currentDateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $changelogLines = Get-Content $changelogPath
+    $changelogLines = Get-Content $changelogPath -ErrorAction Stop
     # Clean any carriage returns from all lines
     $changelogLines = $changelogLines | ForEach-Object { $_.TrimEnd() -replace '[\r]+', '' }
     $unreleasedHeaderPatternStrict = "^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER$" # Strict match for replacement
@@ -673,7 +673,12 @@ for ($i = 0; $i -lt $changelogLines.Length; $i++) {
 }
 
 # Re-read content after potential modification
-$changelogContent = Get-Content $changelogPath -Raw
+try {
+    $changelogContent = Get-Content $changelogPath -Raw -ErrorAction Stop
+} catch {
+    Write-Error "Failed to read CHANGELOG.md: $_"
+    exit 1
+}
 # Clean carriage returns from the content
 $changelogContent = $changelogContent -replace '[\r]+', ''
 $escapedVersionForRegex = [regex]::Escape($ScriptVersion)
@@ -708,9 +713,17 @@ if ($changelogUpdatedByScript) {
 
 # Final check: After all attempts to update, does an entry for $ScriptVersion exist?
 if (-not ($changelogContent -match $versionHeaderExactPattern)) {
+    # Check if we have unpushed commits that will be processed by AI
+    $currentBranch = git branch --show-current
+    $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
+    
     # For dry runs with auto-incremented versions, skip CHANGELOG requirement
     if ($DryRun -and $isDryRunAutoIncremented) {
         Write-Host "DRY RUN: Skipping CHANGELOG check for auto-incremented version $ScriptVersion" -ForegroundColor Yellow
+    } elseif ($unpushedCommits) {
+        Write-Host "CHANGELOG entry for version $ScriptVersion not found, but unpushed commits detected." -ForegroundColor Yellow
+        Write-Host "The AI changelog verification will handle this during commit processing." -ForegroundColor Green
+        $changelogUpdatedByScript = $false # Mark as not updated yet
     } else {
         Write-Error "CHANGELOG.md does not contain a valid entry for the new version $ScriptVersion after attempting updates."
         Write-Error "Please ensure an '## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER' section is at the top, or a specific '## [$ScriptVersion] ...' entry exists."
@@ -1112,7 +1125,226 @@ $readmeRelativePath = ".\README.md"
 $changelogRelativePath = ".\CHANGELOG.md"
 $installerManifestRelativePath = $installerManifestPath.Replace($PSScriptRoot, ".")
 
+# Initialize flags
+$script:CreateFreshCommit = $false
+
 try {
+    # Check for uncommitted changes first
+    $uncommittedChanges = git status --porcelain 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Git status failed: $uncommittedChanges"
+        Write-Error "Cannot determine repository state."
+        exit 1
+    }
+    
+    if ($uncommittedChanges) {
+        Write-Host "`nUncommitted changes detected:" -ForegroundColor Yellow
+        git status --short
+        Write-Host "`nThese changes will be included in the release commit." -ForegroundColor Green
+    }
+    
+    # Check for unpushed commits and handle changelog verification
+    $currentBranch = git branch --show-current
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($currentBranch)) {
+        Write-Error "Failed to get current branch name"
+        exit 1
+    }
+    
+    $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
+    # Note: git log returns exit code 0 even when no commits found, so we check the output instead
+    
+    if ($unpushedCommits -and -not $DryRun) {
+        Write-Host "`nFound unpushed commits that will be combined into the release:" -ForegroundColor Yellow
+        $unpushedCommits | ForEach-Object { Write-Host "  $_" }
+        
+        # Get detailed commit messages
+        $commitMessages = git log "origin/$currentBranch..HEAD" --pretty=format:"%s%n%n%b" --reverse
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to get commit messages"
+            exit 1
+        }
+        
+        # Get full diff from origin to current HEAD
+        Write-Host "Getting full diff from origin/$currentBranch to HEAD..." -ForegroundColor Gray
+        $gitDiff = git diff "origin/$currentBranch..HEAD" 2>&1
+        
+        # Check if git diff failed
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Git diff failed with exit code $LASTEXITCODE"
+            Write-Error "Error: $gitDiff"
+            Write-Error "Cannot proceed without diff analysis."
+            exit 1
+        }
+        
+        # Log diff size for diagnostics
+        $diffSizeKB = [Math]::Round($gitDiff.Length / 1024, 2)
+        Write-Host "Git diff size: $diffSizeKB KB" -ForegroundColor Gray
+        
+        # Read entire CHANGELOG
+        try {
+            $changelogContent = Get-Content $changelogPath -Raw -ErrorAction Stop
+        } catch {
+            Write-Error "Failed to read CHANGELOG.md for AI analysis: $_"
+            exit 1
+        }
+        
+        Write-Host "`nPreparing comprehensive changelog analysis..." -ForegroundColor Cyan
+        
+        # Create AI prompt with full context
+        $aiPrompt = @"
+You are creating a comprehensive CHANGELOG entry for all changes between the last published release and current development state.
+
+=== COMMIT MESSAGES ===
+$commitMessages
+
+=== CODE CHANGES (git diff) ===
+$gitDiff
+
+=== CURRENT CHANGELOG ===
+$changelogContent
+
+=== INSTRUCTIONS ===
+1. Analyze ALL changes shown in the git diff and commit messages
+2. Create a complete Unreleased section that captures ALL significant changes
+3. Follow Keep a Changelog format (https://keepachangelog.com/):
+   - Use ### Added, ### Changed, ### Fixed, ### Removed, ### Deprecated, ### Security sections as needed
+   - Write clear, user-facing descriptions (not technical implementation details)
+   - Group related changes together
+   - Use past tense
+   - Focus on WHAT changed and WHY it matters to users
+4. Include changes that are already in the current Unreleased section (consolidate everything)
+5. Do NOT include changes that are already documented in versioned releases
+
+IMPORTANT: You must capture ALL changes shown in the diff, not just what's in commit messages.
+
+RESPOND WITH:
+UPDATED_CHANGELOG
+## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER
+### Added
+- New features...
+
+### Changed
+- Changes to existing functionality...
+
+### Fixed
+- Bug fixes...
+
+(include all relevant sections)
+END_CHANGELOG
+"@
+
+        # Call Claude directly using CLI
+        Write-Host "`nCalling Claude to verify changelog..." -ForegroundColor Cyan
+        
+        try {
+            # Check if claude command is available
+            $claudeCmd = Get-Command claude -ErrorAction SilentlyContinue
+            if (-not $claudeCmd) {
+                Write-Warning "Claude CLI not found. Please install it or ensure it's in PATH."
+                Write-Host "Manual verification required. Saving prompt to file..." -ForegroundColor Yellow
+                $promptFile = Join-Path $PSScriptRoot "ai_changelog_prompt.txt"
+                Set-Content -Path $promptFile -Value $aiPrompt -Encoding UTF8
+                Write-Host "Prompt saved to: $promptFile" -ForegroundColor Green
+                Write-Host "Please manually verify with Claude and update CHANGELOG if needed." -ForegroundColor Yellow
+                $aiResponse = "NO_CHANGE_NEEDED"  # Default to no change if Claude not available
+            } else {
+                # Save prompt to temp file for piping
+                $tempPromptFile = Join-Path $env:TEMP "changelog_prompt_$(Get-Date -Format 'yyyyMMddHHmmss').txt"
+                Set-Content -Path $tempPromptFile -Value $aiPrompt -Encoding UTF8
+                
+                # Call Claude with the prompt
+                Write-Host "Querying Claude for changelog verification..." -ForegroundColor Gray
+                Write-Host "Prompt size: $([Math]::Round($aiPrompt.Length / 1024, 2)) KB" -ForegroundColor Gray
+                
+                # Capture both stdout and stderr
+                $claudeError = $null
+                $aiResponse = Get-Content $tempPromptFile -Raw | & claude -p 'Process this changelog verification request and respond EXACTLY as instructed' --output-format text 2>&1 | Out-String
+                
+                # Check if claude command failed
+                if ($LASTEXITCODE -ne 0) {
+                    $claudeError = $aiResponse
+                    throw "Claude command failed with exit code $LASTEXITCODE. Error: $claudeError"
+                }
+                
+                # Clean up temp file
+                if (Test-Path $tempPromptFile) {
+                    Remove-Item $tempPromptFile -Force
+                }
+                
+                if ([string]::IsNullOrWhiteSpace($aiResponse)) {
+                    throw "Claude returned empty response. This may indicate the prompt was too large or there was a processing error."
+                }
+            }
+        } catch {
+            Write-Error "Error calling Claude: $_"
+            Write-Host "Prompt size was: $([Math]::Round($aiPrompt.Length / 1024, 2)) KB" -ForegroundColor Yellow
+            Write-Host "Git diff size was: $diffSizeKB KB" -ForegroundColor Yellow
+            
+            # Save the prompt for manual processing
+            $errorPromptFile = Join-Path $PSScriptRoot "ai_changelog_prompt_error.txt"
+            Set-Content -Path $errorPromptFile -Value $aiPrompt -Encoding UTF8
+            Write-Host "Full prompt saved to: $errorPromptFile" -ForegroundColor Yellow
+            
+            Write-Error "Cannot proceed without changelog verification. Please:"
+            Write-Error "1. Check if prompt size is too large for Claude"
+            Write-Error "2. Manually process the prompt saved at: $errorPromptFile"
+            Write-Error "3. Update CHANGELOG.md manually and run the script again"
+            exit 1
+        }
+        
+        # Process AI response - we always expect an updated changelog with full diff analysis
+        if ($aiResponse -match '(?s)UPDATED_CHANGELOG(.*)END_CHANGELOG') {
+            $newChangelogSection = $matches[1].Trim()
+            Write-Host "`nUpdating CHANGELOG.md with comprehensive AI analysis..." -ForegroundColor Yellow
+            
+            # Replace the Unreleased section completely
+            if ($changelogContent -match '(?s)(.*?)(## \[Unreleased\][^#]*?)(## \[\d)') {
+                # Found Unreleased section followed by a version
+                $before = $matches[1]
+                $after = $matches[3]
+                $updatedChangelog = $before + $newChangelogSection + "`n`n" + $after
+            } elseif ($changelogContent -match '(?s)(.*?)(## \[Unreleased\].*)$') {
+                # Found Unreleased section at the end
+                $before = $matches[1]
+                $updatedChangelog = $before + $newChangelogSection
+            } else {
+                # No Unreleased section found, add it after the header
+                $updatedChangelog = $changelogContent -replace '(# Changelog.*?(?:\r?\n){2,})', "`$1$newChangelogSection`n`n"
+            }
+            
+            Set-Content -Path $changelogPath -Value $updatedChangelog -Encoding UTF8 -NoNewline
+            Write-Host "CHANGELOG.md updated with complete analysis of all changes." -ForegroundColor Green
+        }
+        else {
+            Write-Warning "Claude did not return expected UPDATED_CHANGELOG format."
+            Write-Warning "Response: $($aiResponse.Substring(0, [Math]::Min(200, $aiResponse.Length)))..."
+            Write-Host "Proceeding with existing CHANGELOG. You may need to update it manually." -ForegroundColor Yellow
+        }
+        
+        # Perform the squash using soft reset approach (simpler and more reliable)
+        Write-Host "`nAutomatically combining all unpushed commits into one release commit..." -ForegroundColor Cyan
+        
+        # Get the number of commits to squash
+        $commitCount = @($unpushedCommits).Count
+        
+        if ($commitCount -gt 0) {
+            Write-Host "Combining $commitCount commit(s) with release changes..." -ForegroundColor Gray
+            
+            # Soft reset to before all unpushed commits (keeps all changes staged)
+            git reset --soft "origin/$currentBranch"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Git reset failed with exit code $LASTEXITCODE"
+                Write-Error "Cannot proceed with commit squashing."
+                exit 1
+            }
+            
+            Write-Host "All changes are now staged for a single release commit." -ForegroundColor Green
+            
+            # Set a flag to indicate we should create a fresh commit
+            $script:CreateFreshCommit = $true
+        }
+    }
+    
     # Check if we've already committed
     if ($script:IsResuming -and $script:ResumeState.ContainsKey("commit_created") -and $script:ResumeState.commit_created -eq "true") {
         Write-Host "Release commit was already created in previous run..." -ForegroundColor Green
@@ -1129,16 +1361,20 @@ try {
                 Write-Host "Git push successful (commit and tag)." -ForegroundColor Green
             } else {
                 Write-Error "Git push failed with exit code: $LASTEXITCODE"
-                Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current) --follow-tags"
+                Write-Error "You may need to run: git push --set-upstream origin <current-branch> --follow-tags"
                 exit 1
             }
         }
     } else {
         # Check for untracked files first
         Write-Host "Checking for untracked files..."
-        $untrackedFiles = git ls-files --others --exclude-standard
+        $untrackedFiles = git ls-files --others --exclude-standard 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to check for untracked files: $untrackedFiles"
+            exit 1
+        }
     
-    if ($untrackedFiles) {
+    if ($untrackedFiles -and $untrackedFiles -is [string[]]) {
         Write-Host "`nThe following untracked files were found:" -ForegroundColor Yellow
         $untrackedFiles | ForEach-Object { Write-Host "  - $_" }
         
@@ -1166,29 +1402,59 @@ try {
     
     Write-Host "Staging all files for release commit..."
     git add -A  # Add all files (new, modified, deleted)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Git add failed with exit code $LASTEXITCODE"
+        Write-Error "Cannot stage files for commit."
+        exit 1
+    }
     
     # Show what's being staged
     Write-Host "`nFiles staged for commit:" -ForegroundColor Green
-    git diff --cached --name-status | ForEach-Object {
-        $parts = $_ -split '\t'
-        $status = switch ($parts[0]) {
-            'A' { 'Added' }
-            'M' { 'Modified' }
-            'D' { 'Deleted' }
-            'R' { 'Renamed' }
-            default { $parts[0] }
+    $stagedFiles = git diff --cached --name-status 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get staged files: $stagedFiles"
+        exit 1
+    }
+    
+    $stagedFiles | ForEach-Object {
+        if ($_) {
+            $parts = $_ -split '\t'
+            if ($parts.Count -ge 2) {
+                $status = switch ($parts[0]) {
+                    'A' { 'Added' }
+                    'M' { 'Modified' }
+                    'D' { 'Deleted' }
+                    'R' { 'Renamed' }
+                    default { $parts[0] }
+                }
+                Write-Host "  [$status] $($parts[1])"
+            }
         }
-        Write-Host "  [$status] $($parts[1])"
     }
     
     # Note: MSI file is NOT added to Git (handled by .gitignore)
 
-    Write-Host "Committing initial release files with message: '$commitMessage'..."
-    Write-Host "Committing initial release files with message: '$commitMessage'..."
-    git commit -m $commitMessage
+    # Check if we need to create a fresh commit (after soft reset) or amend
+    if ($script:CreateFreshCommit) {
+        Write-Host "Creating single release commit with all changes..." -ForegroundColor Green
+        git commit -m $commitMessage
+    } else {
+        Write-Host "Committing release files with message: '$commitMessage'..."
+        git commit -m $commitMessage
+    }
+    
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Git commit failed with exit code $LASTEXITCODE"
+        Write-Error "Cannot create release commit."
+        exit 1
+    }
     
     # Capture the commit hash for the release
     $releaseCommitHash = git rev-parse HEAD
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseCommitHash)) {
+        Write-Error "Failed to get commit hash"
+        exit 1
+    }
     Write-Host "Release commit hash: $releaseCommitHash"
     
     # Create the tag locally
@@ -1209,7 +1475,7 @@ try {
         git push
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Git push failed with exit code: $LASTEXITCODE"
-            Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current)"
+            Write-Error "You may need to run: git push --set-upstream origin <current-branch>"
             exit 1
         }
         Write-Host "Git push successful (commit)." -ForegroundColor Green
@@ -1277,18 +1543,29 @@ try {
 
         if ([string]::IsNullOrWhiteSpace($releaseNotesBody)) {
             Write-Warning "Could not extract changelog notes for version $ScriptVersion from CHANGELOG.md. Using default notes string."
-            gh release create $tagName --title $releaseTitle --notes $enhancedReleaseNotes
+            gh release create $tagName --title $releaseTitle --notes $enhancedReleaseNotes 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Failed to create GitHub release"
+                exit 1
+            }
         } else {
             Write-Host "Successfully extracted changelog notes for version $ScriptVersion. Writing to temporary file for release body."
             try {
                 Set-Content -Path $tempNotesFilePath -Value $enhancedReleaseNotes -Encoding UTF8
                 Write-Host "DEBUG: Notes written to $tempNotesFilePath"
-                gh release create $tagName --title $releaseTitle --notes-file $tempNotesFilePath
+                gh release create $tagName --title $releaseTitle --notes-file $tempNotesFilePath 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to create GitHub release with notes file"
+                }
             } catch {
                 Write-Error "Error during GitHub release creation with notes file: $($_.Exception.Message)"
                 # Fallback to enhanced notes if file method fails for some reason
                 Write-Warning "Falling back to enhanced notes string due to error with notes file."
-                gh release create $tagName --title $releaseTitle --notes "$enhancedReleaseNotes (Error using notes file)"
+                gh release create $tagName --title $releaseTitle --notes "$enhancedReleaseNotes (Error using notes file)" 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Error "Failed to create GitHub release even with fallback method"
+                    exit 1
+                }
             } finally {
                 if (Test-Path $tempNotesFilePath) {
                     Write-Host "DEBUG: Removing temporary notes file: $tempNotesFilePath"
@@ -1301,7 +1578,11 @@ try {
         Set-ReleaseState -Key "release_created" -Value "true"
         
         Write-Host "Uploading '$msiFileName' from '$msiFilePath' to GitHub Release '$tagName'..."
-        gh release upload $tagName $msiFilePath --clobber
+        gh release upload $tagName $msiFilePath --clobber 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to upload MSI to GitHub release"
+            exit 1
+        }
         Write-Host "Asset upload successful."
         Set-ReleaseState -Key "asset_uploaded" -Value "true"
         } # End of release creation block
@@ -1354,11 +1635,21 @@ if ($SubmitToWinget.IsPresent) {
         
         Write-Host "Staging manifests in winget-pkgs repository..."
         $relativeManifestPathForWingetPkgs = "manifests\$($script:PublisherName.Substring(0,1).ToLower())\$script:PublisherName\$script:PackageName"
-        git add $relativeManifestPathForWingetPkgs
+        git add $relativeManifestPathForWingetPkgs 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to stage manifests in winget-pkgs repository"
+            Set-Location -Path $currentLocation
+            exit 1
+        }
         
         $commitMessageWinget = "Add $PackageIdentifier v$ScriptVersion"
         Write-Host "Committing manifests in winget-pkgs repository with message: '$commitMessageWinget'..."
-        git commit -m $commitMessageWinget
+        git commit -m $commitMessageWinget 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to commit manifests in winget-pkgs repository"
+            Set-Location -Path $currentLocation
+            exit 1
+        }
         
         Set-Location -Path $currentLocation
         Write-Host "Commit prepared in '$WingetPkgsRepoPath'."

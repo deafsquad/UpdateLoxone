@@ -2264,17 +2264,24 @@ foreach ($test in $discoveryResult.Tests) {
     $testTags = $test.Tag
     $testFile = $test.ScriptBlock.File
     
-    # Categorize based on tags first, then file pattern
+    # Categorize based on tags first, then folder path, then file pattern
     if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') {
         $testCategories.System += $test
     }
     elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') {
         $testCategories.Integration += $test
     }
+    elseif ($testFile -match "\\Integration\\") {
+        $testCategories.Integration += $test
+    }
+    elseif ($testFile -match "\\System\\") {
+        $testCategories.System += $test
+    }
     elseif ($testFile -like "*Integration*.Tests.ps1") {
         $testCategories.Integration += $test
     }
-    elseif ($testFile -like "*System*.Tests.ps1") {
+    elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
+        # Only categorize as System if it has System in name AND is not in Unit folder
         $testCategories.System += $test
     }
     else {
@@ -2315,7 +2322,7 @@ if ($script:LiveProgressFullResults) {
                 $integrationPassed++
             } elseif ($testFile -like "*Integration*.Tests.ps1") {
                 $integrationPassed++
-            } elseif ($testFile -like "*System*.Tests.ps1") {
+            } elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
                 $systemPassed++
             } else {
                 $unitPassed++
@@ -2335,7 +2342,7 @@ if ($script:LiveProgressFullResults) {
                 $integrationFailed++
             } elseif ($testFile -like "*Integration*.Tests.ps1") {
                 $integrationFailed++
-            } elseif ($testFile -like "*System*.Tests.ps1") {
+            } elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
                 $systemFailed++
             } else {
                 $unitFailed++
@@ -2355,7 +2362,7 @@ if ($script:LiveProgressFullResults) {
                 $integrationSkipped++
             } elseif ($testFile -like "*Integration*.Tests.ps1") {
                 $integrationSkipped++
-            } elseif ($testFile -like "*System*.Tests.ps1") {
+            } elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
                 $systemSkipped++
             } else {
                 $unitSkipped++
@@ -2500,9 +2507,13 @@ if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
             $systemPassed++
         } elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') {
             $integrationPassed++
+        } elseif ($testFile -match "\\Integration\\") {
+            $integrationPassed++
+        } elseif ($testFile -match "\\System\\") {
+            $systemPassed++
         } elseif ($testFile -like "*Integration*.Tests.ps1") {
             $integrationPassed++
-        } elseif ($testFile -like "*System*.Tests.ps1") {
+        } elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
             $systemPassed++
         } else {
             $unitPassed++
@@ -2518,9 +2529,13 @@ if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
             $systemFailed++
         } elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') {
             $integrationFailed++
+        } elseif ($testFile -match "\\Integration\\") {
+            $integrationFailed++
+        } elseif ($testFile -match "\\System\\") {
+            $systemFailed++
         } elseif ($testFile -like "*Integration*.Tests.ps1") {
             $integrationFailed++
-        } elseif ($testFile -like "*System*.Tests.ps1") {
+        } elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
             $systemFailed++
         } else {
             $unitFailed++
@@ -2530,8 +2545,10 @@ if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
         $script:Results.FailedTestDetails += @{
             Category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
                       elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
+                      elseif ($testFile -match "\\Integration\\") { "Integration" }
+                      elseif ($testFile -match "\\System\\") { "System" }
                       elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                      elseif ($testFile -like "*System*.Tests.ps1") { "System" }
+                      elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
                       else { "Unit" }
             Test = $test.ExpandedPath
             Error = $test.ErrorRecord.Exception.Message
@@ -2549,9 +2566,13 @@ if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
             $systemSkipped++
         } elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') {
             $integrationSkipped++
+        } elseif ($testFile -match "\\Integration\\") {
+            $integrationSkipped++
+        } elseif ($testFile -match "\\System\\") {
+            $systemSkipped++
         } elseif ($testFile -like "*Integration*.Tests.ps1") {
             $integrationSkipped++
-        } elseif ($testFile -like "*System*.Tests.ps1") {
+        } elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
             $systemSkipped++
         } else {
             $unitSkipped++
@@ -2561,8 +2582,10 @@ if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
         $script:Results.SkippedTestDetails += @{
             Category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
                       elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
+                      elseif ($testFile -match "\\Integration\\") { "Integration" }
+                      elseif ($testFile -match "\\System\\") { "System" }
                       elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                      elseif ($testFile -like "*System*.Tests.ps1") { "System" }
+                      elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
                       else { "Unit" }
             Test = $test.ExpandedPath
             Reason = if ($test.ErrorRecord) { $test.ErrorRecord.Exception.Message } else { "Test marked with -Skip" }
@@ -2637,8 +2660,10 @@ if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
             
             $category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
                        elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
+                       elseif ($testFile -match "\\Integration\\") { "Integration" }
+                       elseif ($testFile -match "\\System\\") { "System" }
                        elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                       elseif ($testFile -like "*System*.Tests.ps1") { "System" }
+                       elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
                        else { "Unit" }
             
             $allTestsWithStatus += [PSCustomObject]@{
@@ -2657,8 +2682,10 @@ if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
             
             $category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
                        elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
+                       elseif ($testFile -match "\\Integration\\") { "Integration" }
+                       elseif ($testFile -match "\\System\\") { "System" }
                        elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                       elseif ($testFile -like "*System*.Tests.ps1") { "System" }
+                       elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
                        else { "Unit" }
             
             $allTestsWithStatus += [PSCustomObject]@{
@@ -2677,8 +2704,10 @@ if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
             
             $category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
                        elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
+                       elseif ($testFile -match "\\Integration\\") { "Integration" }
+                       elseif ($testFile -match "\\System\\") { "System" }
                        elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                       elseif ($testFile -like "*System*.Tests.ps1") { "System" }
+                       elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
                        else { "Unit" }
             
             $allTestsWithStatus += [PSCustomObject]@{
@@ -3101,9 +3130,13 @@ if ($LiveProgress -and $script:LiveProgressFullResults) {
                 $systemFailed++
             } elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') {
                 $integrationFailed++
+            } elseif ($testFile -match "\\Integration\\") {
+                $integrationFailed++
+            } elseif ($testFile -match "\\System\\") {
+                $systemFailed++
             } elseif ($testFile -like "*Integration*.Tests.ps1") {
                 $integrationFailed++
-            } elseif ($testFile -like "*System*.Tests.ps1") {
+            } elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
                 $systemFailed++
             } else {
                 $unitFailed++
@@ -3113,8 +3146,10 @@ if ($LiveProgress -and $script:LiveProgressFullResults) {
             $script:Results.FailedTestDetails += @{
                 Category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
                           elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
+                          elseif ($testFile -match "\\Integration\\") { "Integration" }
+                          elseif ($testFile -match "\\System\\") { "System" }
                           elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                          elseif ($testFile -like "*System*.Tests.ps1") { "System" }
+                          elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
                           else { "Unit" }
                 Test = $failure.ExpandedPath
                 Error = $failure.ErrorRecord.Exception.Message
@@ -3139,9 +3174,13 @@ if ($LiveProgress -and $script:LiveProgressFullResults) {
                 $systemSkipped++
             } elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') {
                 $integrationSkipped++
+            } elseif ($testFile -match "\\Integration\\") {
+                $integrationSkipped++
+            } elseif ($testFile -match "\\System\\") {
+                $systemSkipped++
             } elseif ($testFile -like "*Integration*.Tests.ps1") {
                 $integrationSkipped++
-            } elseif ($testFile -like "*System*.Tests.ps1") {
+            } elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") {
                 $systemSkipped++
             } else {
                 $unitSkipped++
@@ -3151,8 +3190,10 @@ if ($LiveProgress -and $script:LiveProgressFullResults) {
             $script:Results.SkippedTestDetails += @{
                 Category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
                           elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
+                          elseif ($testFile -match "\\Integration\\") { "Integration" }
+                          elseif ($testFile -match "\\System\\") { "System" }
                           elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                          elseif ($testFile -like "*System*.Tests.ps1") { "System" }
+                          elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
                           else { "Unit" }
                 Test = $skipped.ExpandedPath
                 Reason = if ($skipped.ErrorRecord) { $skipped.ErrorRecord.Exception.Message } else { "Test marked with -Skip" }
