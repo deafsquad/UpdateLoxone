@@ -1,28 +1,5 @@
 # Changelog
 
-## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER
-### Added
-- Automated commit squashing for cleaner release history
-  - Automatically detects and combines all unpushed commits into a single release commit
-  - Uses git soft reset for reliable commit combining
-  - Eliminates manual squashing steps and potential errors
-  - Maintains clean, single-commit releases in git history
-
-### Changed
-- Enhanced handling of uncommitted changes in publish script
-  - Script now detects uncommitted changes before starting release process
-  - Offers interactive options to include changes in release, commit separately, or abort
-  - Prevents accidental commits from being created without user awareness
-  - Ensures all changes are intentionally included in releases
-
-### Added
-- AI-assisted changelog verification workflow
-  - Automatically generates prompts for AI review of commit messages vs CHANGELOG
-  - Verifies all commits are properly documented in CHANGELOG
-  - Saves prompt to temporary file for manual AI interaction
-  - Processes AI responses to update CHANGELOG with missing entries
-  - Ensures comprehensive documentation of all changes before release
-
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -36,9 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated categorization logic to check folder path before filename pattern
   - Now correctly excludes Unit folder files from System test categorization
   - Consistent categorization priority: Tags > Folder Path > Filename Pattern
+- Fixed test discovery to properly count RunAsUser System tests
+  - Discovery now accounts for the 4 RunAsUser tests that run via invoke-system-tests.ps1
+  - System test count in discovery summary now shows correct total (10 instead of 6)
 - Fixed git diff syntax error in publish script
   - Changed from incorrect `origin/branch...HEAD` to correct `origin/branch..HEAD`
   - Prevented script from continuing with broken state when commands fail
+- Fixed CHANGELOG format validation in publish script
+  - Added validation to reject Claude responses that include changelog headers
+  - Ensures Claude only returns the Unreleased section content
+  - Prevents malformed CHANGELOG entries with duplicate headers
+  - Cleans up state file on validation errors
+  - Only sends Unreleased section to Claude (not full changelog) to avoid confusion
+  - Properly replaces [Unreleased] with actual version after Claude updates
 
 ### Added
 - Comprehensive error handling for ALL commands in publish script
@@ -56,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Uses `claude -p` command with piped input for seamless integration
   - Falls back gracefully if Claude CLI is not available
   - Eliminates manual copy-paste step for AI verification
+- Enhanced publish script error handling and validation
+  - All git and gh commands now have comprehensive error checking
+  - State file is properly cleaned up on any error
+  - Validates Claude's changelog response format before applying
+- Enhanced release resumption with detailed state information
+  - Shows current git state (branch, commits, changes) when resuming
+  - Displays release progress with checkmarks for completed steps
+  - Checks if GitHub release already exists
+  - Clear explanation of what happens when choosing Y (resume) or N (start fresh)
+  - Warnings when uncommitted changes or unpushed commits are detected
 
 ### Added
 - Comprehensive changelog generation with full git diff analysis

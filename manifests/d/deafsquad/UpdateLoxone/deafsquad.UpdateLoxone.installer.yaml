@@ -1,11 +1,11 @@
 PackageIdentifier: deafsquad.UpdateLoxone
-PackageVersion: 0.5.0
+PackageVersion: 0.5.1
 InstallerLocale: en-US
 InstallerType: msi
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/deafsquad/UpdateLoxone/releases/download/v0.5.0/UpdateLoxone-v0.5.0.msi
-    InstallerSha256: DDCBD56F455C9C186DE774FD219E13134CA622B3DA4D0F8788C09A276309A0AD
+    InstallerUrl: https://github.com/deafsquad/UpdateLoxone/releases/download/v0.5.1/UpdateLoxone-v0.5.1.msi
+    InstallerSha256: C01C08EDB170C00BEBFDFFD5152B48B9F46DECE27111B7A835BD9DE1A052A5F5
     ProductCode: '{00000000-0000-0000-0000-000000000000}'
 ManifestType: installer
 ManifestVersion: 1.6.0

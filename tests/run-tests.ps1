@@ -2294,7 +2294,12 @@ if ($null -eq $testCategories.Unit) { $testCategories.Unit = @() }
 if ($null -eq $testCategories.Integration) { $testCategories.Integration = @() }
 if ($null -eq $testCategories.System) { $testCategories.System = @() }
 
-Write-TestLog "Test discovery complete: Unit=$(if ($testCategories.Unit) { $testCategories.Unit.Count } else { 0 }), Integration=$(if ($testCategories.Integration) { $testCategories.Integration.Count } else { 0 }), System=$(if ($testCategories.System) { $testCategories.System.Count } else { 0 })" -Level "SUMMARY" -Color Green
+# Account for RunAsUser SYSTEM tests (4 tests that run via invoke-system-tests.ps1)
+$runAsUserSystemTests = 4
+$systemTestCount = if ($testCategories.System) { $testCategories.System.Count } else { 0 }
+$totalSystemTests = $systemTestCount + $runAsUserSystemTests
+
+Write-TestLog "Test discovery complete: Unit=$(if ($testCategories.Unit) { $testCategories.Unit.Count } else { 0 }), Integration=$(if ($testCategories.Integration) { $testCategories.Integration.Count } else { 0 }), System=$totalSystemTests" -Level "SUMMARY" -Color Green
 
 # If we already ran tests with unified progress, process the results now that we have categorization
 if ($script:LiveProgressFullResults) {

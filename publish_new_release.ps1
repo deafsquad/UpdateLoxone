@@ -200,14 +200,63 @@ function Clear-ReleaseState {
 $script:ResumeState = Get-ReleaseState
 $script:IsResuming = $false
 if ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version) {
-    Write-Host "Found previous release state for version $($script:ResumeState.version)" -ForegroundColor Yellow
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "PREVIOUS RELEASE STATE DETECTED" -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Version: $($script:ResumeState.version)" -ForegroundColor White
+    
+    # Check current git state
+    $currentBranch = git branch --show-current
+    $uncommittedChanges = git status --porcelain
+    $lastCommit = git log -1 --oneline
+    $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
+    
+    # Check GitHub releases
+    $existingRelease = $null
+    try {
+        $existingRelease = gh release view "v$($script:ResumeState.version)" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $releaseExists = $true
+        } else {
+            $releaseExists = $false
+        }
+    } catch {
+        $releaseExists = $false
+    }
+    
+    Write-Host "`nCurrent Git State:" -ForegroundColor Cyan
+    Write-Host "  Branch: $currentBranch" -ForegroundColor Gray
+    Write-Host "  Last commit: $lastCommit" -ForegroundColor Gray
+    Write-Host "  Uncommitted changes: $(if ($uncommittedChanges) { 'YES - ' + ($uncommittedChanges -split "`n").Count + ' files' } else { 'None' })" -ForegroundColor $(if ($uncommittedChanges) { 'Yellow' } else { 'Gray' })
+    Write-Host "  Unpushed commits: $(if ($unpushedCommits) { 'YES - ' + ($unpushedCommits -split "`n").Count + ' commits' } else { 'None' })" -ForegroundColor $(if ($unpushedCommits) { 'Yellow' } else { 'Gray' })
+    
+    Write-Host "`nRelease Progress:" -ForegroundColor Cyan
+    Write-Host "  Tests run: $(if ($script:ResumeState.ContainsKey('tests_passed') -and $script:ResumeState.tests_passed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('tests_passed') -and $script:ResumeState.tests_passed -eq 'true') { 'Green' } else { 'Yellow' })
+    Write-Host "  CHANGELOG updated: $(if ($script:ResumeState.ContainsKey('changelog_updated') -and $script:ResumeState.changelog_updated -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('changelog_updated') -and $script:ResumeState.changelog_updated -eq 'true') { 'Green' } else { 'Yellow' })
+    Write-Host "  MSI created: $(if ($script:ResumeState.ContainsKey('msi_created') -and $script:ResumeState.msi_created -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('msi_created') -and $script:ResumeState.msi_created -eq 'true') { 'Green' } else { 'Yellow' })
+    Write-Host "  Manifests updated: $(if ($script:ResumeState.ContainsKey('manifests_updated') -and $script:ResumeState.manifests_updated -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('manifests_updated') -and $script:ResumeState.manifests_updated -eq 'true') { 'Green' } else { 'Yellow' })
+    Write-Host "  Git commit created: $(if ($script:ResumeState.ContainsKey('git_committed') -and $script:ResumeState.git_committed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('git_committed') -and $script:ResumeState.git_committed -eq 'true') { 'Green' } else { 'Yellow' })
+    Write-Host "  Git pushed: $(if ($script:ResumeState.ContainsKey('git_pushed') -and $script:ResumeState.git_pushed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('git_pushed') -and $script:ResumeState.git_pushed -eq 'true') { 'Green' } else { 'Yellow' })
+    Write-Host "  GitHub release: $(if ($releaseExists) { 'EXISTS ✓' } else { 'NOT CREATED' })" -ForegroundColor $(if ($releaseExists) { 'Green' } else { 'Yellow' })
+    
+    Write-Host "`nWhat will happen:" -ForegroundColor Cyan
+    if ($uncommittedChanges -or $unpushedCommits) {
+        Write-Host "  WARNING: You have uncommitted changes or unpushed commits!" -ForegroundColor Red
+        Write-Host "  If you continue (Y), the script will attempt to resume but may fail." -ForegroundColor Yellow
+        Write-Host "  If you start fresh (N), the state file will be deleted and you'll need to:" -ForegroundColor Yellow
+        Write-Host "    - Handle your uncommitted/unpushed changes manually" -ForegroundColor Yellow
+        Write-Host "    - Start the release process from the beginning" -ForegroundColor Yellow
+    } else {
+        Write-Host "  If you continue (Y): Resume from where the process left off" -ForegroundColor Green
+        Write-Host "  If you start fresh (N): Clear state and begin a new release" -ForegroundColor Yellow
+    }
     
     # In CI mode or if -Resume parameter exists, auto-resume
     if ($env:CI -or $env:RESUME_RELEASE -eq "true") {
-        Write-Host "Auto-resuming release in CI/automated mode..." -ForegroundColor Green
+        Write-Host "`nAuto-resuming release in CI/automated mode..." -ForegroundColor Green
         $script:IsResuming = $true
     } else {
-        Write-Host "Do you want to resume the release? (Y/N)" -ForegroundColor Cyan
+        Write-Host "`nDo you want to resume the release? (Y/N)" -ForegroundColor Cyan
         $response = Read-Host
         if ($response -eq 'Y' -or $response -eq 'y') {
             $script:IsResuming = $true
@@ -713,15 +762,16 @@ if ($changelogUpdatedByScript) {
 
 # Final check: After all attempts to update, does an entry for $ScriptVersion exist?
 if (-not ($changelogContent -match $versionHeaderExactPattern)) {
-    # Check if we have unpushed commits that will be processed by AI
+    # Check if we have unpushed commits or uncommitted changes that will be processed by AI
     $currentBranch = git branch --show-current
     $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
+    $uncommittedChanges = git status --porcelain
     
     # For dry runs with auto-incremented versions, skip CHANGELOG requirement
     if ($DryRun -and $isDryRunAutoIncremented) {
         Write-Host "DRY RUN: Skipping CHANGELOG check for auto-incremented version $ScriptVersion" -ForegroundColor Yellow
-    } elseif ($unpushedCommits) {
-        Write-Host "CHANGELOG entry for version $ScriptVersion not found, but unpushed commits detected." -ForegroundColor Yellow
+    } elseif ($unpushedCommits -or $uncommittedChanges) {
+        Write-Host "CHANGELOG entry for version $ScriptVersion not found, but $(if ($unpushedCommits) { 'unpushed commits' } else { 'uncommitted changes' }) detected." -ForegroundColor Yellow
         Write-Host "The AI changelog verification will handle this during commit processing." -ForegroundColor Green
         $changelogUpdatedByScript = $false # Mark as not updated yet
     } else {
@@ -1180,9 +1230,18 @@ try {
         $diffSizeKB = [Math]::Round($gitDiff.Length / 1024, 2)
         Write-Host "Git diff size: $diffSizeKB KB" -ForegroundColor Gray
         
-        # Read entire CHANGELOG
+        # Read CHANGELOG and extract only Unreleased section if it exists
         try {
-            $changelogContent = Get-Content $changelogPath -Raw -ErrorAction Stop
+            $fullChangelogContent = Get-Content $changelogPath -Raw -ErrorAction Stop
+            
+            # Extract just the Unreleased section if it exists
+            if ($fullChangelogContent -match '(?s)(## \[Unreleased\][^#]*?)(?=## \[|$)') {
+                $changelogContent = $matches[1].Trim()
+                Write-Host "Found existing Unreleased section in CHANGELOG" -ForegroundColor Gray
+            } else {
+                $changelogContent = "(No Unreleased section found)"
+                Write-Host "No existing Unreleased section in CHANGELOG" -ForegroundColor Gray
+            }
         } catch {
             Write-Error "Failed to read CHANGELOG.md for AI analysis: $_"
             exit 1
@@ -1200,36 +1259,40 @@ $commitMessages
 === CODE CHANGES (git diff) ===
 $gitDiff
 
-=== CURRENT CHANGELOG ===
+=== CURRENT UNRELEASED SECTION ===
 $changelogContent
 
 === INSTRUCTIONS ===
 1. Analyze ALL changes shown in the git diff and commit messages
 2. Create a complete Unreleased section that captures ALL significant changes
 3. Follow Keep a Changelog format (https://keepachangelog.com/):
-   - Use ### Added, ### Changed, ### Fixed, ### Removed, ### Deprecated, ### Security sections as needed
+   - Group changes by type: ### Added, ### Changed, ### Fixed, ### Removed, ### Deprecated, ### Security
+   - Only include sections that have changes (don't include empty sections)
    - Write clear, user-facing descriptions (not technical implementation details)
-   - Group related changes together
    - Use past tense
    - Focus on WHAT changed and WHY it matters to users
+   - Each section should have its changes as bullet points with sub-bullets for details
 4. Include changes that are already in the current Unreleased section (consolidate everything)
-5. Do NOT include changes that are already documented in versioned releases
+5. Do NOT include changes that are already documented in versioned releases (like [0.5.0], [0.4.9], etc)
+6. Do NOT include the changelog header or format declaration - just the Unreleased section
 
-IMPORTANT: You must capture ALL changes shown in the diff, not just what's in commit messages.
+CRITICAL: 
+- You must capture ALL changes shown in the diff, including error handling improvements
+- Look for patterns like "if ($LASTEXITCODE -ne 0)" which indicate error handling additions
+- Group related changes together under appropriate sections
+- DO NOT duplicate sections (only one ### Added, one ### Changed, etc)
 
-RESPOND WITH:
+RESPOND WITH EXACTLY THIS FORMAT:
 UPDATED_CHANGELOG
 ## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER
 ### Added
-- New features...
+- Description of new features...
 
-### Changed
-- Changes to existing functionality...
+### Changed  
+- Description of changes to existing functionality...
 
 ### Fixed
-- Bug fixes...
-
-(include all relevant sections)
+- Description of bug fixes...
 END_CHANGELOG
 "@
 
@@ -1295,25 +1358,61 @@ END_CHANGELOG
         # Process AI response - we always expect an updated changelog with full diff analysis
         if ($aiResponse -match '(?s)UPDATED_CHANGELOG(.*)END_CHANGELOG') {
             $newChangelogSection = $matches[1].Trim()
+            
+            # Validate that Claude didn't include the changelog header or format declaration
+            if ($newChangelogSection -match '(?i)(# Changelog|All notable changes|Keep a Changelog|Semantic Versioning)') {
+                Write-Error "Claude included the changelog header/format in the response. This is invalid."
+                Write-Error "Expected only the Unreleased section content, but got:"
+                Write-Error $newChangelogSection.Substring(0, [Math]::Min(500, $newChangelogSection.Length))
+                Write-Error "Please run the script again or update CHANGELOG.md manually."
+                
+                # Clean up state file on error
+                if (Test-Path $stateFile) {
+                    Remove-Item $stateFile -Force
+                }
+                exit 1
+            }
+            
+            # Ensure the response starts with ## [Unreleased]
+            if (-not ($newChangelogSection -match '^## \[Unreleased\]')) {
+                Write-Error "Claude's response doesn't start with '## [Unreleased]' as expected."
+                Write-Error "Response starts with: $($newChangelogSection.Substring(0, [Math]::Min(100, $newChangelogSection.Length)))"
+                Write-Error "Please run the script again or update CHANGELOG.md manually."
+                
+                # Clean up state file on error
+                if (Test-Path $stateFile) {
+                    Remove-Item $stateFile -Force
+                }
+                exit 1
+            }
+            
             Write-Host "`nUpdating CHANGELOG.md with comprehensive AI analysis..." -ForegroundColor Yellow
             
-            # Replace the Unreleased section completely
-            if ($changelogContent -match '(?s)(.*?)(## \[Unreleased\][^#]*?)(## \[\d)') {
+            # Replace the Unreleased section completely in the FULL changelog
+            if ($fullChangelogContent -match '(?s)(.*?)(## \[Unreleased\][^#]*?)(## \[\d)') {
                 # Found Unreleased section followed by a version
                 $before = $matches[1]
                 $after = $matches[3]
                 $updatedChangelog = $before + $newChangelogSection + "`n`n" + $after
-            } elseif ($changelogContent -match '(?s)(.*?)(## \[Unreleased\].*)$') {
+            } elseif ($fullChangelogContent -match '(?s)(.*?)(## \[Unreleased\].*)$') {
                 # Found Unreleased section at the end
                 $before = $matches[1]
                 $updatedChangelog = $before + $newChangelogSection
             } else {
                 # No Unreleased section found, add it after the header
-                $updatedChangelog = $changelogContent -replace '(# Changelog.*?(?:\r?\n){2,})', "`$1$newChangelogSection`n`n"
+                $updatedChangelog = $fullChangelogContent -replace '(# Changelog.*?(?:\r?\n){2,})', "`$1$newChangelogSection`n`n"
+            }
+            
+            # Replace [Unreleased] with the actual version in the updated changelog
+            $currentDateTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            
+            if ($updatedChangelog -match '(?m)^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER') {
+                Write-Host "Replacing [Unreleased] with version $ScriptVersion..." -ForegroundColor Gray
+                $updatedChangelog = $updatedChangelog -replace '(?m)^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER', "## [$ScriptVersion] - $currentDateTime"
             }
             
             Set-Content -Path $changelogPath -Value $updatedChangelog -Encoding UTF8 -NoNewline
-            Write-Host "CHANGELOG.md updated with complete analysis of all changes." -ForegroundColor Green
+            Write-Host "CHANGELOG.md updated with version $ScriptVersion and timestamp $currentDateTime" -ForegroundColor Green
         }
         else {
             Write-Warning "Claude did not return expected UPDATED_CHANGELOG format."
