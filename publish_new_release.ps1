@@ -1168,26 +1168,6 @@ if ($DryRun) {
     }
 }
 
-# --- Revert version for dry runs ---
-if ($DryRun) {
-    Write-Host ""
-    Write-Host "Reverting manifest versions back to $currentVersion for next run..." -ForegroundColor Yellow
-    
-    # Update version manifest
-    $versionContent = Get-Content $versionManifestPath -Raw
-    $versionContent = $versionContent -replace "PackageVersion: $ScriptVersion", "PackageVersion: $currentVersion"
-    Set-Content -Path $versionManifestPath -Value $versionContent -Encoding UTF8
-    
-    # Update installer manifest
-    $installerContent = Get-Content $installerManifestPath -Raw
-    $installerContent = $installerContent -replace "PackageVersion: $ScriptVersion", "PackageVersion: $currentVersion"
-    $installerContent = $installerContent -replace "UpdateLoxone-v$ScriptVersion\.msi", "UpdateLoxone-v$currentVersion.msi"
-    Set-Content -Path $installerManifestPath -Value $installerContent -Encoding UTF8
-    
-    # Update locale manifest
-    $localeContent = Get-Content $localeManifestPath -Raw
-    $localeContent = $localeContent -replace "PackageVersion: $ScriptVersion", "PackageVersion: $currentVersion"
-    Set-Content -Path $localeManifestPath -Value $localeContent -Encoding UTF8
-    
-    Write-Host "Manifest versions reverted to $currentVersion" -ForegroundColor Green
-}
+# --- Version revert removed ---
+# Dry runs will now keep the incremented version to avoid duplicate installations
+# when testing MSI upgrades with the same version number
