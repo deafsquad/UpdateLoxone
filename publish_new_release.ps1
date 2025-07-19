@@ -328,19 +328,20 @@ $localeManifestPathForAuthorDetection = Join-Path -Path $finalManifestDir -Child
 # --- Determine and Bump Version ---
 $currentVersion = Get-CurrentVersion -BaseManifestPath $versionManifestPathForVersionDetection
 $ScriptVersion = Get-NextVersion -CurrentVersionString $currentVersion
-$originalScriptVersion = $ScriptVersion  # Save original for CHANGELOG check
 
 # For dry runs, use an incremented version to avoid duplicate installations
 # This prevents the same version being built with different ProductCodes
+$isDryRunAutoIncremented = $false
 if ($DryRun) {
     # Check if we've already done a dry run with this version
     $dryRunVersionFile = Join-Path $PSScriptRoot ".last-dryrun-version"
     if (Test-Path $dryRunVersionFile) {
-        $lastDryRunVersion = Get-Content $dryRunVersionFile -Raw
+        $lastDryRunVersion = (Get-Content $dryRunVersionFile -Raw).Trim()
         if ($lastDryRunVersion -eq $ScriptVersion) {
             # Increment version for this dry run
             $ScriptVersion = Get-NextVersion -CurrentVersionString $ScriptVersion
             Write-Host "DRY RUN: Using incremented version $ScriptVersion to avoid duplicate installation" -ForegroundColor Yellow
+            $isDryRunAutoIncremented = $true
         }
     }
     # Save the version we're using for this dry run
@@ -597,7 +598,7 @@ if ($changelogUpdatedByScript) {
 # Final check: After all attempts to update, does an entry for $ScriptVersion exist?
 if (-not ($changelogContent -match $versionHeaderExactPattern)) {
     # For dry runs with auto-incremented versions, skip CHANGELOG requirement
-    if ($DryRun -and $ScriptVersion -ne $originalScriptVersion) {
+    if ($DryRun -and $isDryRunAutoIncremented) {
         Write-Host "DRY RUN: Skipping CHANGELOG check for auto-incremented version $ScriptVersion" -ForegroundColor Yellow
     } else {
         Write-Error "CHANGELOG.md does not contain a valid entry for the new version $ScriptVersion after attempting updates."
