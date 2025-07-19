@@ -158,8 +158,12 @@ function Get-ReleaseState {
         $content = Get-Content $script:StateFile -Raw
         $state = @{}
         foreach ($line in ($content -split "`n")) {
+            $line = $line.Trim() -replace '[\r]+', ''  # Remove carriage returns
             if ($line -match "^([^=]+)=(.*)$") {
-                $state[$matches[1]] = $matches[2]
+                # Clean both key and value from carriage returns
+                $key = $matches[1].Trim() -replace '[\r\n]+', ''
+                $value = $matches[2].Trim() -replace '[\r\n]+', ''
+                $state[$key] = $value
             }
         }
         return $state
@@ -172,11 +176,16 @@ function Set-ReleaseState {
         [string]$Key,
         [string]$Value
     )
+    # Clean value from any carriage returns or newlines
+    $Value = $Value.Trim() -replace '[\r\n]+', ''
+    
     $state = Get-ReleaseState
     $state[$Key] = $Value
     $stateLines = @()
     foreach ($k in $state.Keys | Sort-Object) {
-        $stateLines += "$k=$($state[$k])"
+        # Clean each value when writing
+        $cleanValue = $state[$k].Trim() -replace '[\r\n]+', ''
+        $stateLines += "$k=$cleanValue"
     }
     Set-Content -Path $script:StateFile -Value ($stateLines -join "`n") -Force
 }
@@ -220,6 +229,9 @@ function Get-ChangelogNotesForVersion {
         [Parameter(Mandatory=$true)]
         [string]$ChangelogFilePath # Changed from AllChangelogLines
     )
+    
+    # Clean version string from any carriage returns or newlines
+    $Version = $Version.Trim() -replace '[\r\n]+', ''
 
     Write-Host "Get-ChangelogNotesForVersion: Reading changelog from path '$ChangelogFilePath' for version '$Version'."
     if (-not (Test-Path $ChangelogFilePath)) {
@@ -237,7 +249,8 @@ function Get-ChangelogNotesForVersion {
     $notesLines = [System.Collections.Generic.List[string]]::new()
     $collectingNotes = $false
     $escapedVersion = [regex]::Escape($Version)
-    $versionHeaderPattern = "^## \[$escapedVersion\]" # Pattern for the start of the target version's header
+    # Match version header with optional carriage returns/whitespace after version number
+    $versionHeaderPattern = "^## \[$escapedVersion(?:\\r|\\n|\\s)*\]" # Pattern for the start of the target version's header
     $anyNewSectionPattern = "^## \[" # Pattern for the start of any ## section (typically a new version)
 
     Write-Host "Get-ChangelogNotesForVersion: Attempting to extract notes for version '$Version'."
@@ -284,7 +297,7 @@ function Get-CurrentVersion {
             $lines = Get-Content $BaseManifestPath
             foreach ($line in $lines) {
                 if ($line -match "^\s*PackageVersion:\s*(\d+\.\d+\.\d+)\s*$") {
-                    $parsedVersion = $matches[1]
+                    $parsedVersion = $matches[1].Trim() -replace '[\r\n]+', ''
                     Write-Host "Found existing version in manifest: $parsedVersion"
                     return $parsedVersion
                 }
@@ -306,6 +319,8 @@ function Get-NextVersion {
     param(
         [string]$CurrentVersionString
     )
+    # Clean the version string from any carriage returns or newlines
+    $CurrentVersionString = $CurrentVersionString.Trim() -replace '[\r\n]+', ''
     $parts = $CurrentVersionString.Split('.')
     $major = [int]$parts[0]
     $minor = [int]$parts[1]
@@ -388,16 +403,16 @@ $localeManifestPathForAuthorDetection = Join-Path -Path $finalManifestDir -Child
 
 # --- Determine and Bump Version ---
 if ($script:IsResuming -and $script:ResumeState.version) {
-    # Use the version from the saved state
-    $ScriptVersion = $script:ResumeState.version.Trim()
-    $currentVersion = if ($script:ResumeState.current_version) { $script:ResumeState.current_version.Trim() } else { "0.0.0" }
+    # Use the version from the saved state, removing any carriage returns
+    $ScriptVersion = $script:ResumeState.version.Trim() -replace '[\r\n]+', ''
+    $currentVersion = if ($script:ResumeState.current_version) { $script:ResumeState.current_version.Trim() -replace '[\r\n]+', '' } else { "0.0.0" }
     Write-Host "Resuming with version: $ScriptVersion (current: $currentVersion)" -ForegroundColor Yellow
 } else {
     $currentVersion = Get-CurrentVersion -BaseManifestPath $versionManifestPathForVersionDetection
     $ScriptVersion = Get-NextVersion -CurrentVersionString $currentVersion
-    # Save state
-    Set-ReleaseState -Key "version" -Value $ScriptVersion
-    Set-ReleaseState -Key "current_version" -Value $currentVersion
+    # Save state (ensure no carriage returns)
+    Set-ReleaseState -Key "version" -Value ($ScriptVersion.Trim() -replace '[\r\n]+', '')
+    Set-ReleaseState -Key "current_version" -Value ($currentVersion.Trim() -replace '[\r\n]+', '')
 }
 
 # For dry runs, use an incremented version to avoid duplicate installations
@@ -407,7 +422,7 @@ if ($DryRun) {
     # Check if we've already done a dry run with this version
     $dryRunVersionFile = Join-Path $PSScriptRoot ".last-dryrun-version"
     if (Test-Path $dryRunVersionFile) {
-        $lastDryRunVersion = (Get-Content $dryRunVersionFile -Raw).Trim()
+        $lastDryRunVersion = (Get-Content $dryRunVersionFile -Raw).Trim() -replace '[\r\n]+', ''
         if ($lastDryRunVersion -eq $ScriptVersion) {
             # Increment version for this dry run
             $ScriptVersion = Get-NextVersion -CurrentVersionString $ScriptVersion
@@ -627,6 +642,8 @@ if ($script:IsResuming -and $script:ResumeState.ContainsKey("changelog_updated")
 } else {
     $currentDateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $changelogLines = Get-Content $changelogPath
+    # Clean any carriage returns from all lines
+    $changelogLines = $changelogLines | ForEach-Object { $_.TrimEnd() -replace '[\r]+', '' }
     $unreleasedHeaderPatternStrict = "^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER$" # Strict match for replacement
     $unreleasedHeaderPatternLoose = "^## \[Unreleased\]" # Loose match for any [Unreleased] header
     $changelogUpdatedByScript = $false # Flag to track if script made changes
@@ -657,6 +674,8 @@ for ($i = 0; $i -lt $changelogLines.Length; $i++) {
 
 # Re-read content after potential modification
 $changelogContent = Get-Content $changelogPath -Raw
+# Clean carriage returns from the content
+$changelogContent = $changelogContent -replace '[\r]+', ''
 $escapedVersionForRegex = [regex]::Escape($ScriptVersion)
 $versionHeaderExactPattern = "## \[$escapedVersionForRegex\]" # Checks if the version section exists (with any date)
 $versionHeaderWithSpecificPlaceholderPattern = "## \[$escapedVersionForRegex\]\s*-\s*YYYY-MM-DD_TIMESTAMP_PLACEHOLDER" # Checks for specific placeholder
@@ -673,6 +692,8 @@ if ($changelogUpdatedByScript) {
     
     # Read lines again for replacement to ensure we have the latest content if other tools modified it (though unlikely here)
     $tempChangelogLinesForPlaceholderUpdate = Get-Content $changelogPath
+    # Clean carriage returns
+    $tempChangelogLinesForPlaceholderUpdate = $tempChangelogLinesForPlaceholderUpdate | ForEach-Object { $_.TrimEnd() -replace '[\r]+', '' }
     for ($j = 0; $j -lt $tempChangelogLinesForPlaceholderUpdate.Length; $j++) {
         if ($tempChangelogLinesForPlaceholderUpdate[$j] -eq $lineToReplace) {
             $tempChangelogLinesForPlaceholderUpdate[$j] = $newLine

@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.5] - 2025-07-19 06:29:23
+## [0.4.6] - 2025-07-19 07:29:58
+### Fixed
+- Added comprehensive carriage return protection to publish script
+  - All version strings are now sanitized when read from manifests, state files, or CHANGELOG
+  - State management functions strip carriage returns from both keys and values
+  - CHANGELOG parsing handles version headers with embedded carriage returns
+  - Prevents version string corruption that could break release process
+  - Ensures consistent version formatting across all script operations
+
+## [0.4.5] - 2025-07-19 06:29:23
 ### Added
 - Resumability feature for release script
   - Added state tracking system using `.release-progress` file
