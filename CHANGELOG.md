@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-07-19 01:51:00
+### Fixed
+- MSI installer now properly redirects logs to %LOCALAPPDATA%\UpdateLoxone when installed in Program Files
+- Fixed MSI upgrade behavior by using stable UpgradeCode
+- Removed version revert for dry runs to allow proper version increment testing
+
 ## [0.3.9] - 2025-07-18 23:58:04
 ### Added
 - Comprehensive test suite with 100% module coverage
