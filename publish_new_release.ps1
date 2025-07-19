@@ -150,6 +150,67 @@ if ($SubmitToWinget.IsPresent -and ([string]::IsNullOrWhiteSpace($WingetPkgsRepo
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# --- State Management Functions ---
+$script:StateFile = Join-Path $PSScriptRoot ".release-progress"
+
+function Get-ReleaseState {
+    if (Test-Path $script:StateFile) {
+        $content = Get-Content $script:StateFile -Raw
+        $state = @{}
+        foreach ($line in ($content -split "`n")) {
+            if ($line -match "^([^=]+)=(.*)$") {
+                $state[$matches[1]] = $matches[2]
+            }
+        }
+        return $state
+    }
+    return @{}
+}
+
+function Set-ReleaseState {
+    param(
+        [string]$Key,
+        [string]$Value
+    )
+    $state = Get-ReleaseState
+    $state[$Key] = $Value
+    $stateLines = @()
+    foreach ($k in $state.Keys | Sort-Object) {
+        $stateLines += "$k=$($state[$k])"
+    }
+    Set-Content -Path $script:StateFile -Value ($stateLines -join "`n") -Force
+}
+
+function Clear-ReleaseState {
+    if (Test-Path $script:StateFile) {
+        Remove-Item $script:StateFile -Force
+    }
+}
+
+# --- Check if we're resuming ---
+$script:ResumeState = Get-ReleaseState
+$script:IsResuming = $false
+if ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version) {
+    Write-Host "Found previous release state for version $($script:ResumeState.version)" -ForegroundColor Yellow
+    
+    # In CI mode or if -Resume parameter exists, auto-resume
+    if ($env:CI -or $env:RESUME_RELEASE -eq "true") {
+        Write-Host "Auto-resuming release in CI/automated mode..." -ForegroundColor Green
+        $script:IsResuming = $true
+    } else {
+        Write-Host "Do you want to resume the release? (Y/N)" -ForegroundColor Cyan
+        $response = Read-Host
+        if ($response -eq 'Y' -or $response -eq 'y') {
+            $script:IsResuming = $true
+            Write-Host "Resuming release process..." -ForegroundColor Green
+        } else {
+            Write-Host "Clearing previous state and starting fresh..." -ForegroundColor Yellow
+            Clear-ReleaseState
+            $script:ResumeState = @{}
+        }
+    }
+}
+
 # --- Function to Extract Changelog Notes for a Specific Version ---
 function Get-ChangelogNotesForVersion {
     param(
@@ -326,8 +387,18 @@ $versionManifestPathForVersionDetection = Join-Path -Path $finalManifestDir -Chi
 $localeManifestPathForAuthorDetection = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.locale.en-US.yaml"
 
 # --- Determine and Bump Version ---
-$currentVersion = Get-CurrentVersion -BaseManifestPath $versionManifestPathForVersionDetection
-$ScriptVersion = Get-NextVersion -CurrentVersionString $currentVersion
+if ($script:IsResuming -and $script:ResumeState.version) {
+    # Use the version from the saved state
+    $ScriptVersion = $script:ResumeState.version
+    $currentVersion = $script:ResumeState.current_version
+    Write-Host "Resuming with version: $ScriptVersion (current: $currentVersion)" -ForegroundColor Yellow
+} else {
+    $currentVersion = Get-CurrentVersion -BaseManifestPath $versionManifestPathForVersionDetection
+    $ScriptVersion = Get-NextVersion -CurrentVersionString $currentVersion
+    # Save state
+    Set-ReleaseState -Key "version" -Value $ScriptVersion
+    Set-ReleaseState -Key "current_version" -Value $currentVersion
+}
 
 # For dry runs, use an incremented version to avoid duplicate installations
 # This prevents the same version being built with different ProductCodes
@@ -354,9 +425,13 @@ $AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthor
 Write-Host "Starting release process for $script:PackageName version $ScriptVersion (Author: $AuthorName)..."
 
 # --- Run Tests First ---
-if ($SkipTests) {
+if ($script:IsResuming -and $script:ResumeState.tests_completed -eq "true") {
+    Write-Host "Tests were already completed in previous run, skipping..." -ForegroundColor Green
+} elseif ($SkipTests) {
     Write-Warning "SKIPPING TESTS - This is not recommended for production releases!"
     Write-Host ""
+    Set-ReleaseState -Key "tests_completed" -Value "true"
+    Set-ReleaseState -Key "tests_skipped" -Value "true"
 } else {
     Write-Host "---"
     Write-Host "Running test suite before proceeding with release..."
@@ -533,6 +608,7 @@ try {
     }
     
     Write-Host "All tests passed successfully! Proceeding with release..." -ForegroundColor Green
+    Set-ReleaseState -Key "tests_completed" -Value "true"
 } catch {
     Write-Host "DEBUG: Caught exception in test execution" -ForegroundColor Yellow
     Write-Host "DEBUG: Exception type: $($_.Exception.GetType().FullName)" -ForegroundColor Yellow
@@ -558,11 +634,16 @@ if (-not (Test-Path $changelogPath)) {
     Write-Error "CHANGELOG.md not found at $changelogPath."
     exit 1
 }
-$currentDateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-$changelogLines = Get-Content $changelogPath
-$unreleasedHeaderPatternStrict = "^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER$" # Strict match for replacement
-$unreleasedHeaderPatternLoose = "^## \[Unreleased\]" # Loose match for any [Unreleased] header
-$changelogUpdatedByScript = $false # Flag to track if script made changes
+
+if ($script:IsResuming -and $script:ResumeState.changelog_updated -eq "true") {
+    Write-Host "CHANGELOG was already updated in previous run, skipping..." -ForegroundColor Green
+    $changelogUpdatedByScript = $true
+} else {
+    $currentDateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $changelogLines = Get-Content $changelogPath
+    $unreleasedHeaderPatternStrict = "^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER$" # Strict match for replacement
+    $unreleasedHeaderPatternLoose = "^## \[Unreleased\]" # Loose match for any [Unreleased] header
+    $changelogUpdatedByScript = $false # Flag to track if script made changes
 
 # Attempt to update [Unreleased] section first
 for ($i = 0; $i -lt $changelogLines.Length; $i++) {
@@ -632,11 +713,14 @@ if (-not ($changelogContent -match $versionHeaderExactPattern)) {
     # An entry for $ScriptVersion exists.
     if ($changelogUpdatedByScript) {
          Write-Host "CHANGELOG.md successfully prepared by script for version $ScriptVersion."
+         Set-ReleaseState -Key "changelog_updated" -Value "true"
     } else {
         # This means an entry for $ScriptVersion was already present with a specific date (not the placeholder).
         Write-Host "CHANGELOG.md already contained a dated entry for version $ScriptVersion."
+        Set-ReleaseState -Key "changelog_updated" -Value "true"
     }
 }
+} # End of changelog update section
 
 
 $requiredFiles = @(
@@ -675,8 +759,20 @@ Import-Module PSMSI -Force
 $msiFileName = "UpdateLoxone-v$ScriptVersion.msi"
 $msiFilePath = Join-Path -Path $releasesArchiveDir -ChildPath $msiFileName
 
-Write-Host "Creating MSI installer: $msiFilePath..."
-try {
+if ($script:IsResuming -and $script:ResumeState.msi_created -eq "true" -and (Test-Path $msiFilePath)) {
+    Write-Host "MSI installer already exists from previous run, skipping creation..." -ForegroundColor Green
+    # Load the hash from state
+    if ($script:ResumeState.msi_hash) {
+        $fileHash = $script:ResumeState.msi_hash
+        Write-Host "Using saved SHA256 hash: $fileHash" -ForegroundColor Gray
+    } else {
+        # Recalculate if not in state
+        Write-Host "Recalculating SHA256 hash..." -ForegroundColor Yellow
+        $fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+    }
+} else {
+    Write-Host "Creating MSI installer: $msiFilePath..."
+    try {
     # Create stable GUIDs for proper upgrade behavior
     # UpgradeCode must be the same for all versions to enable upgrades
     $upgradeCode = [guid]'1a73a1be-50e6-4e92-af03-586f4a9d9e82'
@@ -889,26 +985,34 @@ try {
     exit 1
 }
 
-# --- Calculate SHA256 Hash ---
-Write-Host "Calculating SHA256 hash for $msiFilePath..."
-if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
-    $fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
-} else {
-    # Fallback for older PowerShell versions
-    $sha256 = New-Object System.Security.Cryptography.SHA256Managed
-    $fileBytes = [System.IO.File]::ReadAllBytes($msiFilePath)
-    $hashBytes = $sha256.ComputeHash($fileBytes)
-    $fileHash = [BitConverter]::ToString($hashBytes).Replace('-', '')
-    $sha256.Dispose()
-}
-Write-Host "SHA256 Hash: $fileHash"
+    # --- Calculate SHA256 Hash ---
+    Write-Host "Calculating SHA256 hash for $msiFilePath..."
+    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+        $fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+    } else {
+        # Fallback for older PowerShell versions
+        $sha256 = New-Object System.Security.Cryptography.SHA256Managed
+        $fileBytes = [System.IO.File]::ReadAllBytes($msiFilePath)
+        $hashBytes = $sha256.ComputeHash($fileBytes)
+        $fileHash = [BitConverter]::ToString($hashBytes).Replace('-', '')
+        $sha256.Dispose()
+    }
+    Write-Host "SHA256 Hash: $fileHash"
+    
+    # Save MSI creation state
+    Set-ReleaseState -Key "msi_created" -Value "true"
+    Set-ReleaseState -Key "msi_hash" -Value $fileHash
+} # End of MSI creation section
 
 # --- Create Manifests ---
 $versionManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.yaml"
 $localeManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.locale.en-US.yaml"
 $installerManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.installer.yaml"
 
-$currentDate = Get-Date -Format "yyyy-MM-dd"
+if ($script:IsResuming -and $script:ResumeState.manifests_created -eq "true") {
+    Write-Host "Manifests were already created in previous run, skipping..." -ForegroundColor Green
+} else {
+    $currentDate = Get-Date -Format "yyyy-MM-dd"
 $versionManifestContent = @"
 PackageIdentifier: $PackageIdentifier
 PackageVersion: $ScriptVersion
@@ -956,6 +1060,10 @@ ManifestVersion: 1.6.0
 "@
 Set-Content -Path $installerManifestPath -Value $installerManifestContent -Encoding UTF8
 Write-Host "Winget manifests created in: $finalManifestDir"
+    
+    # Save manifest creation state
+    Set-ReleaseState -Key "manifests_created" -Value "true"
+} # End of manifest creation section
 
 # --- Git and GitHub CLI Operations ---
 Write-Host "---"
@@ -980,9 +1088,29 @@ $changelogRelativePath = ".\CHANGELOG.md"
 $installerManifestRelativePath = $installerManifestPath.Replace($PSScriptRoot, ".")
 
 try {
-    # Check for untracked files first
-    Write-Host "Checking for untracked files..."
-    $untrackedFiles = git ls-files --others --exclude-standard
+    # Check if we've already committed
+    if ($script:IsResuming -and $script:ResumeState.commit_created -eq "true") {
+        Write-Host "Release commit was already created in previous run..." -ForegroundColor Green
+        $releaseCommitHash = $script:ResumeState.commit_hash
+        Write-Host "Using saved commit hash: $releaseCommitHash" -ForegroundColor Gray
+        
+        # Check if it's been pushed
+        if ((-not $script:ResumeState.ContainsKey("commit_pushed") -or $script:ResumeState.commit_pushed -ne "true") -and -not $DryRun) {
+            Write-Host "Commit not yet pushed, attempting push..." -ForegroundColor Yellow
+            git push
+            if ($LASTEXITCODE -eq 0) {
+                Set-ReleaseState -Key "commit_pushed" -Value "true"
+                Write-Host "Git push successful." -ForegroundColor Green
+            } else {
+                Write-Error "Git push failed with exit code: $LASTEXITCODE"
+                Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current)"
+                exit 1
+            }
+        }
+    } else {
+        # Check for untracked files first
+        Write-Host "Checking for untracked files..."
+        $untrackedFiles = git ls-files --others --exclude-standard
     
     if ($untrackedFiles) {
         Write-Host "`nThe following untracked files were found:" -ForegroundColor Yellow
@@ -1031,6 +1159,10 @@ try {
     $releaseCommitHash = git rev-parse HEAD
     Write-Host "Release commit hash: $releaseCommitHash"
     
+    # Save commit state
+    Set-ReleaseState -Key "commit_created" -Value "true"
+    Set-ReleaseState -Key "commit_hash" -Value $releaseCommitHash
+    
     if (-not $DryRun) {
         Write-Host "Pushing initial commit to remote repository..."
         git push
@@ -1040,11 +1172,30 @@ try {
             exit 1
         }
         Write-Host "Initial Git push successful."
+        Set-ReleaseState -Key "commit_pushed" -Value "true"
         Write-Host "---"
-
-        Write-Host "Attempting GitHub Release creation and asset upload..."
-        $releaseTitle = "Release $tagName"
-        Write-Host "Creating GitHub tag '$tagName' and release '$releaseTitle'..."
+        
+        # Check if release already exists
+        if ($script:IsResuming -and $script:ResumeState.release_created -eq "true") {
+            Write-Host "GitHub release was already created in previous run..." -ForegroundColor Green
+            
+            # Check if asset was uploaded
+            if (-not $script:ResumeState.ContainsKey("asset_uploaded") -or $script:ResumeState.asset_uploaded -ne "true") {
+                Write-Host "MSI asset not yet uploaded, uploading now..." -ForegroundColor Yellow
+                Write-Host "Uploading '$msiFileName' from '$msiFilePath' to GitHub Release '$tagName'..."
+                gh release upload $tagName $msiFilePath --clobber
+                if ($LASTEXITCODE -eq 0) {
+                    Set-ReleaseState -Key "asset_uploaded" -Value "true"
+                    Write-Host "Asset upload successful." -ForegroundColor Green
+                } else {
+                    Write-Error "Asset upload failed with exit code: $LASTEXITCODE"
+                    exit 1
+                }
+            }
+        } else {
+            Write-Host "Attempting GitHub Release creation and asset upload..."
+            $releaseTitle = "Release $tagName"
+            Write-Host "Creating GitHub tag '$tagName' and release '$releaseTitle'..."
         
         # Extract changelog notes for the release body
         $changelogPathForNotesExtraction = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
@@ -1092,9 +1243,14 @@ try {
             }
         }
         
+        # Save release created state
+        Set-ReleaseState -Key "release_created" -Value "true"
+        
         Write-Host "Uploading '$msiFileName' from '$msiFilePath' to GitHub Release '$tagName'..."
         gh release upload $tagName $msiFilePath --clobber
         Write-Host "Asset upload successful."
+        Set-ReleaseState -Key "asset_uploaded" -Value "true"
+        } # End of release creation block
 
         $InstallerUrl = "https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
         Write-Host "Constructed InstallerUrl: $InstallerUrl"
@@ -1122,11 +1278,16 @@ try {
             exit 1
         }
         Write-Host "All Git and GitHub operations completed successfully."
+        
+        # Clean up state file on successful completion
+        Clear-ReleaseState
+        Write-Host "Release state cleared." -ForegroundColor Green
     } else {
             Write-Host "DRY RUN: Skipping git push, GitHub release creation, asset upload, and installer URL update commit/push."
             Write-Host "DRY RUN: InstallerUrl would be: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
             Write-Host "DRY RUN: Installer manifest at '$installerManifestPath' still contains placeholder URL."
         }
+    } # End of else block for non-resuming path
 } catch {
     Write-Warning "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
     Write-Warning "Please review the Git status and GitHub releases, then perform any remaining steps manually."

@@ -440,7 +440,7 @@ function Invoke-TestResultRotation {
     $testRuns = @(Get-ChildItem -Path $resultsPath -Filter "TestRun_*" -Directory -ErrorAction SilentlyContinue | 
                 Sort-Object CreationTime -Descending)
     
-    $totalRuns = $testRuns.Count
+    $totalRuns = if ($testRuns) { $testRuns.Count } else { 0 }
     $runsToDelete = @()
     $bytesToFree = 0
     
@@ -461,7 +461,7 @@ function Invoke-TestResultRotation {
         $runsToDelete = $combinedList.ToArray() | Select-Object -Unique
     }
     
-    if ($runsToDelete.Count -gt 0) {
+    if ($runsToDelete -and $runsToDelete.Count -gt 0) {
         foreach ($run in $runsToDelete) {
             $size = (Get-ChildItem -Path $run.FullName -Recurse -File -ErrorAction SilentlyContinue | 
                     Measure-Object -Property Length -Sum).Sum
@@ -484,7 +484,7 @@ function Invoke-TestResultRotation {
         $coverageFiles = @(Get-ChildItem -Path $coverageDir -Filter "coverage_*.md" -File -ErrorAction SilentlyContinue |
                         Sort-Object CreationTime -Descending)
         
-        if ($coverageFiles.Count -gt 10) {
+        if ($coverageFiles -and $coverageFiles.Count -gt 10) {
             $coverageToDelete = $coverageFiles | Select-Object -Skip 10
             foreach ($file in $coverageToDelete) {
                 $bytesToFree += $file.Length
@@ -507,7 +507,7 @@ function Invoke-TestResultRotation {
         $tempRunsToDelete = @()
         
         # Apply same retention rules to temp folders
-        if ($tempTestRuns.Count -gt $MaxTestRuns) {
+        if ($tempTestRuns -and $tempTestRuns.Count -gt $MaxTestRuns) {
             $tempRunsToDelete += $tempTestRuns | Select-Object -Skip $MaxTestRuns
         }
         
@@ -520,7 +520,7 @@ function Invoke-TestResultRotation {
             $tempRunsToDelete = $combinedList.ToArray() | Select-Object -Unique
         }
         
-        if ($tempRunsToDelete.Count -gt 0) {
+        if ($tempRunsToDelete -and $tempRunsToDelete.Count -gt 0) {
             if (-not $Quiet) {
                 Write-TestLog "`n  Cleaning temp TestRun folders..." -Color Cyan
             }
@@ -548,7 +548,7 @@ function Invoke-TestResultRotation {
     $duration = (Get-Date) - $rotationStartTime
     
     return @{
-        RunsDeleted = $runsToDelete.Count
+        RunsDeleted = if ($runsToDelete) { $runsToDelete.Count } else { 0 }
         TotalRuns = $totalRuns
         BytesFreed = $bytesToFree
         Duration = $duration
@@ -625,7 +625,7 @@ function Invoke-TestFileCleanup {
             $files = Get-ChildItem -Path $item.Path -Filter $pattern -File -ErrorAction SilentlyContinue |
                      Where-Object { $_.LastWriteTime -lt $cutoffDate }
             
-            if ($files.Count -gt 0) {
+            if ($files -and $files.Count -gt 0) {
                 if (-not $Quiet) {
                     Write-TestLog "`n$category ($pattern):" -Color Yellow
                 }
@@ -966,7 +966,7 @@ try {
         $Global:LiveProgressSkippedCount = 0
         $Global:LiveProgressTotalTests = 0
         $Global:LiveProgressModuleCount = 0
-        $Global:LiveProgressTotalModules = $testFiles.Count
+        $Global:LiveProgressTotalModules = if ($testFiles) { $testFiles.Count } else { 0 }
         $Global:LiveProgressStartTime = Get-Date
         
         # Determine which test types are being run
@@ -1305,7 +1305,7 @@ function Invoke-TestsWithLiveProgress {
         }
     }
     
-    if ($testFiles.Count -eq 0) {
+    if (-not $testFiles -or $testFiles.Count -eq 0) {
         Write-TestLog "No test files found matching filter: $TestFilter" -Level "WARN" -Color Yellow
         return @{
             TotalTests = 0
@@ -1350,7 +1350,7 @@ function Invoke-TestsWithLiveProgress {
     $config.TestResult.OutputFormat = "NUnit2.5"
     
     # Count total tests for progress tracking
-    Write-TestLog "Discovering tests in $($testFiles.Count) files..." -Color Gray
+    Write-TestLog "Discovering tests in $(if ($testFiles) { $testFiles.Count } else { 0 }) files..." -Color Gray
     $discoveryConfig = New-PesterConfiguration
     $discoveryConfig.Run.Path = $testFiles.FullName
     $discoveryConfig.Run.PassThru = $true
@@ -1761,7 +1761,7 @@ function Invoke-TestCategory {
         Write-TestLog "Filtered to $($testFiles.Count) test files matching '$Filter'"
     }
     
-    if ($testFiles.Count -eq 0) {
+    if (-not $testFiles -or $testFiles.Count -eq 0) {
         Write-TestLog "No $CategoryName test files found" -Level "WARN" -Color Yellow
         return
     }
@@ -2287,16 +2287,16 @@ if ($null -eq $testCategories.Unit) { $testCategories.Unit = @() }
 if ($null -eq $testCategories.Integration) { $testCategories.Integration = @() }
 if ($null -eq $testCategories.System) { $testCategories.System = @() }
 
-Write-TestLog "Test discovery complete: Unit=$($testCategories.Unit.Count), Integration=$($testCategories.Integration.Count), System=$($testCategories.System.Count)" -Level "SUMMARY" -Color Green
+Write-TestLog "Test discovery complete: Unit=$(if ($testCategories.Unit) { $testCategories.Unit.Count } else { 0 }), Integration=$(if ($testCategories.Integration) { $testCategories.Integration.Count } else { 0 }), System=$(if ($testCategories.System) { $testCategories.System.Count } else { 0 })" -Level "SUMMARY" -Color Green
 
 # If we already ran tests with unified progress, process the results now that we have categorization
 if ($script:LiveProgressFullResults) {
     Write-TestLog "Processing unified progress results with discovered test categories..." -Color Cyan
     
     # Update category totals with discovered counts
-    $script:Results.UnitTests.Total = $testCategories.Unit.Count
-    $script:Results.IntegrationTests.Total = $testCategories.Integration.Count
-    $script:Results.SystemTests.Total = $testCategories.System.Count
+    $script:Results.UnitTests.Total = if ($testCategories.Unit) { $testCategories.Unit.Count } else { 0 }
+    $script:Results.IntegrationTests.Total = if ($testCategories.Integration) { $testCategories.Integration.Count } else { 0 }
+    $script:Results.SystemTests.Total = if ($testCategories.System) { $testCategories.System.Count } else { 0 }
     
     # Process results to categorize passed/failed/skipped by test
     $unitPassed = 0; $unitFailed = 0; $unitSkipped = 0
@@ -2774,7 +2774,7 @@ if ($script:Detailed) {
 # This duplicate block has been moved earlier in the execution flow
 
 # Phase 1: Run Unit Tests (only when not running All tests)
-if ($script:RunUnit -and $testCategories.Unit.Count -gt 0) {
+if ($script:RunUnit -and $testCategories.Unit -and $testCategories.Unit.Count -gt 0) {
     Write-TestLog "`nRunning $($testCategories.Unit.Count) Unit tests..." -Color Cyan
     
     # When using LiveProgress, we need to handle this specially
@@ -2841,7 +2841,7 @@ if ($script:RunUnit -and $testCategories.Unit.Count -gt 0) {
 }
 
 # Phase 2: Run Integration Tests  
-if ($script:RunIntegration -and $testCategories.Integration.Count -gt 0) {
+if ($script:RunIntegration -and $testCategories.Integration -and $testCategories.Integration.Count -gt 0) {
     Write-TestLog "`nNOTE: Integration tests may take longer and require network connectivity" -Level "WARN" -Color Yellow
     Write-TestLog "Running $($testCategories.Integration.Count) Integration tests..." -Color Cyan
     
@@ -2942,7 +2942,7 @@ if ($script:RunIntegration -and $testCategories.Integration.Count -gt 0) {
 }
 
 # Phase 3: Run SYSTEM tests
-if ($script:RunSystem -and $testCategories.System.Count -gt 0) {
+if ($script:RunSystem -and $testCategories.System -and $testCategories.System.Count -gt 0) {
     Write-TestLog "`nRunning SYSTEM tests (requires admin)..." -Color Cyan
     Write-TestLog "Found $($testCategories.System.Count) System tests to run" -Color Cyan
     
