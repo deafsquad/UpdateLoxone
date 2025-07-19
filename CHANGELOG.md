@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.2] - 2025-07-20 01:32:51
+### Changed
+- Enhanced release process with Git state verification to ensure tests remain valid between resume operations
+  - Added state hash tracking to detect code changes after test completion
+  - Improved test re-run logic when codebase changes are detected
+- Improved changelog generation to handle uncommitted changes
+  - Now processes uncommitted changes when no unpushed commits exist
+  - Better handling of working tree diffs for changelog generation
+- Added pre-test check for untracked files with interactive prompt
+  - Warns users about files that won't be included in release
+  - Allows opportunity to add files before test execution
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

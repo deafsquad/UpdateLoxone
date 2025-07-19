@@ -153,6 +153,30 @@ Set-StrictMode -Version Latest
 # --- State Management Functions ---
 $script:StateFile = Join-Path $PSScriptRoot ".release-progress"
 
+function Get-GitStateHash {
+    # Get a hash representing the current state of all tracked files
+    # This includes both committed and uncommitted changes
+    
+    # Method 1: Get hash of the current working tree (includes uncommitted changes)
+    $treeHash = git write-tree 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        return $treeHash.Substring(0, 16)
+    }
+    
+    # Method 2: If write-tree fails (e.g., due to untracked files in index), 
+    # use combination of HEAD commit and status
+    $headCommit = git rev-parse --short=8 HEAD 2>&1
+    $statusHash = git status --porcelain | git hash-object --stdin 2>&1
+    
+    if ($LASTEXITCODE -eq 0 -and $headCommit -and $statusHash) {
+        # Combine HEAD commit with status hash
+        return "$($headCommit)-$($statusHash.Substring(0, 8))"
+    }
+    
+    # Fallback
+    return "unknown"
+}
+
 function Get-ReleaseState {
     if (Test-Path $script:StateFile) {
         $content = Get-Content $script:StateFile -Raw
@@ -488,14 +512,54 @@ $AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthor
 
 Write-Host "Starting release process for $script:PackageName version $ScriptVersion (Author: $AuthorName)..."
 
+# --- Check for untracked files before tests ---
+$untrackedFiles = git ls-files --others --exclude-standard
+if ($untrackedFiles) {
+    Write-Host "`nUntracked files detected:" -ForegroundColor Yellow
+    $untrackedFiles | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+    Write-Host "`nThese files are not tracked by Git and won't be included in the release." -ForegroundColor Yellow
+    Write-Host "Do you want to add any of these files before running tests? (Y/N)" -ForegroundColor Cyan
+    $response = Read-Host
+    if ($response -eq 'Y' -or $response -eq 'y') {
+        Write-Host "Please add the files manually using 'git add' and restart the release process." -ForegroundColor Yellow
+        exit 0
+    }
+}
+
 # --- Run Tests First ---
+$currentStateHash = Get-GitStateHash
+Write-Host "Current Git state hash: $currentStateHash" -ForegroundColor Gray
+
 if ($script:IsResuming -and $script:ResumeState.ContainsKey("tests_completed") -and $script:ResumeState.tests_completed -eq "true") {
-    Write-Host "Tests were already completed in previous run, skipping..." -ForegroundColor Green
+    # Validate Git state hash to ensure code hasn't changed
+    if ($script:ResumeState.ContainsKey("tests_checksum") -and $script:ResumeState.tests_checksum -eq $currentStateHash) {
+        Write-Host "Tests were already completed in previous run, skipping..." -ForegroundColor Green
+        Write-Host "  Git state verified: $currentStateHash" -ForegroundColor Gray
+    } else {
+        Write-Host "Tests were completed in previous run, but codebase has changed!" -ForegroundColor Yellow
+        if ($script:ResumeState.ContainsKey("tests_checksum")) {
+            Write-Host "  Previous state: $($script:ResumeState.tests_checksum)" -ForegroundColor Gray
+            Write-Host "  Current state:  $currentStateHash" -ForegroundColor Gray
+        } else {
+            Write-Host "  No state hash found from previous run" -ForegroundColor Gray
+            Write-Host "  Current state: $currentStateHash" -ForegroundColor Gray
+        }
+        Write-Host "Re-running tests to ensure code quality..." -ForegroundColor Yellow
+        # Clear the test state to force re-run
+        $script:ResumeState.Remove("tests_completed")
+        $script:ResumeState.Remove("tests_checksum")
+    }
+}
+
+if ($script:ResumeState.ContainsKey("tests_completed") -and $script:ResumeState.tests_completed -eq "true") {
+    # Tests already validated above, skip execution
 } elseif ($SkipTests) {
     Write-Warning "SKIPPING TESTS - This is not recommended for production releases!"
     Write-Host ""
     Set-ReleaseState -Key "tests_completed" -Value "true"
     Set-ReleaseState -Key "tests_skipped" -Value "true"
+    Set-ReleaseState -Key "tests_checksum" -Value $currentStateHash
+    Write-Host "  Saved Git state hash: $currentStateHash" -ForegroundColor Gray
 } else {
     Write-Host "---"
     Write-Host "Running test suite before proceeding with release..."
@@ -659,6 +723,8 @@ try {
     
     Write-Host "All tests passed successfully! Proceeding with release..." -ForegroundColor Green
     Set-ReleaseState -Key "tests_completed" -Value "true"
+    Set-ReleaseState -Key "tests_checksum" -Value $currentStateHash
+    Write-Host "  Saved Git state hash: $currentStateHash" -ForegroundColor Gray
 } catch {
     Write-Host "DEBUG: Caught exception in test execution" -ForegroundColor Yellow
     Write-Host "DEBUG: Exception type: $($_.Exception.GetType().FullName)" -ForegroundColor Yellow
@@ -1203,20 +1269,36 @@ try {
     $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
     # Note: git log returns exit code 0 even when no commits found, so we check the output instead
     
-    if ($unpushedCommits -and -not $DryRun) {
-        Write-Host "`nFound unpushed commits that will be combined into the release:" -ForegroundColor Yellow
-        $unpushedCommits | ForEach-Object { Write-Host "  $_" }
-        
-        # Get detailed commit messages
-        $commitMessages = git log "origin/$currentBranch..HEAD" --pretty=format:"%s%n%n%b" --reverse
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to get commit messages"
-            exit 1
+    # Process AI changelog if we have unpushed commits OR uncommitted changes (but no v[version] entry in changelog)
+    $needsAIChangelog = ($unpushedCommits -or ($uncommittedChanges -and -not $changelogUpdatedByScript)) -and -not $DryRun
+    
+    if ($needsAIChangelog) {
+        if ($unpushedCommits) {
+            Write-Host "`nFound unpushed commits that will be combined into the release:" -ForegroundColor Yellow
+            $unpushedCommits | ForEach-Object { Write-Host "  $_" }
+        } else {
+            Write-Host "`nProcessing uncommitted changes for changelog generation..." -ForegroundColor Yellow
         }
         
-        # Get full diff from origin to current HEAD
-        Write-Host "Getting full diff from origin/$currentBranch to HEAD..." -ForegroundColor Gray
-        $gitDiff = git diff "origin/$currentBranch..HEAD" 2>&1
+        # Get detailed commit messages (only if there are unpushed commits)
+        if ($unpushedCommits) {
+            $commitMessages = git log "origin/$currentBranch..HEAD" --pretty=format:"%s%n%n%b" --reverse
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Failed to get commit messages"
+                exit 1
+            }
+        } else {
+            $commitMessages = "(No unpushed commits - changes are uncommitted)"
+        }
+        
+        # Get full diff - for uncommitted changes use working tree diff, for commits use commit diff
+        if ($uncommittedChanges -and -not $unpushedCommits) {
+            Write-Host "Getting diff of uncommitted changes..." -ForegroundColor Gray
+            $gitDiff = git diff 2>&1
+        } else {
+            Write-Host "Getting full diff from origin/$currentBranch to HEAD..." -ForegroundColor Gray
+            $gitDiff = git diff "origin/$currentBranch..HEAD" 2>&1
+        }
         
         # Check if git diff failed
         if ($LASTEXITCODE -ne 0) {
