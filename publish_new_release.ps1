@@ -1205,15 +1205,24 @@ try {
     Set-ReleaseState -Key "tag_created" -Value "true"
     
     if (-not $DryRun) {
-        Write-Host "Pushing commit and tag to remote repository..."
-        git push --follow-tags
+        Write-Host "Pushing commit to remote repository..."
+        git push
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Git push failed with exit code: $LASTEXITCODE"
-            Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current) --follow-tags"
+            Write-Error "You may need to run: git push --set-upstream origin $(git branch --show-current)"
             exit 1
         }
-        Write-Host "Git push successful (commit and tag)." -ForegroundColor Green
+        Write-Host "Git push successful (commit)." -ForegroundColor Green
         Set-ReleaseState -Key "commit_pushed" -Value "true"
+        
+        # Push tag separately to ensure it's available for release creation
+        Write-Host "Pushing tag $tagName to remote repository..."
+        git push origin $tagName
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Tag push failed with exit code: $LASTEXITCODE"
+            exit 1
+        }
+        Write-Host "Tag push successful." -ForegroundColor Green
         Set-ReleaseState -Key "tag_pushed" -Value "true"
     }
     } # End of commit creation if/else block

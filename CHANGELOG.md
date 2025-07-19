@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] - 2025-07-19 22:51:32
+### Fixed
+- Fixed tag push timing in release script
+  - Tags are now pushed separately after commit to ensure availability for GitHub release creation
+  - Prevents "tag exists locally but has not been pushed" error during release process
+
 ## [0.4.7] - 2025-07-19 22:26:49
 ### Fixed
 - Added comprehensive carriage return protection to publish script
