@@ -390,14 +390,32 @@ try {
         
         try {
             # Run test type and capture exit code
-            & $testScriptPath -TestType $testType -CI -LogToFile
+            Write-Host "DEBUG: Running test script: $testScriptPath" -ForegroundColor Yellow
+            Write-Host "DEBUG: Current directory: $(Get-Location)" -ForegroundColor Yellow
             
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warning "$testType tests failed with exit code: $LASTEXITCODE"
-                $testExitCode = $LASTEXITCODE
+            # Run test script in a separate scope to avoid strict mode issues
+            $testResult = & {
+                param($ScriptPath, $TestType)
+                $ErrorActionPreference = 'Continue'
+                & $ScriptPath -TestType $TestType -CI -LogToFile
+                return $LASTEXITCODE
+            } -ScriptPath $testScriptPath -TestType $testType
+            
+            if ($testResult -ne 0) {
+                Write-Warning "$testType tests failed with exit code: $testResult"
+                $testExitCode = $testResult
                 break
             }
         } catch {
+            Write-Host "DEBUG: Caught exception in test execution" -ForegroundColor Red
+            Write-Host "DEBUG: Exception type: $($_.Exception.GetType().FullName)" -ForegroundColor Red
+            Write-Host "DEBUG: Exception message: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "DEBUG: Target object: $($_.TargetObject)" -ForegroundColor Red
+            if ($_.Exception.Message -like "*Count*") {
+                Write-Host "DEBUG: This is the Count property error" -ForegroundColor Red
+                Write-Host "DEBUG: Full error details:" -ForegroundColor Red
+                Write-Host $_.Exception.ToString() -ForegroundColor Red
+            }
             Write-Error "Error running $testType tests: $_"
             $testExitCode = 1
             break
@@ -408,7 +426,12 @@ try {
     if ($testExitCode -eq 0) {
         Write-Host "All tests passed. Running coverage analysis..." -ForegroundColor Green
         try {
-            & $testScriptPath -TestType Unit -Coverage -CI -LogToFile
+            # Run coverage analysis in a separate scope
+            & {
+                param($ScriptPath)
+                $ErrorActionPreference = 'Continue'
+                & $ScriptPath -TestType Unit -Coverage -CI -LogToFile
+            } -ScriptPath $testScriptPath
         } catch {
             Write-Warning "Coverage analysis failed but tests passed: $_"
         }
