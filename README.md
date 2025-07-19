@@ -61,6 +61,21 @@ graph TD
 *   **Scheduled Task Integration:** Can create/update a Windows Scheduled Task for periodic execution.
 *   **Debug Mode:** Offers verbose logging for troubleshooting.
 
+## Installation
+
+The UpdateLoxone tool can be installed using the MSI installer or manually:
+
+### MSI Installation (Recommended)
+1. Download the latest MSI installer from the [Releases](https://github.com/deafsquad/UpdateLoxone/releases) page
+2. Run the MSI installer - it will install to `C:\Program Files (x86)\UpdateLoxone`
+3. A Start Menu shortcut will be created for easy access
+4. The installer supports proper upgrades - newer versions will automatically update existing installations
+
+### Manual Installation
+1. Download and extract the latest release ZIP to a location of your choice
+2. Ensure all files remain in their original structure (especially the `LoxoneUtils` folder)
+3. Run `UpdateLoxone.ps1` from PowerShell
+
 ## Prerequisites
 
 *   **PowerShell:** Version 5.1 or higher.
@@ -72,22 +87,28 @@ graph TD
 
 ## Script Files
 
-*   **`UpdateLoxone.ps1`:** The main orchestration script.
+*   **`UpdateLoxone.ps1`:** The main orchestration script with emoji status indicators (🔄, 🚀, ⬇️, 📦, ✓, 🔍, ⚠️, ✗).
 *   **`LoxoneUtils/` (Directory):** Contains the suite of PowerShell modules (`.psm1` files) that provide the core functionalities:
     *   `LoxoneUtils.ErrorHandling.psm1`
     *   `LoxoneUtils.Installation.psm1`
-    *   `LoxoneUtils.Logging.psm1`
+    *   `LoxoneUtils.Logging.psm1` - Thread-safe logging with automatic rotation
     *   `LoxoneUtils.Miniserver.psm1`
     *   `LoxoneUtils.Network.psm1`
     *   `LoxoneUtils.psd1` (Module manifest)
     *   `LoxoneUtils.psm1` (Main module file that likely loads others or acts as a wrapper)
     *   `LoxoneUtils.RunAsUser.psm1`
     *   `LoxoneUtils.System.psm1`
-    *   `LoxoneUtils.Toast.psm1`
+    *   `LoxoneUtils.Toast.psm1` - Recently optimized (~50% smaller)
     *   `LoxoneUtils.UpdateCheck.psm1`
     *   `LoxoneUtils.Utility.psm1`
     *   `LoxoneUtils.WorkflowSteps.psm1`
-*   **`Run-UpdateLoxoneTests.ps1`:** (If still present and used) A script for testing functions within the `LoxoneUtils` modules.
+    *   `LoxoneUtils.TestCoverage.psm1` - Test coverage analysis
+    *   `LoxoneUtils.TestTracking.psm1` - Test assertion tracking
+*   **`publish_new_release.ps1`:** Automated release script that creates MSI installers and manages GitHub releases.
+*   **`tests/` (Directory):** Comprehensive test suite with 100% module coverage:
+    *   `run-tests.ps1` - Main test runner with CI/CD support
+    *   `Unit/`, `Integration/`, `System/` - Test categories
+    *   39 test files covering all PowerShell modules
 
 ## Configuration Files
 
@@ -168,27 +189,75 @@ graph TD
 ## Notes
 
 *   The script relies on specific Loxone web endpoints and behaviors which could change.
-*   Check `UpdateLoxone.log` (in `-ScriptSaveFolder`) for detailed operational logs and troubleshooting.
+*   **Log File Location:** 
+    *   When installed via MSI to Program Files: Logs are written to `%LOCALAPPDATA%\UpdateLoxone\Logs\`
+    *   When run from other locations: Logs are written to `ScriptSaveFolder\Logs\` (defaults to script directory)
+*   Check `UpdateLoxone_[username]_[timestamp].log` for detailed operational logs and troubleshooting.
+*   Log files are automatically rotated when they exceed 10MB, with automatic cleanup of old logs.
 *   Manage the scheduled task via Windows Task Scheduler (`taskschd.msc`).
 
 ## Testing
 
-A separate script, `Run-UpdateLoxoneTests.ps1`, is provided to test the core functions within the `LoxoneUtils.psm1` module.
+The project includes a comprehensive test suite with 100% module coverage, using Pester v5 framework.
 
-*   **Purpose:** Verify individual function logic in different contexts (normal, simulated task, elevated).
+*   **Test Runner:** `tests\run-tests.ps1` - Main test runner with multiple options
+*   **Test Categories:**
+    *   **Unit Tests:** Fast, isolated tests with no external dependencies
+    *   **Integration Tests:** Tests that interact with network or file system
+    *   **System Tests:** Tests requiring administrator privileges
 *   **Usage:**
     ```powershell
-    # Run all tests (attempts elevation by default)
-    .\Run-UpdateLoxoneTests.ps1
+    # Run unit tests (fast, ~2-3 min)
+    .\tests\run-tests.ps1
 
-    # Run only tests in the 'Logging' category
-    .\Run-UpdateLoxoneTests.ps1 -TestName Logging
+    # Run all tests including integration and SYSTEM tests
+    .\tests\run-tests.ps1 -TestType All
 
-    # Run only a specific function test
-    .\Run-UpdateLoxoneTests.ps1 -TestName Get-RedactedPassword
+    # Run with detailed output
+    .\tests\run-tests.ps1 -Detailed
 
-    # Run all tests but skip the elevated run attempt
-    .\Run-UpdateLoxoneTests.ps1 -SkipElevation
+    # Run with live progress notifications
+    .\tests\run-tests.ps1 -LiveProgress
+
+    # CI mode (no prompts, minimal output)
+    .\tests\run-tests.ps1 -CI
+
+    # Skip SYSTEM tests (which require admin)
+    .\tests\run-tests.ps1 -SkipSystemTests
     ```
-*   The script runs tests non-elevated first, then attempts to re-launch itself elevated (unless `-SkipElevation` is used) to run tests requiring admin rights and re-run others in an elevated context.
-*   A combined summary is displayed in the initial console window after all runs complete.
+*   **Test Coverage:** The test suite includes:
+    *   39 test files covering all 11 PowerShell modules
+    *   Four test types per module: Simple, Working, Characterization, and Full tests
+    *   Automated coverage analysis and reporting
+    *   Test assertion tracking for coverage metrics
+*   **CI/CD Integration:** Tests are automatically run before each release via `publish_new_release.ps1`
+
+## Development
+
+### Building and Releasing
+
+The project uses an automated release process:
+
+```powershell
+# Create a new release (runs tests, creates MSI, generates manifests, creates GitHub release)
+.\publish_new_release.ps1 -PackageIdentifier "deafsquad.UpdateLoxone"
+
+# Dry run to see what would happen
+.\publish_new_release.ps1 -PackageIdentifier "deafsquad.UpdateLoxone" -DryRun
+```
+
+The release script:
+- Automatically increments version numbers
+- Runs the full test suite (release fails if tests fail)
+- Creates an MSI installer using PSMSI module
+- Generates winget manifest files
+- Creates a GitHub release with the MSI as an asset
+- Supports dry runs for testing the release process
+
+### Recent Improvements
+
+- **MSI Installer:** Replaced ZIP packaging with proper MSI installer for winget compatibility
+- **Smart Log Redirection:** Logs are automatically redirected to user profile when installed in Program Files
+- **Toast Notification Fixes:** Fixed auto-dismiss issues and optimized module size by ~50%
+- **Comprehensive Testing:** Added 100% module coverage with automated test suite
+- **Dry Run Enhancements:** Auto-increment versions to avoid duplicate installations during testing

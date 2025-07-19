@@ -5,14 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2025-07-19 01:51:00
-### Fixed
-- MSI installer now properly redirects logs to %LOCALAPPDATA%\UpdateLoxone when installed in Program Files
-- Fixed MSI upgrade behavior by using stable UpgradeCode
-- Removed version revert for dry runs to allow proper version increment testing
-
-## [0.3.9] - 2025-07-18 23:58:04
+## [0.4.3] - 2025-07-19 02:40:31
 ### Added
+- Dry run version management improvements
+  - Auto-increment version for repeated dry runs to avoid duplicate MSI installations
+  - Skip CHANGELOG requirement for auto-incremented dry run versions
+  - Track last dry run version in `.last-dryrun-version` file
 - Comprehensive test suite with 100% module coverage
   - Created 39 test files covering all 11 PowerShell modules
   - Implemented four test types per module: Simple, Working, Characterization, and Full tests
@@ -63,8 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added duration estimation for SYSTEM tests when no duration is reported by PsExec helper
   - Fixed System Test Skip Reason showing at top level when RunAsUser tests pass
   - Improved skip reason display logic to show contextually appropriate messages
-
-### Changed
 - Enhanced publish script to stage all project files instead of selective files
   - Now uses `git add -A` to include all changes (new, modified, deleted)
   - Added pre-flight check for untracked files with user confirmation
@@ -82,8 +78,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Release notes now include a direct link to the actual branch commit
   - Makes it easier to trace releases back to their source commits
   - Improves transparency by linking to the real commit instead of just the tag
+- Optimized `LoxoneUtils.Toast.psm1` module
+  - Reduced code size by ~50% through consolidation of redundant code
+  - Replaced custom logging with centralized logging functions (Write-Log, Enter-Function, Exit-Function)
+  - Improved function organization and separation of concerns
+  - Preserved critical data binding fix to prevent toast dismissal
+  - Fixed PowerShell 5.1 compatibility issues (removed null-coalescing operator)
+  - Module now properly handles initialization when loaded before logging module
+  - Removed `Get-LoxoneConfigToastAppId` from exports (now internal)
+  - Added `Reset-ToastDataBinding` to exports for testing scenarios
 
 ### Fixed
+- MSI installer now properly redirects logs to %LOCALAPPDATA%\UpdateLoxone when installed in Program Files
+- Fixed MSI upgrade behavior by using stable UpgradeCode
+- Removed version revert for dry runs to allow proper version increment testing
 - Fixed publish script error handling
   - Fixed incorrect test runner parameter from `-GenerateCoverage` to `-Coverage`
   - Added exit code checking after test execution to prevent releases when tests fail
@@ -103,6 +111,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Simplified cleanup logic to properly group files by prefix and clean up old logs
   - Improved regex patterns to handle both legacy double-timestamp files and new single-timestamp files
 - Toast notification fixes
+  - Fixed toast notification auto-dismiss issue
+    - Toast notifications were dismissing after ~6 seconds during long operations
+    - Root cause: `New-BurntToastNotification` doesn't support scenarios that prevent auto-dismiss
+    - Solution: Switched to `Submit-BTNotification` with `Reminder` scenario
+    - Toast notifications now remain visible until user interaction or script updates
   - Fixed progress bar getting stuck at 98% when transitioning from download to installation
   - Fixed toast losing foreground state and auto-dismissing after download completion
   - Fixed stale text appearing when reusing existing toast notifications
@@ -123,23 +136,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Identified webhook URL exposure (low risk - posting only)
 - Recommended credential encryption strategies for future implementation
 
-### Changed
-- Optimized `LoxoneUtils.Toast.psm1` module
-  - Reduced code size by ~50% through consolidation of redundant code
-  - Replaced custom logging with centralized logging functions (Write-Log, Enter-Function, Exit-Function)
-  - Improved function organization and separation of concerns
-  - Preserved critical data binding fix to prevent toast dismissal
-  - Fixed PowerShell 5.1 compatibility issues (removed null-coalescing operator)
-  - Module now properly handles initialization when loaded before logging module
-  - Removed `Get-LoxoneConfigToastAppId` from exports (now internal)
-  - Added `Reset-ToastDataBinding` to exports for testing scenarios
-
-### Fixed
-- Fixed toast notification auto-dismiss issue
-  - Toast notifications were dismissing after ~6 seconds during long operations
-  - Root cause: `New-BurntToastNotification` doesn't support scenarios that prevent auto-dismiss
-  - Solution: Switched to `Submit-BTNotification` with `Reminder` scenario
-  - Toast notifications now remain visible until user interaction or script updates
 
 ### Documentation
 - Created comprehensive test documentation (`TEST_SUMMARY.md`)
