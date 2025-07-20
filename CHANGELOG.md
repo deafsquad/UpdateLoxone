@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.4] - 2025-07-20 05:53:16
+### Fixed
+- Fixed live progress notification to show correct total test count (257 instead of 253) by including subprocess SYSTEM test results
+- Fixed test discovery to dynamically include RunAsUser SYSTEM tests only when admin privileges are available and the test script exists
+- Fixed notification counters to update after RunAsUser SYSTEM tests complete via subprocess
+- Fixed toast notification to force update with new totals after subprocess tests finish
+
 ## [0.6.3] - 2025-07-20 05:34:24
 ### Added
 - Early exit detection in publish script when no changes are available for release

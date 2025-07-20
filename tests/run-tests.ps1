@@ -1367,7 +1367,21 @@ function Invoke-TestsWithLiveProgress {
     
     $discovery = Invoke-Pester -Configuration $discoveryConfig
     $totalTests = $discovery.TotalCount
+    
+    # Add RunAsUser SYSTEM tests to the count if they will run
+    $runAsUserSystemTests = 0
+    if ($script:IsAdmin -and $TestType -in @('All', 'System') -and -not $SkipSystemTests) {
+        $systemTestScript = Join-Path $script:TestsPath "Helpers" | Join-Path -ChildPath "invoke-system-tests.ps1"
+        if (Test-Path $systemTestScript) {
+            $runAsUserSystemTests = 4  # These 4 tests run via PsExec as SYSTEM user
+            $totalTests += $runAsUserSystemTests
+        }
+    }
+    
     Write-TestLog "Discovered $totalTests tests" -Color Gray
+    if ($runAsUserSystemTests -gt 0) {
+        Write-TestLog "  (includes $runAsUserSystemTests RunAsUser SYSTEM tests)" -Color Gray
+    }
     
     # Set global total for progress updates
     $Global:LiveProgressTotalTests = $totalTests
@@ -1480,7 +1494,22 @@ function Invoke-TestsWithLiveProgress {
             }
         }
         
+        # Add RunAsUser SYSTEM tests to the count if they will run
+        $totalTestsIncludingSystem = $allTests.Count
+        if ($script:IsAdmin -and $TestType -in @('All', 'System') -and -not $SkipSystemTests) {
+            $systemTestScript = Join-Path $script:TestsPath "Helpers" | Join-Path -ChildPath "invoke-system-tests.ps1"
+            if (Test-Path $systemTestScript) {
+                $totalTestsIncludingSystem += 4  # Add the 4 RunAsUser SYSTEM tests
+            }
+        }
+        
         Write-TestLog "Found $($allTests.Count) individual tests to run" -Level "DEBUG"
+        if ($totalTestsIncludingSystem -gt $allTests.Count) {
+            Write-TestLog "  (plus $($totalTestsIncludingSystem - $allTests.Count) RunAsUser SYSTEM tests)" -Level "DEBUG"
+        }
+        
+        # Update global total to include SYSTEM tests
+        $Global:LiveProgressTotalTests = $totalTestsIncludingSystem
         
         # Count unique modules
         $uniqueModules = @()
@@ -1497,7 +1526,7 @@ function Invoke-TestsWithLiveProgress {
         $Global:LiveProgressToastData.ProgressBarStatus = "0 / $($uniqueModules.Count) modules"
         $Global:LiveProgressToastData.ProgressBarValue = 0
         $Global:LiveProgressToastData.TestProgressTitle = "Starting tests..."
-        $Global:LiveProgressToastData.OverallProgressStatus = "0 / $($allTests.Count) tests"
+        $Global:LiveProgressToastData.OverallProgressStatus = "0 / $totalTestsIncludingSystem tests"
         
         # Now run tests one by one with progress updates
         $testResults = @{
@@ -2295,7 +2324,13 @@ if ($null -eq $testCategories.Integration) { $testCategories.Integration = @() }
 if ($null -eq $testCategories.System) { $testCategories.System = @() }
 
 # Account for RunAsUser SYSTEM tests (4 tests that run via invoke-system-tests.ps1)
-$runAsUserSystemTests = 4
+$runAsUserSystemTests = 0
+if ($script:IsAdmin -and $TestType -in @('All', 'System') -and -not $SkipSystemTests) {
+    $systemTestScript = Join-Path $script:TestsPath "Helpers" | Join-Path -ChildPath "invoke-system-tests.ps1"
+    if (Test-Path $systemTestScript) {
+        $runAsUserSystemTests = 4  # These 4 tests run via PsExec as SYSTEM user
+    }
+}
 $systemTestCount = if ($testCategories.System) { $testCategories.System.Count } else { 0 }
 $totalSystemTests = $systemTestCount + $runAsUserSystemTests
 
@@ -2455,6 +2490,20 @@ if ($script:LiveProgressFullResults) {
                     $script:Results.TotalTests += $systemResult.Results.TotalTests
                     $script:Results.PassedTests += $systemResult.Results.PassedTests
                     $script:Results.FailedTests += ($systemResult.Results.TotalTests - $systemResult.Results.PassedTests)
+                    
+                    # Update live progress notification with RunAsUser SYSTEM test results
+                    if ($LiveProgress -and -not $script:LiveProgressNoToast) {
+                        # Update global counters for notification
+                        $Global:LiveProgressTotalTests += $systemResult.Results.TotalTests
+                        $Global:LiveProgressTestCount += $systemResult.Results.TotalTests
+                        $Global:LiveProgressPassedCount += $systemResult.Results.PassedTests
+                        $Global:LiveProgressFailedCount += ($systemResult.Results.TotalTests - $systemResult.Results.PassedTests)
+                        
+                        # Force a toast update with new totals
+                        if (Get-Command Update-Toast -ErrorAction SilentlyContinue) {
+                            Update-Toast -Message "RunAsUser SYSTEM tests completed"
+                        }
+                    }
                     
                     # Clear skip reason since RunAsUser SYSTEM tests actually ran
                     if ($systemResult.Results.PassedTests -gt 0) {
@@ -3061,6 +3110,20 @@ if ($script:RunSystem -and $testCategories.System -and $testCategories.System.Co
                 $script:Results.TotalTests += $systemResult.Results.TotalTests
                 $script:Results.PassedTests += $systemResult.Results.PassedTests
                 $script:Results.FailedTests += ($systemResult.Results.TotalTests - $systemResult.Results.PassedTests)
+                
+                # Update live progress notification with RunAsUser SYSTEM test results
+                if ($LiveProgress -and -not $script:LiveProgressNoToast) {
+                    # Update global counters for notification
+                    $Global:LiveProgressTotalTests += $systemResult.Results.TotalTests
+                    $Global:LiveProgressTestCount += $systemResult.Results.TotalTests
+                    $Global:LiveProgressPassedCount += $systemResult.Results.PassedTests
+                    $Global:LiveProgressFailedCount += ($systemResult.Results.TotalTests - $systemResult.Results.PassedTests)
+                    
+                    # Force a toast update with new totals
+                    if (Get-Command Update-Toast -ErrorAction SilentlyContinue) {
+                        Update-Toast -Message "RunAsUser SYSTEM tests completed"
+                    }
+                }
                 
                 Write-TestLog "RunAsUser SYSTEM tests: $($systemResult.Results.PassedTests)/$($systemResult.Results.TotalTests) passed" -Color $(if ($systemResult.Results.PassedTests -eq $systemResult.Results.TotalTests) { 'Green' } else { 'Yellow' })
                 
