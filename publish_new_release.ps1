@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Automates the process of packaging the UpdateLoxone script and generating winget manifest files.
 
@@ -231,9 +231,42 @@ if ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version) {
     
     # Check current git state
     $currentBranch = git branch --show-current
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get current branch"
+        exit 1
+    }
     $uncommittedChanges = git status --porcelain
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get git status"
+        exit 1
+    }
     $lastCommit = git log -1 --oneline
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get last commit"
+        exit 1
+    }
     $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
+    # Get detailed commit info with body if present
+    $unpushedCommitsDetailed = @()
+    $rawCommits = git log "origin/$currentBranch..HEAD" --pretty=format:"%h|%s|%b|ENDCOMMIT" 2>$null
+    if ($rawCommits) {
+        $rawCommits -split "ENDCOMMIT" | Where-Object { $_ } | ForEach-Object {
+            $parts = $_ -split '\|', 3
+            if ($parts.Count -ge 2) {
+                $hash = $parts[0].Trim()
+                $subject = $parts[1].Trim()
+                $body = if ($parts.Count -eq 3 -and $parts[2].Trim()) { $parts[2].Trim() } else { $null }
+                
+                $unpushedCommitsDetailed += "$hash $subject"
+                if ($body) {
+                    # Add body lines with proper indentation
+                    $body -split "`n" | Where-Object { $_.Trim() } | ForEach-Object {
+                        $unpushedCommitsDetailed += "        $($_.Trim())"
+                    }
+                }
+            }
+        }
+    }
     
     # Check GitHub releases
     $existingRelease = $null
@@ -254,14 +287,76 @@ if ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version) {
     Write-Host "  Uncommitted changes: $(if ($uncommittedChanges) { 'YES - ' + ($uncommittedChanges -split "`n").Count + ' files' } else { 'None' })" -ForegroundColor $(if ($uncommittedChanges) { 'Yellow' } else { 'Gray' })
     Write-Host "  Unpushed commits: $(if ($unpushedCommits) { 'YES - ' + ($unpushedCommits -split "`n").Count + ' commits' } else { 'None' })" -ForegroundColor $(if ($unpushedCommits) { 'Yellow' } else { 'Gray' })
     
+    # Calculate current state hash to compare with saved one
+    $currentStateHash = Get-GitStateHash
+    
     Write-Host "`nRelease Progress:" -ForegroundColor Cyan
-    Write-Host "  Tests run: $(if ($script:ResumeState.ContainsKey('tests_passed') -and $script:ResumeState.tests_passed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('tests_passed') -and $script:ResumeState.tests_passed -eq 'true') { 'Green' } else { 'Yellow' })
+    Write-Host "  Tests run: $(if ($script:ResumeState.ContainsKey('tests_completed') -and $script:ResumeState.tests_completed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('tests_completed') -and $script:ResumeState.tests_completed -eq 'true') { 'Green' } else { 'Yellow' })
+    if ($script:ResumeState.ContainsKey('tests_completed') -and $script:ResumeState.tests_completed -eq 'true' -and $script:ResumeState.ContainsKey('tests_checksum')) {
+        if ($script:ResumeState.tests_checksum -ne $currentStateHash) {
+            Write-Host "    ⚠️  Code changed since tests ran!" -ForegroundColor Red
+            Write-Host "    Previous: $($script:ResumeState.tests_checksum)" -ForegroundColor Gray
+            Write-Host "    Current:  $currentStateHash" -ForegroundColor Gray
+        } else {
+            Write-Host "    Code unchanged since tests ✓" -ForegroundColor Green
+        }
+    }
     Write-Host "  CHANGELOG updated: $(if ($script:ResumeState.ContainsKey('changelog_updated') -and $script:ResumeState.changelog_updated -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('changelog_updated') -and $script:ResumeState.changelog_updated -eq 'true') { 'Green' } else { 'Yellow' })
     Write-Host "  MSI created: $(if ($script:ResumeState.ContainsKey('msi_created') -and $script:ResumeState.msi_created -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('msi_created') -and $script:ResumeState.msi_created -eq 'true') { 'Green' } else { 'Yellow' })
     Write-Host "  Manifests updated: $(if ($script:ResumeState.ContainsKey('manifests_updated') -and $script:ResumeState.manifests_updated -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('manifests_updated') -and $script:ResumeState.manifests_updated -eq 'true') { 'Green' } else { 'Yellow' })
     Write-Host "  Git commit created: $(if ($script:ResumeState.ContainsKey('git_committed') -and $script:ResumeState.git_committed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('git_committed') -and $script:ResumeState.git_committed -eq 'true') { 'Green' } else { 'Yellow' })
     Write-Host "  Git pushed: $(if ($script:ResumeState.ContainsKey('git_pushed') -and $script:ResumeState.git_pushed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('git_pushed') -and $script:ResumeState.git_pushed -eq 'true') { 'Green' } else { 'Yellow' })
     Write-Host "  GitHub release: $(if ($releaseExists) { 'EXISTS ✓' } else { 'NOT CREATED' })" -ForegroundColor $(if ($releaseExists) { 'Green' } else { 'Yellow' })
+    
+    # Show detailed uncommitted changes
+    if ($uncommittedChanges) {
+        Write-Host "`nUncommitted changes that will be included in the release:" -ForegroundColor Yellow
+        git status --short | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+    } else {
+        Write-Host "`nNo uncommitted changes detected." -ForegroundColor Green
+    }
+    
+    # Show detailed unpushed commits
+    if ($unpushedCommits) {
+        Write-Host "`nUnpushed commits that will be included in the release:" -ForegroundColor Yellow
+        if ($unpushedCommitsDetailed) {
+            $unpushedCommitsDetailed | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        } else {
+            $unpushedCommits | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        }
+    } else {
+        Write-Host "`nNo unpushed commits detected." -ForegroundColor Green
+    }
+    
+    # Check CHANGELOG status
+    Write-Host "`nChecking CHANGELOG status..." -ForegroundColor Cyan
+    $changelogPath = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
+    $changelogContent = Get-Content $changelogPath -Raw
+    
+    # Check for existing version entry
+    $escapedVersionForRegex = [regex]::Escape($script:ResumeState.version)
+    $versionHeaderExactPattern = "## \[$escapedVersionForRegex\]"
+    
+    if ($changelogContent -match $versionHeaderExactPattern) {
+        Write-Host "CHANGELOG already has an entry for version $($script:ResumeState.version)" -ForegroundColor Green
+    } else {
+        # Check for Unreleased section
+        if ($changelogContent -match '(?s)(## \[Unreleased\][^#]*?)(?=## \[|$)') {
+            $unreleasedSection = $matches[1].Trim()
+            Write-Host "`nFound Unreleased section in CHANGELOG:" -ForegroundColor Yellow
+            Write-Host "----------------------------------------" -ForegroundColor Gray
+            $unreleasedSection -split "`n" | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+            Write-Host "----------------------------------------" -ForegroundColor Gray
+            Write-Host "This will be converted to version $($script:ResumeState.version)" -ForegroundColor Yellow
+        } else {
+            Write-Host "No Unreleased section found in CHANGELOG" -ForegroundColor Yellow
+            if ($uncommittedChanges -or $unpushedCommits) {
+                Write-Host "AI will generate changelog from the code changes" -ForegroundColor Cyan
+            } else {
+                Write-Host "WARNING: No changes detected for changelog generation!" -ForegroundColor Red
+            }
+        }
+    }
     
     Write-Host "`nWhat will happen:" -ForegroundColor Cyan
     if ($uncommittedChanges -or $unpushedCommits) {
@@ -512,6 +607,20 @@ $AuthorName = Get-CurrentAuthor -LocaleManifestPath $localeManifestPathForAuthor
 
 Write-Host "Starting release process for $script:PackageName version $ScriptVersion (Author: $AuthorName)..."
 
+# Show dry-run mode summary
+if ($DryRun) {
+    Write-Host "`nDRY RUN MODE:" -ForegroundColor Yellow
+    Write-Host "  ✓ Version validation and increment" -ForegroundColor Gray
+    Write-Host "  ✓ CHANGELOG validation" -ForegroundColor Gray
+    Write-Host "  ✓ MSI creation (for validation)" -ForegroundColor Gray
+    Write-Host "  ✓ Manifest generation" -ForegroundColor Gray
+    Write-Host "  ⚠️  SKIPPING: Test execution" -ForegroundColor Yellow
+    Write-Host "  ⚠️  SKIPPING: Git commits/push" -ForegroundColor Yellow
+    Write-Host "  ⚠️  SKIPPING: GitHub release creation" -ForegroundColor Yellow
+    Write-Host "  ⚠️  SKIPPING: winget-pkgs submission" -ForegroundColor Yellow
+    Write-Host ""
+}
+
 # --- Check for untracked files before tests ---
 $untrackedFiles = git ls-files --others --exclude-standard
 if ($untrackedFiles) {
@@ -524,6 +633,142 @@ if ($untrackedFiles) {
         Write-Host "Please add the files manually using 'git add' and restart the release process." -ForegroundColor Yellow
         exit 0
     }
+}
+
+# --- Check for changes and show status (if not already shown in resume section) ---
+if (-not ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version)) {
+    # --- Check for uncommitted changes before tests ---
+    $uncommittedChanges = git status --porcelain
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get git status"
+        exit 1
+    }
+    if ($uncommittedChanges) {
+        Write-Host "`nUncommitted changes that will be included in the release:" -ForegroundColor Yellow
+        git status --short | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        Write-Host ""
+    } else {
+        Write-Host "`nNo uncommitted changes detected." -ForegroundColor Green
+    }
+
+    # --- Check for unpushed commits ---
+    $currentBranch = git branch --show-current
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get current branch"
+        exit 1
+    }
+    $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
+    if ($unpushedCommits) {
+        Write-Host "Unpushed commits that will be included in the release:" -ForegroundColor Yellow
+        # Get detailed commit info with body if present
+    $unpushedCommitsDetailed = @()
+    $rawCommits = git log "origin/$currentBranch..HEAD" --pretty=format:"%h|%s|%b|ENDCOMMIT" 2>$null
+    if ($rawCommits) {
+        $rawCommits -split "ENDCOMMIT" | Where-Object { $_ } | ForEach-Object {
+            $parts = $_ -split '\|', 3
+            if ($parts.Count -ge 2) {
+                $hash = $parts[0].Trim()
+                $subject = $parts[1].Trim()
+                $body = if ($parts.Count -eq 3 -and $parts[2].Trim()) { $parts[2].Trim() } else { $null }
+                
+                $unpushedCommitsDetailed += "$hash $subject"
+                if ($body) {
+                    # Add body lines with proper indentation
+                    $body -split "`n" | Where-Object { $_.Trim() } | ForEach-Object {
+                        $unpushedCommitsDetailed += "        $($_.Trim())"
+                    }
+                }
+            }
+        }
+    }
+        if ($unpushedCommitsDetailed) {
+            $unpushedCommitsDetailed | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        } else {
+            $unpushedCommits | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        }
+        Write-Host ""
+    } else {
+        Write-Host "No unpushed commits detected." -ForegroundColor Green
+    }
+
+    # --- Check CHANGELOG status ---
+    Write-Host "Checking CHANGELOG status..." -ForegroundColor Cyan
+    $changelogPath = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
+    $changelogContent = Get-Content $changelogPath -Raw
+
+    # Check for existing version entry
+    $escapedVersionForRegex = [regex]::Escape($ScriptVersion)
+    $versionHeaderExactPattern = "## \[$escapedVersionForRegex\]"
+
+    if ($changelogContent -match $versionHeaderExactPattern) {
+        Write-Host "CHANGELOG already has an entry for version $ScriptVersion" -ForegroundColor Green
+    } else {
+        # Check for Unreleased section
+        if ($changelogContent -match '(?s)(## \[Unreleased\][^#]*?)(?=## \[|$)') {
+            $unreleasedSection = $matches[1].Trim()
+            Write-Host "`nFound Unreleased section in CHANGELOG:" -ForegroundColor Yellow
+            Write-Host "----------------------------------------" -ForegroundColor Gray
+            $unreleasedSection -split "`n" | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+            Write-Host "----------------------------------------" -ForegroundColor Gray
+            Write-Host "This will be converted to version $ScriptVersion" -ForegroundColor Yellow
+        } else {
+            Write-Host "No Unreleased section found in CHANGELOG" -ForegroundColor Yellow
+            if ($uncommittedChanges -or $unpushedCommits) {
+                Write-Host "AI will generate changelog from the code changes" -ForegroundColor Cyan
+            } else {
+                Write-Host "WARNING: No changes detected for changelog generation!" -ForegroundColor Red
+            }
+        }
+    }
+    Write-Host ""
+}
+
+# Ensure variables are set for later use
+if (-not $uncommittedChanges) {
+    $uncommittedChanges = git status --porcelain
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get git status"
+        exit 1
+    }
+}
+if (-not $currentBranch) {
+    $currentBranch = git branch --show-current
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get current branch"
+        exit 1
+    }
+}
+if (-not $unpushedCommits) {
+    $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
+}
+if (-not $unpushedCommitsDetailed) {
+    # Get detailed commit info with body if present
+    $unpushedCommitsDetailed = @()
+    $rawCommits = git log "origin/$currentBranch..HEAD" --pretty=format:"%h|%s|%b|ENDCOMMIT" 2>$null
+    if ($rawCommits) {
+        $rawCommits -split "ENDCOMMIT" | Where-Object { $_ } | ForEach-Object {
+            $parts = $_ -split '\|', 3
+            if ($parts.Count -ge 2) {
+                $hash = $parts[0].Trim()
+                $subject = $parts[1].Trim()
+                $body = if ($parts.Count -eq 3 -and $parts[2].Trim()) { $parts[2].Trim() } else { $null }
+                
+                $unpushedCommitsDetailed += "$hash $subject"
+                if ($body) {
+                    # Add body lines with proper indentation
+                    $body -split "`n" | Where-Object { $_.Trim() } | ForEach-Object {
+                        $unpushedCommitsDetailed += "        $($_.Trim())"
+                    }
+                }
+            }
+        }
+    }
+}
+if (-not $changelogPath) {
+    $changelogPath = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
+}
+if (-not $changelogContent) {
+    $changelogContent = Get-Content $changelogPath -Raw
 }
 
 # --- Run Tests First ---
@@ -553,6 +798,13 @@ if ($script:IsResuming -and $script:ResumeState.ContainsKey("tests_completed") -
 
 if ($script:ResumeState.ContainsKey("tests_completed") -and $script:ResumeState.tests_completed -eq "true") {
     # Tests already validated above, skip execution
+} elseif ($DryRun) {
+    Write-Host "DRY RUN: Skipping test execution" -ForegroundColor Yellow
+    Write-Host "  Tests would normally run here to validate code quality" -ForegroundColor Gray
+    Write-Host "  Saved Git state hash: $currentStateHash" -ForegroundColor Gray
+    Set-ReleaseState -Key "tests_completed" -Value "true"
+    Set-ReleaseState -Key "tests_skipped" -Value "true"
+    Set-ReleaseState -Key "tests_checksum" -Value $currentStateHash
 } elseif ($SkipTests) {
     Write-Warning "SKIPPING TESTS - This is not recommended for production releases!"
     Write-Host ""
@@ -830,8 +1082,16 @@ if ($changelogUpdatedByScript) {
 if (-not ($changelogContent -match $versionHeaderExactPattern)) {
     # Check if we have unpushed commits or uncommitted changes that will be processed by AI
     $currentBranch = git branch --show-current
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get current branch"
+        exit 1
+    }
     $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
     $uncommittedChanges = git status --porcelain
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to get git status"
+        exit 1
+    }
     
     # For dry runs with auto-incremented versions, skip CHANGELOG requirement
     if ($DryRun -and $isDryRunAutoIncremented) {
@@ -896,17 +1156,32 @@ $msiFileName = "UpdateLoxone-v$ScriptVersion.msi"
 $msiFilePath = Join-Path -Path $releasesArchiveDir -ChildPath $msiFileName
 
 if ($script:IsResuming -and $script:ResumeState.ContainsKey("msi_created") -and $script:ResumeState.msi_created -eq "true" -and (Test-Path -LiteralPath $msiFilePath)) {
-        Write-Host "MSI installer already exists from previous run, skipping creation..." -ForegroundColor Green
-        # Load the hash from state
-        if ($script:ResumeState.msi_hash) {
-            $fileHash = $script:ResumeState.msi_hash
-            Write-Host "Using saved SHA256 hash: $fileHash" -ForegroundColor Gray
+        # Validate Git state hash to ensure code hasn't changed
+        $currentStateHash = Get-GitStateHash
+        if ($script:ResumeState.ContainsKey("tests_checksum") -and $script:ResumeState.tests_checksum -ne $currentStateHash) {
+            Write-Host "MSI was created in previous run, but codebase has changed!" -ForegroundColor Yellow
+            Write-Host "  Previous state: $($script:ResumeState.tests_checksum)" -ForegroundColor Gray
+            Write-Host "  Current state:  $currentStateHash" -ForegroundColor Gray
+            Write-Host "Re-creating MSI to match current code..." -ForegroundColor Yellow
+            # Clear the MSI state to force re-creation
+            $script:ResumeState.Remove("msi_created")
+            $script:ResumeState.Remove("msi_hash")
         } else {
-            # Recalculate if not in state
-            Write-Host "Recalculating SHA256 hash..." -ForegroundColor Yellow
-            $fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+            Write-Host "MSI installer already exists from previous run, skipping creation..." -ForegroundColor Green
+            # Load the hash from state
+            if ($script:ResumeState.msi_hash) {
+                $fileHash = $script:ResumeState.msi_hash
+                Write-Host "Using saved SHA256 hash: $fileHash" -ForegroundColor Gray
+            } else {
+                # Recalculate if not in state
+                Write-Host "Recalculating SHA256 hash..." -ForegroundColor Yellow
+                $fileHash = Get-FileHash -Path $msiFilePath -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+            }
         }
-} else {
+}
+
+# Check if we need to create MSI (either not resuming, or resuming but MSI not created/needs recreation)
+if (-not ($script:IsResuming -and $script:ResumeState.ContainsKey("msi_created") -and $script:ResumeState.msi_created -eq "true" -and (Test-Path -LiteralPath $msiFilePath))) {
     Write-Host "Creating MSI installer: $msiFilePath..."
     try {
     # Create stable GUIDs for proper upgrade behavior
@@ -1160,8 +1435,22 @@ $localeManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIden
 $installerManifestPath = Join-Path -Path $finalManifestDir -ChildPath "$PackageIdentifier.installer.yaml"
 
 if ($script:IsResuming -and $script:ResumeState.ContainsKey("manifests_created") -and $script:ResumeState.manifests_created -eq "true") {
-    Write-Host "Manifests were already created in previous run, skipping..." -ForegroundColor Green
-} else {
+    # Validate Git state hash to ensure code hasn't changed
+    $currentStateHash = Get-GitStateHash
+    if ($script:ResumeState.ContainsKey("tests_checksum") -and $script:ResumeState.tests_checksum -ne $currentStateHash) {
+        Write-Host "Manifests were created in previous run, but codebase has changed!" -ForegroundColor Yellow
+        Write-Host "  Previous state: $($script:ResumeState.tests_checksum)" -ForegroundColor Gray
+        Write-Host "  Current state:  $currentStateHash" -ForegroundColor Gray
+        Write-Host "Re-creating manifests to match current code..." -ForegroundColor Yellow
+        # Clear the manifests state to force re-creation
+        $script:ResumeState.Remove("manifests_created")
+    } else {
+        Write-Host "Manifests were already created in previous run, skipping..." -ForegroundColor Green
+    }
+}
+
+# Check if we need to create manifests
+if (-not ($script:IsResuming -and $script:ResumeState.ContainsKey("manifests_created") -and $script:ResumeState.manifests_created -eq "true")) {
     $currentDate = Get-Date -Format "yyyy-MM-dd"
 $versionManifestContent = @"
 PackageIdentifier: $PackageIdentifier
@@ -1235,7 +1524,12 @@ try {
     }
 }
 
-$commitMessage = "Release v$ScriptVersion"
+# Create descriptive commit message
+if ($DryRun) {
+    $commitMessage = "Release v$ScriptVersion (DRY RUN TEST)`n`nThis commit was created by a dry-run test of the release script.`nIt reserves version $ScriptVersion but was not pushed to GitHub.`nRun without -DryRun to create the actual release."
+} else {
+    $commitMessage = "Release v$ScriptVersion`n`nAutomated release created by publish_new_release.ps1"
+}
 $tagName = "v$ScriptVersion"
 $readmeRelativePath = ".\README.md"
 $changelogRelativePath = ".\CHANGELOG.md"
@@ -1442,8 +1736,8 @@ END_CHANGELOG
             $newChangelogSection = $matches[1].Trim()
             
             # Validate that Claude didn't include the changelog header or format declaration
-            if ($newChangelogSection -match '(?i)(# Changelog|All notable changes|Keep a Changelog|Semantic Versioning)') {
-                Write-Error "Claude included the changelog header/format in the response. This is invalid."
+            if ($newChangelogSection -match '(?i)(# Changelog|All notable changes|Keep a Changelog|Semantic Versioning|The format is based on|and this project adheres to)') {
+                Write-Error "Claude included the changelog header/format declaration in the response. This is invalid."
                 Write-Error "Expected only the Unreleased section content, but got:"
                 Write-Error $newChangelogSection.Substring(0, [Math]::Min(500, $newChangelogSection.Length))
                 Write-Error "Please run the script again or update CHANGELOG.md manually."
@@ -1778,8 +2072,11 @@ END_CHANGELOG
         Write-Host "DRY RUN: Installer manifest already contains the correct URL: https://github.com/$script:PublisherName/$script:PackageName/releases/download/$tagName/$msiFileName"
     }
 } catch {
-    Write-Warning "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
-    Write-Warning "Please review the Git status and GitHub releases, then perform any remaining steps manually."
+    Write-Error "An error occurred during Git or GitHub CLI operations: $($_.Exception.Message)"
+    Write-Error "Please review the Git status and GitHub releases, then perform any remaining steps manually."
+    
+    # Don't show success message if we got here
+    exit 1
 }
 
 # --- Rotate Local Archives ---

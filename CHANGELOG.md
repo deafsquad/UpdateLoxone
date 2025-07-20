@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.5.8] - 2025-07-20 03:14:39
+### Added
+- Enhanced resume operation with detailed commit information display
+  - Added display of commit bodies and multi-line messages for better context
+  - Added comprehensive Git state display showing uncommitted changes and unpushed commits before proceeding
+  - Added CHANGELOG preview showing Unreleased section that will be converted
+- Improved dry-run mode functionality  
+  - Added clear dry-run mode summary showing what actions will be performed vs skipped
+  - Added support for skipping test execution in dry-run mode with proper state tracking
+  - Added descriptive commit messages for dry-run releases indicating they are test runs
+- Enhanced validation for MSI and manifest generation
+  - Added Git state hash validation to ensure MSI and manifests are recreated if code changes after initial creation
+  - Added automatic re-creation of artifacts when codebase changes are detected during resume
+
+### Changed
+- Reorganized CHANGELOG.md structure to have format declaration at the top instead of after version entries
+- Improved release script error handling with explicit exit code checks for all Git commands
+  - Added error handling for `git branch --show-current` operations
+  - Added error handling for `git status --porcelain` operations  
+  - Added error handling for `git log` operations
+- Enhanced commit message formatting for both dry-run and production releases
+  - Dry-run commits now include explanatory body text about their purpose
+  - Production releases include descriptive automated release note
+- Updated Git state display in resume operations
+  - Changed "tests_passed" to "tests_completed" for clarity
+  - Added checksum comparison showing if code changed since tests ran
+- Improved changelog validation to detect and reject when AI includes format declarations in responses
+
+### Fixed
+- Fixed BOM (Byte Order Mark) issues in manifest files by adding UTF-8 BOM prefix
+- Fixed potential issues with uncommitted changes and unpushed commits not being properly detected
+  - Ensured variables are set for later use even when not in resume context
+  - Added fallback initialization for all Git state variables
+- Fixed CHANGELOG validation to properly detect format declaration strings in AI responses
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 ## [0.5.2] - 2025-07-20 01:32:51
 ### Changed
 - Enhanced release process with Git state verification to ensure tests remain valid between resume operations
@@ -11,11 +51,6 @@
 - Added pre-test check for untracked files with interactive prompt
   - Warns users about files that won't be included in release
   - Allows opportunity to add files before test execution
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.5.0] - 2025-07-20 00:22:58
 ### Fixed
