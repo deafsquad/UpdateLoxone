@@ -289,7 +289,132 @@ function Show-CommitsWithFiles {
     }
 }
 
-# --- Check if we're resuming ---
+# ======================================
+# PRE-FLIGHT CHECKS
+# ======================================
+
+# --- 1. Check Git Repository State ---
+Write-Host "`nChecking repository state..." -ForegroundColor Gray
+
+# Verify we're in a git repository
+$gitStatus = git status 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Not in a git repository or git is not available"
+    exit 1
+}
+
+# Get current branch
+$currentBranch = git branch --show-current
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to get current branch"
+    exit 1
+}
+
+# --- 2. Check for Uncommitted Changes (BLOCKING) ---
+$gitStatus = git status --porcelain
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to get git status"
+    exit 1
+}
+
+# Separate tracked changes from untracked files
+$trackedChanges = $gitStatus | Where-Object { $_ -notmatch '^\?\?' }
+$untrackedFiles = $gitStatus | Where-Object { $_ -match '^\?\?' } | ForEach-Object { $_.Substring(3) }
+
+if ($trackedChanges) {
+    Write-Host "`n" -NoNewline
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host "UNCOMMITTED CHANGES DETECTED" -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "The following files have uncommitted changes:" -ForegroundColor Yellow
+    $trackedChanges | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+    Write-Host ""
+    Write-Host "These changes will be included in the release." -ForegroundColor Cyan
+    Write-Host "The AI will analyze all changes to generate the changelog." -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Store flag to indicate we have uncommitted changes
+    $script:HasUncommittedChanges = $true
+} else {
+    $script:HasUncommittedChanges = $false
+}
+
+# --- 3. Check for Untracked Files (USER DECISION) ---
+# Note: $untrackedFiles already populated from git status above
+if ($untrackedFiles) {
+    Write-Host "`nUntracked files detected:" -ForegroundColor Yellow
+    $untrackedFiles | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+    Write-Host "`nThese files are not tracked by Git and won't be included in the release." -ForegroundColor Yellow
+    Write-Host "Do you want to add ALL of these files to the release? (Y/N)" -ForegroundColor Cyan
+    Write-Host "Or type 'SELECT' to choose specific files:" -ForegroundColor Gray
+    $response = Read-Host
+    
+    if ($response -eq 'Y' -or $response -eq 'y') {
+        Write-Host "`nAdding all untracked files to git..." -ForegroundColor Green
+        $untrackedFiles | ForEach-Object {
+            git add $_
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  ✓ Added: $_" -ForegroundColor Green
+            } else {
+                Write-Host "  ✗ Failed to add: $_" -ForegroundColor Red
+            }
+        }
+        Write-Host "`nFiles have been staged. They will be included in the release commit." -ForegroundColor Green
+        # Update the list of uncommitted changes after adding files
+        $uncommittedChanges = git status --porcelain
+    }
+    elseif ($response -eq 'SELECT' -or $response -eq 'select') {
+        Write-Host "`nSelect files to add (enter numbers separated by comma, or 'ALL' for all files):" -ForegroundColor Cyan
+        $fileArray = @($untrackedFiles)
+        for ($i = 0; $i -lt $fileArray.Count; $i++) {
+            Write-Host "  $($i+1). $($fileArray[$i])" -ForegroundColor Gray
+        }
+        $selection = Read-Host
+        
+        if ($selection -eq 'ALL' -or $selection -eq 'all') {
+            # Add all files
+            $untrackedFiles | ForEach-Object {
+                git add $_
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  ✓ Added: $_" -ForegroundColor Green
+                } else {
+                    Write-Host "  ✗ Failed to add: $_" -ForegroundColor Red
+                }
+            }
+        } else {
+            # Parse selection and add selected files
+            $indices = $selection -split ',' | ForEach-Object { 
+                $num = $_.Trim()
+                if ($num -match '^\d+$') { [int]$num - 1 }
+            } | Where-Object { $_ -ge 0 -and $_ -lt $fileArray.Count }
+            
+            foreach ($index in $indices) {
+                $file = $fileArray[$index]
+                git add $file
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  ✓ Added: $file" -ForegroundColor Green
+                } else {
+                    Write-Host "  ✗ Failed to add: $file" -ForegroundColor Red
+                }
+            }
+        }
+        Write-Host "`nSelected files have been staged. They will be included in the release commit." -ForegroundColor Green
+        # Update the list of uncommitted changes after adding files
+        $uncommittedChanges = git status --porcelain
+    }
+    elseif ($response -eq 'N' -or $response -eq 'n') {
+        Write-Host "Continuing without adding untracked files..." -ForegroundColor Gray
+    }
+    else {
+        Write-Host "Invalid response. Exiting..." -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Note: No longer blocking on uncommitted changes - AI will handle changelog generation
+
+# --- 4. Check if we're resuming (AFTER workspace is clean) ---
 $script:ResumeState = Get-ReleaseState
 $script:IsResuming = $false
 if ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version) {
@@ -353,44 +478,64 @@ if ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version) {
     Write-Host "`nCurrent Git State:" -ForegroundColor Cyan
     Write-Host "  Branch: $currentBranch" -ForegroundColor Gray
     Write-Host "  Last commit: $lastCommit" -ForegroundColor Gray
+    
+    # Show uncommitted changes with details
     Write-Host "  Uncommitted changes: $(if ($uncommittedChanges) { 'YES - ' + ($uncommittedChanges -split "`n").Count + ' files' } else { 'None' })" -ForegroundColor $(if ($uncommittedChanges) { 'Yellow' } else { 'Gray' })
+    if ($uncommittedChanges) {
+        git status --short | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    }
+    
+    # Show unpushed commits with details
     Write-Host "  Unpushed commits: $(if ($unpushedCommits) { 'YES - ' + ($unpushedCommits -split "`n").Count + ' commits' } else { 'None' })" -ForegroundColor $(if ($unpushedCommits) { 'Yellow' } else { 'Gray' })
+    if ($unpushedCommits) {
+        $unpushedCommits -split "`n" | ForEach-Object { 
+            if ($_) {
+                Write-Host "    $_" -ForegroundColor Gray 
+            }
+        }
+    }
     
     # Calculate current state hash to compare with saved one
     $currentStateHash = Get-GitStateHash
     
     Write-Host "`nRelease Progress:" -ForegroundColor Cyan
-    Write-Host "  Tests run: $(if ($script:ResumeState.ContainsKey('tests_completed') -and $script:ResumeState.tests_completed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('tests_completed') -and $script:ResumeState.tests_completed -eq 'true') { 'Green' } else { 'Yellow' })
-    if ($script:ResumeState.ContainsKey('tests_completed') -and $script:ResumeState.tests_completed -eq 'true' -and $script:ResumeState.ContainsKey('tests_checksum')) {
-        if ($script:ResumeState.tests_checksum -ne $currentStateHash) {
-            Write-Host "    ⚠️  Code changed since tests ran!" -ForegroundColor Red
-            Write-Host "    Previous: $($script:ResumeState.tests_checksum)" -ForegroundColor Gray
-            Write-Host "    Current:  $currentStateHash" -ForegroundColor Gray
-        } else {
-            Write-Host "    Code unchanged since tests ✓" -ForegroundColor Green
+    
+    # Define progress items dynamically
+    $progressItems = @(
+        @{ Label = "Tests run"; Value = if ($script:ResumeState.ContainsKey('tests_completed') -and $script:ResumeState.tests_completed -eq 'true') { 'YES ✓' } else { 'NO' }; Completed = ($script:ResumeState.ContainsKey('tests_completed') -and $script:ResumeState.tests_completed -eq 'true') }
+        @{ Label = "CHANGELOG updated"; Value = if ($script:ResumeState.ContainsKey('changelog_updated') -and $script:ResumeState.changelog_updated -eq 'true') { 'YES ✓' } else { 'NO' }; Completed = ($script:ResumeState.ContainsKey('changelog_updated') -and $script:ResumeState.changelog_updated -eq 'true') }
+        @{ Label = "MSI created"; Value = if ($script:ResumeState.ContainsKey('msi_created') -and $script:ResumeState.msi_created -eq 'true') { 'YES ✓' } else { 'NO' }; Completed = ($script:ResumeState.ContainsKey('msi_created') -and $script:ResumeState.msi_created -eq 'true') }
+        @{ Label = "Manifests updated"; Value = if ($script:ResumeState.ContainsKey('manifests_updated') -and $script:ResumeState.manifests_updated -eq 'true') { 'YES ✓' } else { 'NO' }; Completed = ($script:ResumeState.ContainsKey('manifests_updated') -and $script:ResumeState.manifests_updated -eq 'true') }
+        @{ Label = "Git commit created"; Value = if ($script:ResumeState.ContainsKey('git_committed') -and $script:ResumeState.git_committed -eq 'true') { 'YES ✓' } else { 'NO' }; Completed = ($script:ResumeState.ContainsKey('git_committed') -and $script:ResumeState.git_committed -eq 'true') }
+        @{ Label = "Git pushed"; Value = if ($script:ResumeState.ContainsKey('git_pushed') -and $script:ResumeState.git_pushed -eq 'true') { 'YES ✓' } else { 'NO' }; Completed = ($script:ResumeState.ContainsKey('git_pushed') -and $script:ResumeState.git_pushed -eq 'true') }
+        @{ Label = "GitHub release"; Value = if ($releaseExists) { 'EXISTS ✓' } else { 'NOT CREATED' }; Completed = $releaseExists }
+    )
+    
+    # Calculate max label width for alignment
+    $maxLabelWidth = ($progressItems | ForEach-Object { $_.Label.Length } | Measure-Object -Maximum).Maximum + 2
+    
+    # Display progress items as aligned table
+    foreach ($item in $progressItems) {
+        $paddedLabel = "  $($item.Label):".PadRight($maxLabelWidth + 3)
+        $color = if ($item.Completed) { 'Green' } else { 'Yellow' }
+        Write-Host "$paddedLabel$($item.Value)" -ForegroundColor $color
+        
+        # Special handling for test checksum validation
+        if ($item.Label -eq "Tests run" -and $item.Completed -and $script:ResumeState.ContainsKey('tests_checksum')) {
+            if ($script:ResumeState.tests_checksum -ne $currentStateHash) {
+                Write-Host "    ⚠️  Code changed since tests ran!" -ForegroundColor Red
+                Write-Host "    Previous: $($script:ResumeState.tests_checksum)" -ForegroundColor Gray
+                Write-Host "    Current:  $currentStateHash" -ForegroundColor Gray
+            } else {
+                Write-Host "    Code unchanged since tests ✓" -ForegroundColor Green
+            }
         }
     }
-    Write-Host "  CHANGELOG updated: $(if ($script:ResumeState.ContainsKey('changelog_updated') -and $script:ResumeState.changelog_updated -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('changelog_updated') -and $script:ResumeState.changelog_updated -eq 'true') { 'Green' } else { 'Yellow' })
-    Write-Host "  MSI created: $(if ($script:ResumeState.ContainsKey('msi_created') -and $script:ResumeState.msi_created -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('msi_created') -and $script:ResumeState.msi_created -eq 'true') { 'Green' } else { 'Yellow' })
-    Write-Host "  Manifests updated: $(if ($script:ResumeState.ContainsKey('manifests_updated') -and $script:ResumeState.manifests_updated -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('manifests_updated') -and $script:ResumeState.manifests_updated -eq 'true') { 'Green' } else { 'Yellow' })
-    Write-Host "  Git commit created: $(if ($script:ResumeState.ContainsKey('git_committed') -and $script:ResumeState.git_committed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('git_committed') -and $script:ResumeState.git_committed -eq 'true') { 'Green' } else { 'Yellow' })
-    Write-Host "  Git pushed: $(if ($script:ResumeState.ContainsKey('git_pushed') -and $script:ResumeState.git_pushed -eq 'true') { 'YES ✓' } else { 'NO' })" -ForegroundColor $(if ($script:ResumeState.ContainsKey('git_pushed') -and $script:ResumeState.git_pushed -eq 'true') { 'Green' } else { 'Yellow' })
-    Write-Host "  GitHub release: $(if ($releaseExists) { 'EXISTS ✓' } else { 'NOT CREATED' })" -ForegroundColor $(if ($releaseExists) { 'Green' } else { 'Yellow' })
     
-    # Show detailed uncommitted changes
-    if ($uncommittedChanges) {
-        Write-Host "`nUncommitted changes that will be included in the release:" -ForegroundColor Yellow
-        git status --short | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-    } else {
-        Write-Host "`nNo uncommitted changes detected." -ForegroundColor Green
-    }
-    
-    # Show detailed unpushed commits
-    if ($unpushedCommits) {
-        Write-Host "`nUnpushed commits that will be included in the release:" -ForegroundColor Yellow
+    # Show more detailed information about unpushed commits if available
+    if ($unpushedCommits -and $unpushedCommitsDetailed) {
+        Write-Host "`nDetailed unpushed commits:" -ForegroundColor Yellow
         Show-CommitsWithFiles -Commits $unpushedCommits -DetailedCommits $unpushedCommitsDetailed
-    } else {
-        Write-Host "`nNo unpushed commits detected." -ForegroundColor Green
     }
     
     # Early exit if no changes detected
@@ -706,19 +851,7 @@ if ($DryRun) {
     Write-Host ""
 }
 
-# --- Check for untracked files before tests ---
-$untrackedFiles = git ls-files --others --exclude-standard
-if ($untrackedFiles) {
-    Write-Host "`nUntracked files detected:" -ForegroundColor Yellow
-    $untrackedFiles | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-    Write-Host "`nThese files are not tracked by Git and won't be included in the release." -ForegroundColor Yellow
-    Write-Host "Do you want to add any of these files before running tests? (Y/N)" -ForegroundColor Cyan
-    $response = Read-Host
-    if ($response -eq 'Y' -or $response -eq 'y') {
-        Write-Host "Please add the files manually using 'git add' and restart the release process." -ForegroundColor Yellow
-        exit 0
-    }
-}
+# --- Pre-flight checks already handled above ---
 
 # --- Check for changes and show status (if not already shown in resume section) ---
 if (-not ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version)) {
@@ -1994,39 +2127,7 @@ END_CHANGELOG
             }
         }
     } else {
-        # Check for untracked files first
-        Write-Host "Checking for untracked files..."
-        $untrackedFiles = git ls-files --others --exclude-standard 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to check for untracked files: $untrackedFiles"
-            exit 1
-        }
-    
-    if ($untrackedFiles -and $untrackedFiles -is [string[]]) {
-        Write-Host "`nThe following untracked files were found:" -ForegroundColor Yellow
-        $untrackedFiles | ForEach-Object { Write-Host "  - $_" }
-        
-        if (-not $DryRun) {
-            # In CI/automated mode, skip untracked files prompt
-            if ($env:RESUME_RELEASE -eq 'true' -or $script:IsResuming) {
-                Write-Host "CI/Automated mode: Ignoring untracked files (not including them in release)" -ForegroundColor Yellow
-                # Don't exit, just continue without including untracked files
-            } else {
-                Write-Host "`nDo you want to include these files in the release? (Y/N)" -ForegroundColor Cyan
-                $response = Read-Host
-                
-                if ($response -ne 'Y' -and $response -ne 'y') {
-                    Write-Host "Aborting release. Please handle untracked files manually:" -ForegroundColor Yellow
-                    Write-Host "  - Add them to .gitignore if they should be ignored"
-                    Write-Host "  - Delete them if they're temporary files"
-                    Write-Host "  - Commit them separately if they're needed but not for this release"
-                    exit 1
-                }
-            }
-        } else {
-            Write-Host "DRY RUN: Would prompt about untracked files" -ForegroundColor Gray
-        }
-    }
+        # Untracked files already handled in pre-flight checks
     
     Write-Host "Staging all files for release commit..."
     git add -A  # Add all files (new, modified, deleted)

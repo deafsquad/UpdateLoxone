@@ -1095,7 +1095,14 @@ function Get-TestCoverage {
     Write-Host ""
     
     # Display KPIs header
-    Write-Host "KPIs: TestSuccess%/Coverage%/DeadCode%/DeadTests%/Documentation%/Enforcement%" -ForegroundColor Cyan
+    Write-Host "KPIs: TestCount/TestExecution%/TestSuccess%/Coverage%/DeadCode%/DeadTests%" -ForegroundColor Cyan
+    Write-Host "Format explanation:" -ForegroundColor Gray
+    Write-Host "  TestCount      = Total number of tests executed" -ForegroundColor Gray
+    Write-Host "  TestExecution% = Percentage of tests that ran (vs skipped)" -ForegroundColor Gray
+    Write-Host "  TestSuccess%   = Percentage of executed tests that passed" -ForegroundColor Gray
+    Write-Host "  Coverage%      = Percentage of active functions with tests" -ForegroundColor Gray
+    Write-Host "  DeadCode%      = Percentage of functions never called" -ForegroundColor Gray
+    Write-Host "  DeadTests%     = Percentage of tests referencing removed functions" -ForegroundColor Gray
     
     # Calculate test success rate
     $testSuccessRate = if ($totalTestReferences -gt 0 -and $testResults) {
@@ -1128,6 +1135,8 @@ function Get-TestCoverage {
     $kpiDocumentation = $docCoveragePercent.ToString().PadLeft(3, '0')
     $kpiEnforcement = $enforcementPercent.ToString().PadLeft(3, '0')
     
+    # Note: This simple display doesn't show the full KPIs (TestCount/TestExecution%) 
+    # The complete KPIs are in the filename and test runner output
     Write-Host "$kpiTestSuccess/$kpiCoverage/$kpiDeadCode/$kpiDeadTests/$kpiDocumentation/$kpiEnforcement" -ForegroundColor White
     Write-Host ""
     
@@ -1956,8 +1965,19 @@ function Format-TestCoverageReport {
     $report = @"
 # UpdateLoxone Test Coverage Report
 
-**KPIs: TestSuccess/Coverage/DeadCode/DeadTests/Documentation/Enforcement**
-**$kpiTestSuccess/$kpiCoverage/$kpiDeadCode/$kpiDeadTests/$kpiDocumentation/$kpiEnforcement**
+**KPIs Format:**  
+TestCount/TestExecution%/TestSuccess%/Coverage%/DeadCode%/DeadTests%
+
+**KPIs:**  
+**$(if ($testExecutionTotals -and $testExecutionTotals.TotalTests) { $testExecutionTotals.TotalTests.ToString().PadLeft(4,'0') } else { '0000' })/$(if ($testExecutionTotals -and $testExecutionTotals.ExecutionCoverage) { $testExecutionTotals.ExecutionCoverage.ToString().PadLeft(3,'0') } else { '000' })/$kpiTestSuccess/$kpiCoverage/$kpiDeadCode/$kpiDeadTests**
+
+**Legend:**
+- TestCount: Total number of tests executed
+- TestExecution%: Percentage of tests that ran (vs skipped)
+- TestSuccess%: Percentage of executed tests that passed  
+- Coverage%: Percentage of active functions with tests
+- DeadCode%: Percentage of functions never called
+- DeadTests%: Percentage of tests referencing removed functions
 
 Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (Runtime: $Runtime) | $invocationInfo$testExecutionSummary
 **Enforcement Level:** $($enforcementMetrics.EnforcementLevel) | **Compliance Status:** $($enforcementMetrics.ComplianceRate)% compliant
@@ -3238,6 +3258,7 @@ $filenameBreakdown
     }
     
     # Console output is handled by calling script to avoid duplication
+    # Format: TestCount/TestExecution%/TestSuccess%/Coverage%/DeadCode%/DeadTests%
     $kpiDisplay = $kpiString -replace '-', '/'
     
     # Restore original preferences if we changed them for CI mode

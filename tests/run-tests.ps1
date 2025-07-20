@@ -1637,7 +1637,7 @@ function Invoke-TestsWithLiveProgress {
                 $testDisplayName = $matches[1]
             }
             $Global:LiveProgressToastData.TestProgressTitle = $testDisplayName
-            $Global:LiveProgressToastData.OverallProgressStatus = "$testIndex / $($allTests.Count) tests"
+            $Global:LiveProgressToastData.OverallProgressStatus = "$testIndex / $totalTestsIncludingSystem tests"
             $Global:LiveProgressToastData.OverallProgressValue = $progress
             $Global:LiveProgressToastData.DetailsText = "✅ Passed: $($testResults.PassedCount)`n❌ Failed: $($testResults.FailedCount)`n⏭️ Skipped: $($testResults.SkippedCount)"
             
@@ -2494,14 +2494,32 @@ if ($script:LiveProgressFullResults) {
                     # Update live progress notification with RunAsUser SYSTEM test results
                     if ($LiveProgress -and -not $script:LiveProgressNoToast) {
                         # Update global counters for notification
-                        $Global:LiveProgressTotalTests += $systemResult.Results.TotalTests
+                        # DO NOT update $Global:LiveProgressTotalTests - we already included these tests in the initial count
                         $Global:LiveProgressTestCount += $systemResult.Results.TotalTests
                         $Global:LiveProgressPassedCount += $systemResult.Results.PassedTests
                         $Global:LiveProgressFailedCount += ($systemResult.Results.TotalTests - $systemResult.Results.PassedTests)
                         
                         # Force a toast update with new totals
-                        if (Get-Command Update-Toast -ErrorAction SilentlyContinue) {
-                            Update-Toast -Message "RunAsUser SYSTEM tests completed"
+                        # Note: Don't use Update-Toast here as it increments the count
+                        if (Get-Command Update-BTNotification -ErrorAction SilentlyContinue) {
+                            try {
+                                # Update the toast data directly
+                                $Global:LiveProgressToastData.TestProgressTitle = "RunAsUser SYSTEM tests completed"
+                                $Global:LiveProgressToastData.OverallProgressStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
+                                $progressPercent = if ($Global:LiveProgressTotalTests -gt 0) { $Global:LiveProgressTestCount / $Global:LiveProgressTotalTests } else { 0 }
+                                $Global:LiveProgressToastData.OverallProgressValue = $progressPercent
+                                $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount`n❌ Failed: $Global:LiveProgressFailedCount`n⏭️ Skipped: $Global:LiveProgressSkippedCount"
+                                
+                                # Update notification
+                                $loxoneAppId = if (Get-Command Get-LoxoneToastAppId -ErrorAction SilentlyContinue) {
+                                    Get-LoxoneToastAppId
+                                } else {
+                                    '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+                                }
+                                Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                            } catch {
+                                Write-Verbose "Failed to update toast: $_"
+                            }
                         }
                     }
                     
@@ -2511,6 +2529,23 @@ if ($script:LiveProgressFullResults) {
                     }
                     
                     Write-TestLog "RunAsUser SYSTEM tests: $($systemResult.Results.PassedTests)/$($systemResult.Results.TotalTests) passed" -Color $(if ($systemResult.Results.PassedTests -eq $systemResult.Results.TotalTests) { 'Green' } else { 'Yellow' })
+                    
+                    # Force one more toast update to ensure it shows the correct final count
+                    if ($LiveProgress -and -not $script:LiveProgressNoToast -and (Get-Command Update-BTNotification -ErrorAction SilentlyContinue)) {
+                        Write-TestLog "Forcing final toast update after SYSTEM tests: TestCount=$Global:LiveProgressTestCount, TotalTests=$Global:LiveProgressTotalTests" -Level "DEBUG"
+                        $Global:LiveProgressToastData.TestProgressTitle = "All tests completed (including SYSTEM)"
+                        $Global:LiveProgressToastData.OverallProgressStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
+                        $progressPercent = if ($Global:LiveProgressTotalTests -gt 0) { [Math]::Min(1.0, $Global:LiveProgressTestCount / $Global:LiveProgressTotalTests) } else { 1.0 }
+                        $Global:LiveProgressToastData.OverallProgressValue = $progressPercent
+                        $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount`n❌ Failed: $Global:LiveProgressFailedCount`n⏭️ Skipped: $Global:LiveProgressSkippedCount"
+                        
+                        $loxoneAppId = if (Get-Command Get-LoxoneToastAppId -ErrorAction SilentlyContinue) {
+                            Get-LoxoneToastAppId
+                        } else {
+                            '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+                        }
+                        Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                    }
                 }
             }
         } catch {
@@ -3114,18 +3149,47 @@ if ($script:RunSystem -and $testCategories.System -and $testCategories.System.Co
                 # Update live progress notification with RunAsUser SYSTEM test results
                 if ($LiveProgress -and -not $script:LiveProgressNoToast) {
                     # Update global counters for notification
-                    $Global:LiveProgressTotalTests += $systemResult.Results.TotalTests
+                    # DO NOT update $Global:LiveProgressTotalTests - we already included these tests in the initial count
                     $Global:LiveProgressTestCount += $systemResult.Results.TotalTests
                     $Global:LiveProgressPassedCount += $systemResult.Results.PassedTests
                     $Global:LiveProgressFailedCount += ($systemResult.Results.TotalTests - $systemResult.Results.PassedTests)
                     
                     # Force a toast update with new totals
-                    if (Get-Command Update-Toast -ErrorAction SilentlyContinue) {
-                        Update-Toast -Message "RunAsUser SYSTEM tests completed"
+                    # Note: Don't use Update-Toast here as it increments the count
+                    if (Get-Command Update-BTNotification -ErrorAction SilentlyContinue) {
+                        try {
+                            # Update the toast data directly
+                            $Global:LiveProgressToastData.TestProgressTitle = "RunAsUser SYSTEM tests completed"
+                            $Global:LiveProgressToastData.OverallProgressStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
+                            $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount`n❌ Failed: $Global:LiveProgressFailedCount`n⏭️ Skipped: $Global:LiveProgressSkippedCount"
+                            
+                            # Update notification
+                            $loxoneAppId = Get-LoxoneConfigToastAppId
+                            Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                        } catch {
+                            Write-Verbose "Failed to update toast: $_"
+                        }
                     }
                 }
                 
                 Write-TestLog "RunAsUser SYSTEM tests: $($systemResult.Results.PassedTests)/$($systemResult.Results.TotalTests) passed" -Color $(if ($systemResult.Results.PassedTests -eq $systemResult.Results.TotalTests) { 'Green' } else { 'Yellow' })
+                
+                # Force one more toast update to ensure it shows the correct final count
+                if ($LiveProgress -and -not $script:LiveProgressNoToast -and (Get-Command Update-BTNotification -ErrorAction SilentlyContinue)) {
+                    Write-TestLog "Forcing final toast update after SYSTEM tests (phase 3): TestCount=$Global:LiveProgressTestCount, TotalTests=$Global:LiveProgressTotalTests" -Level "DEBUG"
+                    $Global:LiveProgressToastData.TestProgressTitle = "All tests completed (including SYSTEM)"
+                    $Global:LiveProgressToastData.OverallProgressStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
+                    $progressPercent = if ($Global:LiveProgressTotalTests -gt 0) { [Math]::Min(1.0, $Global:LiveProgressTestCount / $Global:LiveProgressTotalTests) } else { 1.0 }
+                    $Global:LiveProgressToastData.OverallProgressValue = $progressPercent
+                    $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount`n❌ Failed: $Global:LiveProgressFailedCount`n⏭️ Skipped: $Global:LiveProgressSkippedCount"
+                    
+                    $loxoneAppId = if (Get-Command Get-LoxoneToastAppId -ErrorAction SilentlyContinue) {
+                        Get-LoxoneToastAppId
+                    } else {
+                        '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+                    }
+                    Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                }
                 
                 # Show error details for failed tests if any
                 if ($systemResult.Results.PassedTests -lt $systemResult.Results.TotalTests) {
@@ -3232,6 +3296,9 @@ if ($LiveProgress -and $script:LiveProgressFullResults) {
     $integrationSkipped = 0
     $systemSkipped = 0
     
+    # Check if we already have skipped test details (from earlier LiveProgress processing)
+    $alreadyHaveSkippedDetails = $script:Results.SkippedTestDetails.Count -gt 0
+    
     if ($pesterResult -and $pesterResult.Skipped) {
         foreach ($skipped in $pesterResult.Skipped) {
             $testFile = $skipped.ScriptBlock.File
@@ -3254,18 +3321,20 @@ if ($LiveProgress -and $script:LiveProgressFullResults) {
                 $unitSkipped++
             }
             
-            # Collect skip details
-            $script:Results.SkippedTestDetails += @{
-                Category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
-                          elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
-                          elseif ($testFile -match "\\Integration\\") { "Integration" }
-                          elseif ($testFile -match "\\System\\") { "System" }
-                          elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                          elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
-                          else { "Unit" }
-                Test = $skipped.ExpandedPath
-                Reason = if ($skipped.ErrorRecord) { $skipped.ErrorRecord.Exception.Message } else { "Test marked with -Skip" }
-                File = Split-Path $skipped.ScriptBlock.File -Leaf
+            # Only collect skip details if we don't already have them
+            if (-not $alreadyHaveSkippedDetails) {
+                $script:Results.SkippedTestDetails += @{
+                    Category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
+                              elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
+                              elseif ($testFile -match "\\Integration\\") { "Integration" }
+                              elseif ($testFile -match "\\System\\") { "System" }
+                              elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
+                              elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
+                              else { "Unit" }
+                    Test = $skipped.ExpandedPath
+                    Reason = if ($skipped.ErrorRecord) { $skipped.ErrorRecord.Exception.Message } else { "Test marked with -Skip" }
+                    File = Split-Path $skipped.ScriptBlock.File -Leaf
+                }
             }
         }
     }
@@ -3286,10 +3355,27 @@ if ($LiveProgress -and $script:LiveProgressFullResults) {
     }
     
     if ($script:RunSystem) {
-        $script:Results.SystemTests.Failed = $systemFailed
-        $script:Results.SystemTests.Skipped = $systemSkipped
-        $script:Results.SystemTests.Passed = $testCategories.System.Count - $systemFailed - $systemSkipped
-        $script:Results.SystemTests.Status = if ($systemFailed -eq 0) { "Passed" } else { "Failed" }
+        # Only update if we haven't already added RunAsUser SYSTEM test results
+        # RunAsUser tests add 4 to the total, so check if Total > discovered count
+        $hasRunAsUserResults = $script:Results.SystemTests.Total -gt $testCategories.System.Count
+        
+        if ($hasRunAsUserResults) {
+            # RunAsUser tests have been added, only update the regular test counts
+            # Keep the Total as is (includes RunAsUser), but update passed/failed/skipped for regular tests
+            $regularSystemPassed = $testCategories.System.Count - $systemFailed - $systemSkipped
+            # The Passed count should include both regular passed + RunAsUser passed
+            # RunAsUser passed count = current Passed - previous regular passed estimate
+            $runAsUserPassed = $script:Results.SystemTests.Passed - ($script:Results.SystemTests.Total - 4)
+            $script:Results.SystemTests.Passed = $regularSystemPassed + $runAsUserPassed
+            $script:Results.SystemTests.Failed = $systemFailed + $script:Results.SystemTests.Failed
+            $script:Results.SystemTests.Skipped = $systemSkipped
+        } else {
+            # No RunAsUser results yet, update normally
+            $script:Results.SystemTests.Failed = $systemFailed
+            $script:Results.SystemTests.Skipped = $systemSkipped
+            $script:Results.SystemTests.Passed = $testCategories.System.Count - $systemFailed - $systemSkipped
+        }
+        $script:Results.SystemTests.Status = if ($script:Results.SystemTests.Failed -eq 0) { "Passed" } else { "Failed" }
     }
     
     # Share the duration proportionally based on actual tests run
@@ -3381,6 +3467,51 @@ if ($TestType -ne 'All') {
 $passRate = if ($script:Results.TotalTests -gt 0) {
     [math]::Round(($script:Results.PassedTests / $script:Results.TotalTests) * 100, 2)
 } else { 0 }
+
+# Update final toast notification with complete results (including SYSTEM tests)
+if ($LiveProgress -and -not $script:LiveProgressNoToast -and (Get-Command Update-BTNotification -ErrorAction SilentlyContinue)) {
+    try {
+        # Debug log current state
+        Write-TestLog "Final toast update - Current LiveProgress counts: Test=$Global:LiveProgressTestCount, Total=$Global:LiveProgressTotalTests" -Level "DEBUG"
+        Write-TestLog "Final toast update - Script results: Total=$($script:Results.TotalTests), Passed=$($script:Results.PassedTests), Failed=$($script:Results.FailedTests), Skipped=$($script:Results.SkippedTests)" -Level "DEBUG"
+        
+        # Ensure global counters reflect ALL tests including SYSTEM tests
+        if ($Global:LiveProgressTestCount -ne $script:Results.TotalTests -or $Global:LiveProgressTotalTests -ne $script:Results.TotalTests) {
+            Write-TestLog "Updating LiveProgress final counts: TestCount=$($script:Results.TotalTests), TotalTests=$($script:Results.TotalTests), Passed=$($script:Results.PassedTests), Failed=$($script:Results.FailedTests), Skipped=$($script:Results.SkippedTests)" -Level "DEBUG"
+            $Global:LiveProgressTestCount = $script:Results.TotalTests
+            $Global:LiveProgressTotalTests = $script:Results.TotalTests  # Also update the total to ensure consistency
+            $Global:LiveProgressPassedCount = $script:Results.PassedTests
+            $Global:LiveProgressFailedCount = $script:Results.FailedTests
+            $Global:LiveProgressSkippedCount = $script:Results.SkippedTests
+        }
+        
+        # Update the toast data for final display
+        $Global:LiveProgressToastData.TestProgressTitle = "All tests completed"
+        $Global:LiveProgressToastData.OverallProgressStatus = "$($script:Results.TotalTests) / $($script:Results.TotalTests) tests"
+        $Global:LiveProgressToastData.OverallProgressValue = 1.0  # 100% complete
+        $Global:LiveProgressToastData.DetailsText = "✅ Passed: $($script:Results.PassedTests)`n❌ Failed: $($script:Results.FailedTests)`n⏭️ Skipped: $($script:Results.SkippedTests)"
+        
+        # Calculate runtime
+        if ($Global:LiveProgressStartTime) {
+            $runtime = (Get-Date) - $Global:LiveProgressStartTime
+            $minutes = [math]::Floor($runtime.TotalMinutes)
+            $seconds = [math]::Floor($runtime.TotalSeconds % 60)
+            $runtimeDisplay = $minutes.ToString() + ":" + $seconds.ToString('00')
+            $Global:LiveProgressToastData.StatusText = "Completed | $runtimeDisplay | $passRate% pass rate"
+        }
+        
+        # Update notification
+        $loxoneAppId = if (Get-Command Get-LoxoneToastAppId -ErrorAction SilentlyContinue) {
+            Get-LoxoneToastAppId
+        } else {
+            '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+        }
+        Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+        Write-TestLog "Final toast notification updated with complete test results" -Level "DEBUG"
+    } catch {
+        Write-Verbose "Failed to update final toast: $_"
+    }
+}
 
 # Export results
 $summaryData = @{
@@ -3596,6 +3727,7 @@ if ($Coverage) {
             
             if ($CI -and $coverageResult) {
                 # In CI mode, show only essential coverage info
+                Write-TestLog "KPIs: TestCount/TestExecution%/TestSuccess%/Coverage%/DeadCode%/DeadTests%" -Level "COVERAGE" -Color Gray
                 Write-TestLog "Coverage: $($coverageResult.CoverageResult.TotalCoverage)% | KPIs: $($coverageResult.KPIs)" -Level "COVERAGE" -Color $(
                     if ($coverageResult.CoverageResult.TotalCoverage -ge 80) { 'Green' }
                     elseif ($coverageResult.CoverageResult.TotalCoverage -ge 60) { 'Yellow' }
@@ -3605,7 +3737,8 @@ if ($Coverage) {
                 Write-TestLog "`nCoverage report generated:" -Color Green
                 Write-TestLog "  Location: $($coverageResult.ReportPath)" -Color Gray
                 Write-TestLog "  Runtime: $($coverageResult.Runtime)" -Color Gray
-                Write-TestLog "  KPIs: $($coverageResult.KPIs) (Coverage/DeadCode/DeadTests)" -Color Gray
+                Write-TestLog "  KPIs Format: TestCount/TestExecution%/TestSuccess%/Coverage%/DeadCode%/DeadTests%" -Color Gray
+                Write-TestLog "  KPIs: $($coverageResult.KPIs)" -Color Gray
                 Write-TestLog "  Overall Coverage: $($coverageResult.CoverageResult.TotalCoverage)%" -Color $(
                     if ($coverageResult.CoverageResult.TotalCoverage -ge 80) { 'Green' }
                     elseif ($coverageResult.CoverageResult.TotalCoverage -ge 60) { 'Yellow' }
@@ -3916,6 +4049,17 @@ if ($LogToFile -and -not $CI) {
         }
         Write-TestLog "  $($file.Name) ($([math]::Round($file.Length/1KB, 2)) KB)$fileDesc" -Color Gray
     }
+}
+
+# Debug final LiveProgress state
+if ($LiveProgress) {
+    Write-TestLog "`n=== Final LiveProgress State ===" -Level "DEBUG" -Color Magenta
+    Write-TestLog "LiveProgressTestCount: $Global:LiveProgressTestCount" -Level "DEBUG"
+    Write-TestLog "LiveProgressTotalTests: $Global:LiveProgressTotalTests" -Level "DEBUG"
+    Write-TestLog "LiveProgressPassedCount: $Global:LiveProgressPassedCount" -Level "DEBUG"
+    Write-TestLog "LiveProgressFailedCount: $Global:LiveProgressFailedCount" -Level "DEBUG"
+    Write-TestLog "LiveProgressSkippedCount: $Global:LiveProgressSkippedCount" -Level "DEBUG"
+    Write-TestLog "Script Results TotalTests: $($script:Results.TotalTests)" -Level "DEBUG"
 }
 
 # Display final result location

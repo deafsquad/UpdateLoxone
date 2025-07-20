@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.5] - 2025-07-20 07:25:17
+### Added
+- Added automatic staging of untracked files in publish script when user selects 'Y'
+- Added 'SELECT' option in publish script to choose specific files to add
+- Added success/failure status display for each file being staged
+- Added progress percentage calculation to subprocess toast updates
+- Added debug logging to track test count discrepancies and LiveProgress state
+
+### Changed
+- Improved publish script workflow to continue with release process after staging files instead of exiting
+- Updated uncommitted changes list after adding files in publish script
+
+### Fixed
+- Fixed live progress notification showing incorrect test counts (257/257 instead of 261 or 258)
+- Fixed double-counting of SYSTEM tests in total count
+- Fixed extra test count increment when updating toast after subprocess
+- Fixed notification showing 253/257 instead of 257/257 after SYSTEM tests completed
+- Fixed duplicate skipped tests in detailed output (was showing 90 instead of 45)
+- Fixed SystemTests counts being overwritten after RunAsUser tests complete
+- Fixed undefined function Get-LoxoneConfigToastAppId causing toast updates to fail
+- Added proper merging of regular System test results with RunAsUser results
+- Ensured notification shows correct completion status with runtime and pass rate
+
 ## [0.6.4] - 2025-07-20 05:53:16
 ### Fixed
 - Fixed live progress notification to show correct total test count (257 instead of 253) by including subprocess SYSTEM test results
