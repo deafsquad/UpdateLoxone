@@ -406,7 +406,7 @@ function Get-TestCoverage {
     # Try dynamic discovery first
     try {
         Write-Host "Discovering test infrastructure functions dynamically..." -ForegroundColor DarkGray
-        $exceptions.testInfrastructure = Get-TestInfrastructureFunctions -TestPath $script:TestPath
+        $exceptions.testInfrastructure = Get-TestInfrastructureFunctions -ModulePath (Join-Path $script:ModulePath 'LoxoneUtils')
         Write-Host "Found $($exceptions.testInfrastructure.Count) test infrastructure functions" -ForegroundColor DarkGray
     }
     catch {

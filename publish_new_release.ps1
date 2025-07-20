@@ -393,6 +393,26 @@ if ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version) {
         Write-Host "`nNo unpushed commits detected." -ForegroundColor Green
     }
     
+    # Early exit if no changes detected
+    if (-not $uncommittedChanges -and -not $unpushedCommits) {
+        Write-Host "`n" -NoNewline
+        Write-Host "========================================" -ForegroundColor Red
+        Write-Host "NO CHANGES TO RELEASE" -ForegroundColor Red
+        Write-Host "========================================" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "There are no uncommitted changes or unpushed commits to create a release from." -ForegroundColor Yellow
+        Write-Host "Please make some changes and commit them before running the release script." -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Clean up state file since there's nothing to resume
+        if (Test-Path $script:StateFile) {
+            Write-Host "Cleaning up previous release state..." -ForegroundColor Gray
+            Remove-Item $script:StateFile -Force
+        }
+        
+        exit 0
+    }
+    
     # Check CHANGELOG status
     Write-Host "`nChecking CHANGELOG status..." -ForegroundColor Cyan
     $changelogPath = Join-Path -Path $PSScriptRoot -ChildPath "CHANGELOG.md"
@@ -757,6 +777,26 @@ if (-not ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version)) {
         Write-Host ""
     } else {
         Write-Host "No unpushed commits detected." -ForegroundColor Green
+    }
+    
+    # Early exit if no changes detected
+    if (-not $uncommittedChanges -and -not $unpushedCommits) {
+        Write-Host "`n" -NoNewline
+        Write-Host "========================================" -ForegroundColor Red
+        Write-Host "NO CHANGES TO RELEASE" -ForegroundColor Red
+        Write-Host "========================================" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "There are no uncommitted changes or unpushed commits to create a release from." -ForegroundColor Yellow
+        Write-Host "Please make some changes and commit them before running the release script." -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Clean up any state file since there's nothing to release
+        if (Test-Path $script:StateFile) {
+            Write-Host "Cleaning up previous release state..." -ForegroundColor Gray
+            Remove-Item $script:StateFile -Force
+        }
+        
+        exit 0
     }
 
     # --- Check CHANGELOG status ---

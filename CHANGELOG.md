@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.3] - 2025-07-20 05:34:24
+### Added
+- Early exit detection in publish script when no changes are available for release
+  - Automatically detects when there are no uncommitted changes or unpushed commits
+  - Shows clear message explaining why the script is exiting
+  - Prevents unnecessary processing when there's nothing to release
+
+### Fixed
+- Corrected parameter name in test coverage module to resolve warnings
+  - Fixed `Get-TestInfrastructureFunctions` call to use `-ModulePath` instead of `-TestPath`
+  - Eliminates 'TestPath parameter not found' warnings during test runs
+  - Ensures proper function parameter matching according to function definition
+
 ## [0.6.2] - 2025-07-20 03:51:15
 ### Added
 - Display of file changes for unpushed commits in publish script
