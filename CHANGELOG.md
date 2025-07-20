@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.2] - 2025-07-20 03:51:15
+### Added
+- Display of file changes for unpushed commits in publish script
+  - Shows file status (Added/Modified/Deleted/Renamed) for each commit
+  - Applied to both resume state display and main flow display
+  - Helps users understand exactly what changes are in each commit
+
+### Changed
+- Enhanced Claude changelog validation and error handling
+  - Improved prompt to explicitly prevent changelog boilerplate text
+  - Added clearer instructions about response format
+  - Better regex matching for UPDATED_CHANGELOG markers
+  - Save problematic responses to debug files for analysis
+
+### Fixed
+- Improved error messages with debug output for troubleshooting changelog generation
+- Fixed CHANGELOG validation to properly detect and remove format declaration strings in AI responses
+- Resolved issues with changelog boilerplate removal that could slip through validation
+
 ## [0.5.8] - 2025-07-20 03:14:39
 ### Added
 - Enhanced resume operation with detailed commit information display
@@ -34,11 +53,6 @@
   - Ensured variables are set for later use even when not in resume context
   - Added fallback initialization for all Git state variables
 - Fixed CHANGELOG validation to properly detect format declaration strings in AI responses
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.5.2] - 2025-07-20 01:32:51
 ### Changed

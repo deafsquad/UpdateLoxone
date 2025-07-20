@@ -220,6 +220,75 @@ function Clear-ReleaseState {
     }
 }
 
+# --- Function to Display Commits with File Changes ---
+function Show-CommitsWithFiles {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Commits,
+        
+        [Parameter(Mandatory=$false)]
+        $DetailedCommits = $null
+    )
+    
+    if ($DetailedCommits) {
+        # Display commits with their body text
+        $currentHash = $null
+        $DetailedCommits | ForEach-Object { 
+            if ($_ -match '^[a-f0-9]{7} ') {
+                # This is a commit line
+                Write-Host "  $_" -ForegroundColor White
+                # Extract hash for file lookup
+                $currentHash = ($_ -split ' ')[0]
+                
+                # Get files changed in this commit
+                $filesChanged = git diff-tree --no-commit-id --name-status -r $currentHash 2>$null
+                if ($filesChanged) {
+                    $filesChanged | ForEach-Object {
+                        $parts = $_ -split "`t"
+                        if ($parts.Count -ge 2) {
+                            $status = switch ($parts[0]) {
+                                'A' { 'Added' }
+                                'M' { 'Modified' }
+                                'D' { 'Deleted' }
+                                'R' { 'Renamed' }
+                                default { $parts[0] }
+                            }
+                            Write-Host "      [$status] $($parts[1])" -ForegroundColor DarkGray
+                        }
+                    }
+                }
+            } else {
+                # This is a body text line
+                Write-Host "  $_" -ForegroundColor Gray
+            }
+        }
+    } else {
+        # Simple display with file changes
+        $Commits | ForEach-Object { 
+            Write-Host "  $_" -ForegroundColor White
+            # Get the commit hash from the line
+            $hash = ($_ -split ' ')[0]
+            # Get files changed in this commit
+            $filesChanged = git diff-tree --no-commit-id --name-status -r $hash 2>$null
+            if ($filesChanged) {
+                $filesChanged | ForEach-Object {
+                    $parts = $_ -split "`t"
+                    if ($parts.Count -ge 2) {
+                        $status = switch ($parts[0]) {
+                            'A' { 'Added' }
+                            'M' { 'Modified' }
+                            'D' { 'Deleted' }
+                            'R' { 'Renamed' }
+                            default { $parts[0] }
+                        }
+                        Write-Host "      [$status] $($parts[1])" -ForegroundColor DarkGray
+                    }
+                }
+            }
+        }
+    }
+}
+
 # --- Check if we're resuming ---
 $script:ResumeState = Get-ReleaseState
 $script:IsResuming = $false
@@ -319,11 +388,7 @@ if ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version) {
     # Show detailed unpushed commits
     if ($unpushedCommits) {
         Write-Host "`nUnpushed commits that will be included in the release:" -ForegroundColor Yellow
-        if ($unpushedCommitsDetailed) {
-            $unpushedCommitsDetailed | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-        } else {
-            $unpushedCommits | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-        }
+        Show-CommitsWithFiles -Commits $unpushedCommits -DetailedCommits $unpushedCommitsDetailed
     } else {
         Write-Host "`nNo unpushed commits detected." -ForegroundColor Green
     }
@@ -637,6 +702,9 @@ if ($untrackedFiles) {
 
 # --- Check for changes and show status (if not already shown in resume section) ---
 if (-not ($script:ResumeState.Count -gt 0 -and $script:ResumeState.version)) {
+    # Initialize variables
+    $unpushedCommitsDetailed = @()
+    
     # --- Check for uncommitted changes before tests ---
     $uncommittedChanges = git status --porcelain
     if ($LASTEXITCODE -ne 0) {
@@ -741,7 +809,12 @@ if (-not $currentBranch) {
 if (-not $unpushedCommits) {
     $unpushedCommits = git log "origin/$currentBranch..HEAD" --oneline 2>$null
 }
-if (-not $unpushedCommitsDetailed) {
+# Initialize to empty array if not set
+if ($null -eq $unpushedCommitsDetailed) {
+    $unpushedCommitsDetailed = @()
+}
+# Get detailed commit info if we have unpushed commits
+if (-not $unpushedCommitsDetailed -and $unpushedCommits) {
     # Get detailed commit info with body if present
     $unpushedCommitsDetailed = @()
     $rawCommits = git log "origin/$currentBranch..HEAD" --pretty=format:"%h|%s|%b|ENDCOMMIT" 2>$null
@@ -1569,7 +1642,7 @@ try {
     if ($needsAIChangelog) {
         if ($unpushedCommits) {
             Write-Host "`nFound unpushed commits that will be combined into the release:" -ForegroundColor Yellow
-            $unpushedCommits | ForEach-Object { Write-Host "  $_" }
+            Show-CommitsWithFiles -Commits $unpushedCommits
         } else {
             Write-Host "`nProcessing uncommitted changes for changelog generation..." -ForegroundColor Yellow
         }
@@ -1657,8 +1730,10 @@ CRITICAL:
 - Look for patterns like "if ($LASTEXITCODE -ne 0)" which indicate error handling additions
 - Group related changes together under appropriate sections
 - DO NOT duplicate sections (only one ### Added, one ### Changed, etc)
+- NEVER include any text like "All notable changes", "Keep a Changelog", "The format is based on", etc.
+- ONLY include the Unreleased section content, nothing else
 
-RESPOND WITH EXACTLY THIS FORMAT:
+RESPOND WITH EXACTLY THIS FORMAT (start directly with UPDATED_CHANGELOG, no other text before it):
 UPDATED_CHANGELOG
 ## [Unreleased] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER
 ### Added
@@ -1697,7 +1772,7 @@ END_CHANGELOG
                 
                 # Capture both stdout and stderr
                 $claudeError = $null
-                $aiResponse = Get-Content $tempPromptFile -Raw | & claude -p 'Process this changelog verification request and respond EXACTLY as instructed' --output-format text 2>&1 | Out-String
+                $aiResponse = Get-Content $tempPromptFile -Raw | & claude -p 'Process this changelog verification request and respond EXACTLY as instructed in the format specified. Start your response with UPDATED_CHANGELOG and end with END_CHANGELOG. Do not include any other text outside these markers.' --output-format text 2>&1 | Out-String
                 
                 # Check if claude command failed
                 if ($LASTEXITCODE -ne 0) {
@@ -1732,15 +1807,30 @@ END_CHANGELOG
         }
         
         # Process AI response - we always expect an updated changelog with full diff analysis
-        if ($aiResponse -match '(?s)UPDATED_CHANGELOG(.*)END_CHANGELOG') {
+        # First try to find the markers, being generous with whitespace
+        if ($aiResponse -match '(?s)UPDATED_CHANGELOG\s*(.*?)\s*END_CHANGELOG') {
             $newChangelogSection = $matches[1].Trim()
+            
+            # Debug: Show what Claude returned
+            Write-Host "DEBUG: Claude response length: $($newChangelogSection.Length) characters" -ForegroundColor Cyan
+            if ($newChangelogSection.Length -lt 200) {
+                Write-Host "DEBUG: Full Claude response between markers:" -ForegroundColor Cyan
+                Write-Host $newChangelogSection -ForegroundColor Gray
+            }
             
             # Validate that Claude didn't include the changelog header or format declaration
             if ($newChangelogSection -match '(?i)(# Changelog|All notable changes|Keep a Changelog|Semantic Versioning|The format is based on|and this project adheres to)') {
                 Write-Error "Claude included the changelog header/format declaration in the response. This is invalid."
                 Write-Error "Expected only the Unreleased section content, but got:"
                 Write-Error $newChangelogSection.Substring(0, [Math]::Min(500, $newChangelogSection.Length))
+                Write-Error ""
+                Write-Error "The response should start with '## [Unreleased]' and contain only the changelog entries."
                 Write-Error "Please run the script again or update CHANGELOG.md manually."
+                
+                # Save the problematic response for debugging
+                $debugFile = Join-Path $PSScriptRoot "claude_response_debug.txt"
+                Set-Content -Path $debugFile -Value $aiResponse -Encoding UTF8
+                Write-Host "Full Claude response saved to: $debugFile" -ForegroundColor Yellow
                 
                 # Clean up state file on error
                 if (Test-Path $stateFile) {
@@ -1760,6 +1850,14 @@ END_CHANGELOG
                     Remove-Item $stateFile -Force
                 }
                 exit 1
+            }
+            
+            # Additional cleanup - remove any boilerplate that might have slipped through
+            $boilerplatePattern = '(?s)(All notable changes to this project.*?adheres to.*?\.)'
+            if ($newChangelogSection -match $boilerplatePattern) {
+                Write-Host "Removing changelog boilerplate that slipped through..." -ForegroundColor Yellow
+                $newChangelogSection = $newChangelogSection -replace $boilerplatePattern, ''
+                $newChangelogSection = $newChangelogSection.Trim()
             }
             
             Write-Host "`nUpdating CHANGELOG.md with comprehensive AI analysis..." -ForegroundColor Yellow
@@ -1792,7 +1890,22 @@ END_CHANGELOG
         }
         else {
             Write-Warning "Claude did not return expected UPDATED_CHANGELOG format."
-            Write-Warning "Response: $($aiResponse.Substring(0, [Math]::Min(200, $aiResponse.Length)))..."
+            Write-Warning "Looking for markers in response..."
+            
+            # Check if response contains the markers but maybe with extra text
+            if ($aiResponse -match 'UPDATED_CHANGELOG' -and $aiResponse -match 'END_CHANGELOG') {
+                Write-Warning "Found markers but regex didn't match. This might be a formatting issue."
+                Write-Host "Full response length: $($aiResponse.Length) characters" -ForegroundColor Yellow
+                
+                # Save for debugging
+                $debugFile = Join-Path $PSScriptRoot "claude_response_no_match.txt"
+                Set-Content -Path $debugFile -Value $aiResponse -Encoding UTF8
+                Write-Host "Full response saved to: $debugFile" -ForegroundColor Yellow
+            } else {
+                Write-Warning "Response doesn't contain expected markers at all."
+                Write-Warning "Response preview: $($aiResponse.Substring(0, [Math]::Min(200, $aiResponse.Length)))..."
+            }
+            
             Write-Host "Proceeding with existing CHANGELOG. You may need to update it manually." -ForegroundColor Yellow
         }
         
