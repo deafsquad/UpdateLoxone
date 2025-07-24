@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.6.6] - 2025-07-24 16:38:47
+### Changed
+- **Improved test coverage calculation methodology** - Coverage now includes ALL functions without exclusions
+  - Test infrastructure functions are now included in coverage calculations
+  - Coverage percentages reflect true code coverage across the entire codebase
+  - Provides more accurate representation of actual test coverage
+- **Enhanced function usage detection in TestCoverage module**
+  - Added comprehensive PowerShell patterns for detecting function calls
+  - Improved regex patterns to catch dynamic invocations, scriptblocks, and event handlers
+  - Better detection of functions used in pipelines, subexpressions, and background jobs
+  - Fixed regex escaping issues that could cause pattern matching failures
+- **Updated KPI metrics to use positive indicators**
+  - Replaced "DeadCode%" with "ActiveCode%" (percentage of functions actively used)
+  - Replaced "DeadTests%" with "ActiveTests%" (percentage of tests for existing functions)
+  - KPI format now shows: TestCount/TestExecution%/TestSuccess%/Coverage%/ActiveCode%/ActiveTests%
+  - Provides more intuitive metrics where higher values are better
+- **Optimized test coverage report generation**
+  - Implemented single-pass analysis to improve performance
+  - Eliminated temporary file creation during report generation
+  - Report data is now collected once and reused throughout the process
+- **Enhanced entry point detection for exported functions**
+  - Exported functions following PowerShell verb-noun patterns are recognized as entry points
+  - Prevents false positives for dead code on public APIs
+  - Better handling of functions designed for external invocation
+
+### Fixed
+- **Fixed regex pattern escaping in function usage detection**
+  - Function names are now properly escaped before use in regex patterns
+  - Prevents regex errors when function names contain special characters
+  - Ensures accurate detection of function calls throughout the codebase
+
+### Deprecated
+- **GenerateReport parameter in Get-TestCoverage** - Use New-TestCoverageReport for report generation instead
+
 ## [0.6.5] - 2025-07-20 07:25:17
 ### Added
 - Added automatic staging of untracked files in publish script when user selects 'Y'

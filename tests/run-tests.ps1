@@ -3727,7 +3727,7 @@ if ($Coverage) {
             
             if ($CI -and $coverageResult) {
                 # In CI mode, show only essential coverage info
-                Write-TestLog "KPIs: TestCount/TestExecution%/TestSuccess%/Coverage%/DeadCode%/DeadTests%" -Level "COVERAGE" -Color Gray
+                Write-TestLog "KPIs: TestCount/TestExecution%/TestSuccess%/Coverage%/ActiveCode%/ActiveTests%" -Level "COVERAGE" -Color Gray
                 Write-TestLog "Coverage: $($coverageResult.CoverageResult.TotalCoverage)% | KPIs: $($coverageResult.KPIs)" -Level "COVERAGE" -Color $(
                     if ($coverageResult.CoverageResult.TotalCoverage -ge 80) { 'Green' }
                     elseif ($coverageResult.CoverageResult.TotalCoverage -ge 60) { 'Yellow' }
@@ -3737,7 +3737,7 @@ if ($Coverage) {
                 Write-TestLog "`nCoverage report generated:" -Color Green
                 Write-TestLog "  Location: $($coverageResult.ReportPath)" -Color Gray
                 Write-TestLog "  Runtime: $($coverageResult.Runtime)" -Color Gray
-                Write-TestLog "  KPIs Format: TestCount/TestExecution%/TestSuccess%/Coverage%/DeadCode%/DeadTests%" -Color Gray
+                Write-TestLog "  KPIs Format: TestCount/TestExecution%/TestSuccess%/Coverage%/ActiveCode%/ActiveTests%" -Color Gray
                 Write-TestLog "  KPIs: $($coverageResult.KPIs)" -Color Gray
                 Write-TestLog "  Overall Coverage: $($coverageResult.CoverageResult.TotalCoverage)%" -Color $(
                     if ($coverageResult.CoverageResult.TotalCoverage -ge 80) { 'Green' }
