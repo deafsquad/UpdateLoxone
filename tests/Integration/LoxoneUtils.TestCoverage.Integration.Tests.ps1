@@ -1,4 +1,4 @@
-# Integration tests for TestCoverage functions that require real module analysis
+﻿# Integration tests for TestCoverage functions that require real module analysis
 
 Describe "Get-TestCoverage Integration Tests" -Tag 'Integration', 'TestCoverage' {
     

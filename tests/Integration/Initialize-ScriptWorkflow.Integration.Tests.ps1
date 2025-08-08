@@ -1,4 +1,4 @@
-# Integration test for Initialize-ScriptWorkflow that runs in a real script environment
+﻿# Integration test for Initialize-ScriptWorkflow that runs in a real script environment
 
 Describe "Initialize-ScriptWorkflow Integration Tests" -Tag 'Integration', 'WorkflowSteps' {
     

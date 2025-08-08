@@ -1,4 +1,4 @@
-# --- Original Utility Module Content Starts Below ---
+﻿# --- Original Utility Module Content Starts Below ---
 # Module for Loxone Update Script Utility Functions
 
 #region Utility Helpers
@@ -524,12 +524,30 @@ function Get-InvocationTrace {
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     try {
         $stack   = Get-PSCallStack         # always safe
-        $self    = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
-        $parentProcessId = if ($self) { $self.ParentProcessId } else { $null }
-        $parent  = if ($parentProcessId) { Get-CimInstance Win32_Process -Filter "ProcessId=$parentProcessId" -ErrorAction SilentlyContinue } else { $null }
         
-        $thisProcessCLI = if ($self) { $self.CommandLine } else { "PID $PID not found or CommandLine unavailable" }
-        $parentProcessCLI = if ($parent) { $parent.CommandLine } elseif ($parentProcessId) { "Parent PID $parentProcessId not found or CommandLine unavailable" } else { "Parent process ID not available"}
+        # Performance optimization: Use Get-Process instead of Get-CimInstance for speed
+        $self = $null
+        $parent = $null
+        $parentProcessId = $null
+        
+        try {
+            $self = Get-Process -Id $PID -ErrorAction Stop
+            $parentProcessId = if ($self.Parent) { $self.Parent.Id } else { $null }
+            $parent = if ($parentProcessId) { Get-Process -Id $parentProcessId -ErrorAction SilentlyContinue } else { $null }
+            
+            # Note: Get-Process doesn't expose CommandLine, so we need to use alternative method
+            $thisProcessCLI = if ($self) { "Process: $($self.Name) (PID: $PID)" } else { "PID $PID not found" }
+            $parentProcessCLI = if ($parent) { "Parent: $($parent.Name) (PID: $parentProcessId)" } elseif ($parentProcessId) { "Parent PID $parentProcessId found but process unavailable" } else { "Parent process ID not available"}
+        } catch {
+            # Fallback to slower CIM query only if Get-Process fails or we need CommandLine
+            Write-Log -Message "Get-Process failed for invocation trace, falling back to CIM query: $($_.Exception.Message)" -Level DEBUG
+            $self    = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+            $parentProcessId = if ($self) { $self.ParentProcessId } else { $null }
+            $parent  = if ($parentProcessId) { Get-CimInstance Win32_Process -Filter "ProcessId=$parentProcessId" -ErrorAction SilentlyContinue } else { $null }
+            
+            $thisProcessCLI = if ($self) { $self.CommandLine } else { "PID $PID not found or CommandLine unavailable" }
+            $parentProcessCLI = if ($parent) { $parent.CommandLine } elseif ($parentProcessId) { "Parent PID $parentProcessId not found or CommandLine unavailable" } else { "Parent process ID not available"}
+        }
 
         [pscustomobject]@{
             CallStack       = $stack.Command

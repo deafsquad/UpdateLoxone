@@ -1,4 +1,4 @@
-# Working tests for LoxoneUtils.ErrorHandling based on actual behavior
+﻿# Working tests for LoxoneUtils.ErrorHandling based on actual behavior
 
 BeforeAll {
     # Set flag to suppress toast initialization

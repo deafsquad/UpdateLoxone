@@ -1,4 +1,4 @@
-# Consolidated Root Module Script File for LoxoneUtils
+﻿# Consolidated Root Module Script File for LoxoneUtils
 # Contains all functions previously in separate .psm1 files.
 # The manifest (LoxoneUtils.psd1) points to this file as the RootModule
 # and handles all exports via FunctionsToExport.
@@ -15,7 +15,8 @@ $script:InsideWriteLog = $false
 
 # Persistent Toast Notification State (from Toast.psm1)
 $script:PersistentToastId = "LoxoneUpdateStatusToast"
-$script:PersistentToastData = @{ StatusText = "Initializing..."; ProgressValue = 0 } # Ensure ProgressValue is initialized
+# NOTE: PersistentToastData is now managed as $Global:PersistentToastData in LoxoneUtils.Toast.psm1
+# Do NOT initialize it here as it causes conflicts with the toast binding
 $script:PersistentToastInitialized = $false
 
 # Flag for Ctrl+C handling (from Network.psm1 - needed by download functions)

@@ -1,4 +1,4 @@
-#Requires -Modules LoxoneUtils.Logging, LoxoneUtils.System, LoxoneUtils.UpdateCheck, LoxoneUtils.Utility, LoxoneUtils.Toast, LoxoneUtils.RunAsUser, LoxoneUtils.Installation
+﻿#Requires -Modules LoxoneUtils.Logging, LoxoneUtils.System, LoxoneUtils.UpdateCheck, LoxoneUtils.Utility, LoxoneUtils.Toast, LoxoneUtils.RunAsUser, LoxoneUtils.Installation
 
 # Script-level variable to store step definitions for Get-StepWeight
 $script:WorkflowStepDefinitions = @()
@@ -185,9 +185,18 @@ function Initialize-ScriptWorkflow {
         Write-Host "INFO: ($FunctionName) No log file passed. Generating new log file name." -ForegroundColor Cyan
         $userNameForFile = (([Security.Principal.WindowsIdentity]::GetCurrent()).Name -split '\\')[-1] -replace '[\\:]', '_'
         
-        # Create timestamp-based log file name (similar to what log rotation would create)
+        # Create timestamp-based log file name with counter to ensure uniqueness
         $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
         $baseLogName = "UpdateLoxone_${userNameForFile}_${timestamp}.log"
+        
+        # Check if file already exists and add counter if needed
+        $counter = 0
+        $proposedLogName = $baseLogName
+        while (Test-Path (Join-Path -Path $scriptContext.LogDir -ChildPath $proposedLogName)) {
+            $counter++
+            $proposedLogName = "UpdateLoxone_${userNameForFile}_${timestamp}_${counter}.log"
+        }
+        $baseLogName = $proposedLogName
         $invalidChars = [System.IO.Path]::GetInvalidFileNameChars() -join ''
         $regexInvalidChars = "[{0}]" -f [RegEx]::Escape($invalidChars)
         $sanitizedLogName = $baseLogName -replace $regexInvalidChars, '_'
@@ -243,8 +252,119 @@ function Initialize-ScriptWorkflow {
 
     # --- Interactivity & Self-Invocation ---
     # $IsDirectPathInvocation = $MyInvocation.InvocationName -match '^[A-Za-z]:\\' -or $MyInvocation.InvocationName -match '^\\\\' # Unused variable
-    $scriptContext.IsInteractive = ($Host.Name -eq 'ConsoleHost' -or $Host.Name -eq 'Windows PowerShell ISE Host' -or $Host.Name -eq 'Visual Studio Code Host')
-    Write-Log -Message "($FunctionName) IsInteractive (based on InvocationName & RawUI): $($scriptContext.IsInteractive)" -Level DEBUG
+    
+    # Improved interactive detection that accounts for scheduled tasks
+    $isConsoleHost = ($Host.Name -eq 'ConsoleHost' -or $Host.Name -eq 'Windows PowerShell ISE Host' -or $Host.Name -eq 'Visual Studio Code Host')
+    $isUserInteractive = [Environment]::UserInteractive
+    $isScheduledTask = $false
+    
+    # Check if running as scheduled task by looking at parent process and other indicators
+    try {
+        # Method 1: Check parent process (optimized with faster WMI alternative)
+        Write-Log -Message "($FunctionName) Checking parent process for scheduled task detection..." -Level DEBUG
+        
+        # Performance optimization: Use Get-Process instead of Get-CimInstance for speed
+        try {
+            $currentProcess = Get-Process -Id $PID -ErrorAction Stop
+            $parentProcessId = $currentProcess.Parent.Id
+            Write-Log -Message "($FunctionName) Found parent process ID: $parentProcessId" -Level DEBUG
+            
+            if ($parentProcessId) {
+                $parentProcess = Get-Process -Id $parentProcessId -ErrorAction SilentlyContinue
+                if ($parentProcess) {
+                    Write-Log -Message "($FunctionName) Parent process: $($parentProcess.Name) (PID: $parentProcessId)" -Level DEBUG
+                    # svchost.exe as parent often indicates Task Scheduler
+                    if ($parentProcess.Name -eq 'svchost') {
+                        $isScheduledTask = $true
+                        Write-Log -Message "($FunctionName) Detected running under Task Scheduler (parent: svchost)" -Level DEBUG
+                    }
+                    # taskeng.exe is the Task Scheduler engine
+                    elseif ($parentProcess.Name -eq 'taskeng') {
+                        $isScheduledTask = $true
+                        Write-Log -Message "($FunctionName) Detected running under Task Scheduler (parent: taskeng)" -Level DEBUG
+                    }
+                }
+            }
+        } catch {
+            # Fallback to slower CIM query only if Get-Process fails
+            Write-Log -Message "($FunctionName) Get-Process failed, falling back to CIM query: $($_.Exception.Message)" -Level DEBUG
+            $parentProcessId = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").ParentProcessId
+            if ($parentProcessId) {
+                $parentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $parentProcessId" -ErrorAction SilentlyContinue
+                if ($parentProcess) {
+                    Write-Log -Message "($FunctionName) Parent process (CIM): $($parentProcess.Name) (PID: $parentProcessId)" -Level DEBUG
+                    # svchost.exe as parent often indicates Task Scheduler
+                    if ($parentProcess.Name -eq 'svchost.exe') {
+                        $isScheduledTask = $true
+                        Write-Log -Message "($FunctionName) Detected running under Task Scheduler (parent: svchost.exe)" -Level DEBUG
+                    }
+                    # taskeng.exe is the Task Scheduler engine
+                    elseif ($parentProcess.Name -eq 'taskeng.exe') {
+                        $isScheduledTask = $true
+                        Write-Log -Message "($FunctionName) Detected running under Task Scheduler (parent: taskeng.exe)" -Level DEBUG
+                    }
+                }
+            }
+        }
+        
+        # Method 2: Check if we have a console window
+        # Scheduled tasks typically run without a console window
+        if (-not $isScheduledTask) {
+            try {
+                $consolePtr = [Console]::WindowHandle
+                Write-Log -Message "($FunctionName) Console WindowHandle: $consolePtr" -Level DEBUG
+                if ($consolePtr -eq [IntPtr]::Zero -or $consolePtr -eq 0) {
+                    $isScheduledTask = $true
+                    Write-Log -Message "($FunctionName) Detected non-interactive context (no console window)" -Level DEBUG
+                }
+            }
+            catch {
+                # If we can't access the console, likely non-interactive
+                $isScheduledTask = $true
+                Write-Log -Message "($FunctionName) Detected non-interactive context (console access failed: $_)" -Level DEBUG
+            }
+        }
+        
+        # Method 3: Check if standard input is redirected (common for scheduled tasks)
+        if (-not $isScheduledTask) {
+            try {
+                if ([Console]::IsInputRedirected) {
+                    $isScheduledTask = $true
+                    Write-Log -Message "($FunctionName) Detected non-interactive context (input redirected)" -Level DEBUG
+                }
+                elseif ([Console]::IsOutputRedirected) {
+                    $isScheduledTask = $true
+                    Write-Log -Message "($FunctionName) Detected non-interactive context (output redirected)" -Level DEBUG
+                }
+                else {
+                    # Additional check - if we're in a real console, we should be able to get window title
+                    try {
+                        $windowTitle = [Console]::Title
+                        if ([string]::IsNullOrEmpty($windowTitle)) {
+                            $isScheduledTask = $true
+                            Write-Log -Message "($FunctionName) Detected non-interactive context (no console title)" -Level DEBUG
+                        }
+                    }
+                    catch {
+                        # Can't access console title - likely non-interactive
+                        $isScheduledTask = $true
+                        Write-Log -Message "($FunctionName) Detected non-interactive context (console title access failed)" -Level DEBUG
+                    }
+                }
+            }
+            catch {
+                Write-Log -Message "($FunctionName) Error checking console redirection: $_" -Level DEBUG
+            }
+        }
+    }
+    catch {
+        Write-Log -Message "($FunctionName) Error during scheduled task detection: $_" -Level DEBUG
+    }
+    
+    # Interactive only if console host AND user interactive AND NOT scheduled task
+    $scriptContext.IsInteractive = $isConsoleHost -and $isUserInteractive -and (-not $isScheduledTask)
+    
+    Write-Log -Message "($FunctionName) IsInteractive detection - ConsoleHost: $isConsoleHost, UserInteractive: $isUserInteractive, ScheduledTask: $isScheduledTask, Final: $($scriptContext.IsInteractive)" -Level DEBUG
 
     $invocationTrace = Get-InvocationTrace # Assumes Get-InvocationTrace is available from LoxoneUtils.Utility
     if ($invocationTrace -and $invocationTrace.ParentProcessCLI -like "*UpdateLoxone.ps1*") {
@@ -328,15 +448,17 @@ function Initialize-ScriptWorkflow {
 
     # --- TLS 1.2 ---
     try {
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12, [System.Net.SecurityProtocolType]::Tls13
-        Write-Log -Level INFO -Message "($FunctionName) Applied TLS 1.2/1.3 globally."
+        # Support all TLS versions for compatibility with older Loxone devices
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls -bor [System.Net.SecurityProtocolType]::Tls13
+        Write-Log -Level INFO -Message "($FunctionName) Applied TLS 1.0/1.1/1.2/1.3 globally for Loxone compatibility."
     } catch {
-        Write-Log -Level WARN -Message "($FunctionName) Failed to set TLS 1.2/1.3: $($_.Exception.Message). Trying Tls12 only."
+        Write-Log -Level WARN -Message "($FunctionName) Failed to set all TLS versions: $($_.Exception.Message). Trying without TLS 1.3."
         try {
-            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-            Write-Log -Level INFO -Message "($FunctionName) Applied TLS 1.2 globally (fallback)."
+            # Fallback without TLS 1.3 (might not be available on older systems)
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls
+            Write-Log -Level INFO -Message "($FunctionName) Applied TLS 1.0/1.1/1.2 globally (fallback)."
         } catch {
-             Write-Log -Level WARN -Message "($FunctionName) Failed to set TLS 1.2 (fallback): $($_.Exception.Message)"
+             Write-Log -Level WARN -Message "($FunctionName) Failed to set TLS versions (fallback): $($_.Exception.Message)"
         }
     }
 
@@ -463,7 +585,16 @@ $configChannelActual = if ($WorkflowContext.Params.ContainsKey('Channel')) {
         $result.AppExpectedSize               = $updateData.AppExpectedSize
         $result.AppExpectedCRC                = $updateData.AppExpectedCRC
         $result.SelectedAppChannelName        = $updateData.SelectedAppChannelName
-        if ($updateData.AppInstallerFileName) { $result.AppInstallerFileName = $updateData.AppInstallerFileName } # Use from XML if provided
+        if ($updateData.AppInstallerFileName) { 
+            $result.AppInstallerFileName = $updateData.AppInstallerFileName 
+        } elseif ($updateData.AppInstallerUrl) {
+            # Derive filename from URL if not explicitly provided
+            $urlFileName = [System.IO.Path]::GetFileName([System.Uri]::new($updateData.AppInstallerUrl).LocalPath)
+            if (-not [string]::IsNullOrWhiteSpace($urlFileName)) {
+                $result.AppInstallerFileName = $urlFileName
+                Write-Log -Message "($FunctionName) Derived App installer filename from URL: '$urlFileName'" -Level DEBUG
+            }
+        }
 
 
         Write-Log -Message "($FunctionName) Successfully retrieved raw update data via Get-LoxoneUpdateData." -Level INFO
@@ -503,20 +634,18 @@ $configChannelActual = if ($WorkflowContext.Params.ContainsKey('Channel')) {
             } else {
                 $normalizedLatestApp = Convert-VersionString $result.LatestAppVersion
                 $normalizedInstalledApp = Convert-VersionString $initialAppFileVersion
-                Write-Log -Message "($FunctionName) [AppDebug] Raw initialAppFileVersion: '$initialAppFileVersion', Raw result.LatestAppVersion: '$($result.LatestAppVersion)'" -Level INFO
-                Write-Log -Message "($FunctionName) [AppDebug] Normalized installed: '$normalizedInstalledApp', Normalized latest: '$normalizedLatestApp'" -Level INFO
+                
+                # Consolidated version comparison (was 5 verbose debug lines)
+                Write-Log -Message "($FunctionName) [App] Version check: Installed='$normalizedInstalledApp' vs Latest='$normalizedLatestApp'" -Level INFO
 
                 try {
                     $vNormalizedLatestApp = [Version]$normalizedLatestApp
                     $vNormalizedInstalledApp = [Version]$normalizedInstalledApp
-                    Write-Log -Message "($FunctionName) [AppDebug] Cast to [Version] - Installed: '$($vNormalizedInstalledApp.ToString())', Latest: '$($vNormalizedLatestApp.ToString())'" -Level INFO
 
                     $areNotEqual = $vNormalizedLatestApp -ne $vNormalizedInstalledApp
-                    Write-Log -Message "($FunctionName) [AppDebug] Comparison (-ne): $vNormalizedLatestApp -ne $vNormalizedInstalledApp = $areNotEqual" -Level INFO
 
                     if ($areNotEqual) { # Equivalent to original line 439
                         $isLatestGreaterThanInstalled = $vNormalizedLatestApp -gt $vNormalizedInstalledApp
-                        Write-Log -Message "($FunctionName) [AppDebug] Comparison (-gt): $vNormalizedLatestApp -gt $vNormalizedInstalledApp = $isLatestGreaterThanInstalled" -Level INFO
                         if ($isLatestGreaterThanInstalled) { # Equivalent to original line 440
                             $result.AppUpdateNeeded = $true
                             Write-Log -Message "($FunctionName) [App] Update needed (Latest '$normalizedLatestApp' > Installed '$normalizedInstalledApp'). Set AppUpdateNeeded=True" -Level INFO
@@ -552,7 +681,9 @@ function Invoke-DownloadLoxoneConfig {
         [Parameter(Mandatory=$true)]
         [PSCustomObject]$ConfigTargetInfo, # Contains DownloadUrl, ZipFilePath, ExpectedSize, ExpectedCRC
         [Parameter(Mandatory=$true)]
-        [ref]$ScriptGlobalState # To update CurrentWeight, CurrentStep, TotalSteps, etc.
+        [ref]$ScriptGlobalState, # To update CurrentWeight, CurrentStep, TotalSteps, etc.
+        [Parameter(Mandatory=$false)]
+        [scriptblock]$ProgressReporter = $null
     )
     $FunctionName = $MyInvocation.MyCommand.Name
     $result = [pscustomobject]@{
@@ -610,41 +741,37 @@ function Invoke-DownloadLoxoneConfig {
         # If we reach here, a download is needed.
         $ScriptGlobalState.Value.currentStep++ # Assuming step count is managed by caller or a pre-step
         $ScriptGlobalState.Value.currentDownload++ # Assuming download count is managed by caller or a pre-step
-        $toastParams = @{
-            StepNumber       = $ScriptGlobalState.Value.currentStep
-            TotalSteps       = $ScriptGlobalState.Value.totalSteps
-            StepName         = "Downloading Loxone Config"
-            DownloadFileName = $ConfigTargetInfo.ZipFileName
-            DownloadNumber   = $ScriptGlobalState.Value.currentDownload
-            TotalDownloads   = $ScriptGlobalState.Value.totalDownloads
-            CurrentWeight    = $ScriptGlobalState.Value.CurrentWeight
-            TotalWeight      = $ScriptGlobalState.Value.TotalWeight
-        }
-        Write-Log -Level DEBUG -Message "($FunctionName) Intent: Update toast for Loxone Config download progress."
-        Write-Log -Level DEBUG -Message "($FunctionName) Attempting to update progress toast (Invoke-DownloadLoxoneConfig). Initialized: $($Global:PersistentToastInitialized)"
-        Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-DownloadLoxoneConfig): toastParams='$($toastParams | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
-        Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
-Write-Log -Message "($FunctionName) INVOKE-DOWNLOADLOXONECONFIG: Logging before Update-PersistentToast call." -Level DEBUG
-        Write-Log -Message "($FunctionName)   Global:PersistentToastInitialized = $($Global:PersistentToastInitialized)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentStepNumber = $($ScriptGlobalState.Value.currentStep)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalStepsForUI = $($ScriptGlobalState.Value.totalSteps)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentWeight = $($ScriptGlobalState.Value.CurrentWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalWeight = $($ScriptGlobalState.Value.TotalWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.StepName = '$($toastParams.StepName)'" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.DownloadFileName = '$($toastParams.DownloadFileName)'" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.DownloadNumber = $($toastParams.DownloadNumber)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.TotalDownloads = $($toastParams.TotalDownloads)" -Level DEBUG
-        $statusTextForLog = "Step $($ScriptGlobalState.Value.currentStep)/$($ScriptGlobalState.Value.totalSteps): $($toastParams.StepName)"
-        if ($toastParams.DownloadFileName) { $statusTextForLog += " - $($toastParams.DownloadFileName) ($($toastParams.DownloadNumber)/$($toastParams.TotalDownloads))" }
-        Write-Log -Message "($FunctionName)   Constructed StatusText = '$statusTextForLog'" -Level DEBUG
-        $progressValueForLog = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
-        Write-Log -Message "($FunctionName)   Calculated ProgressValue (percentage) = $progressValueForLog %" -Level DEBUG
-        try {
-            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
-            Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-DownloadLoxoneConfig) called successfully."
-        }
-        catch {
-            Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-DownloadLoxoneConfig: $($_.Exception.ToString())"
+        
+        # Calculate progress percentage
+        $progressPercent = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { 
+            [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) 
+        } else { 0 }
+        
+        # Use progress reporter if available, otherwise fall back to toast
+        if ($ProgressReporter) {
+            $currentOp = "$($ConfigTargetInfo.ZipFileName) ($($ScriptGlobalState.Value.currentDownload)/$($ScriptGlobalState.Value.totalDownloads))"
+            & $ProgressReporter -Operation "Downloading Loxone Config" `
+                               -Status "Starting download" `
+                               -PercentComplete $progressPercent `
+                               -CurrentOperation $currentOp
+        } else {
+            # Fallback to direct toast update for backward compatibility
+            $toastParams = @{
+                StepNumber       = $ScriptGlobalState.Value.currentStep
+                TotalSteps       = $ScriptGlobalState.Value.totalSteps
+                StepName         = "Downloading Loxone Config"
+                DownloadFileName = $ConfigTargetInfo.ZipFileName
+                DownloadNumber   = $ScriptGlobalState.Value.currentDownload
+                TotalDownloads   = $ScriptGlobalState.Value.totalDownloads
+                CurrentWeight    = $ScriptGlobalState.Value.CurrentWeight
+                TotalWeight      = $ScriptGlobalState.Value.TotalWeight
+            }
+            try {
+                Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
+                Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-DownloadLoxoneConfig) called successfully."
+            } catch {
+                Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-DownloadLoxoneConfig: $($_.Exception.ToString())"
+            }
         }
         $downloadParams = @{
             Url              = $ConfigTargetInfo.DownloadUrl
@@ -664,6 +791,11 @@ Write-Log -Message "($FunctionName) INVOKE-DOWNLOADLOXONECONFIG: Logging before 
             TotalWeight      = $ScriptGlobalState.Value.TotalWeight
             ErrorAction      = 'Stop' # Critical for function's try/catch
         }
+        
+        # Add ProgressReporter if available
+        if ($ProgressReporter) {
+            $downloadParams.ProgressReporter = $ProgressReporter
+        }
 
         Write-Log -Message "($FunctionName) Calling Invoke-LoxoneDownload for Config ZIP..." -Level DEBUG
         $downloadSuccess = Invoke-LoxoneDownload @downloadParams
@@ -677,6 +809,18 @@ Write-Log -Message "($FunctionName) INVOKE-DOWNLOADLOXONECONFIG: Logging before 
             $result.Succeeded = $true
             Write-Log -Message "($FunctionName) Loxone Config ZIP download reported as successful." -Level INFO
             $ScriptGlobalState.Value.CurrentWeight += Get-StepWeight -StepID 'DownloadConfig' # Assumes Get-StepWeight is accessible
+            
+            # Report download completion
+            if ($ProgressReporter) {
+                $progressPercent = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { 
+                    [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) 
+                } else { 0 }
+                
+                & $ProgressReporter -Operation "Downloading Loxone Config" `
+                                   -Status "Download completed" `
+                                   -PercentComplete $progressPercent `
+                                   -CurrentOperation "Downloaded $($ConfigTargetInfo.ZipFileName)"
+            }
         }
 
     } catch {
@@ -697,7 +841,9 @@ function Invoke-ExtractLoxoneConfig {
         [Parameter(Mandatory=$true)]
         [PSCustomObject]$ConfigTargetInfo, # Contains ZipFilePath, InstallerPath, ExpectedInstallerName
         [Parameter(Mandatory=$true)]
-        [ref]$ScriptGlobalState
+        [ref]$ScriptGlobalState,
+        [Parameter(Mandatory=$false)]
+        [scriptblock]$ProgressReporter = $null
     )
     $FunctionName = $MyInvocation.MyCommand.Name
     $result = [pscustomobject]@{
@@ -720,35 +866,32 @@ function Invoke-ExtractLoxoneConfig {
             throw "ZIP file not found at '$zipFilePath'. Cannot extract."
         }
 
-        # Toast update
-        $toastParams = @{
-            StepNumber    = $ScriptGlobalState.Value.currentStep # Assuming step number is consistent for a multi-action step or updated prior
-            TotalSteps    = $ScriptGlobalState.Value.totalSteps
-            StepName      = "Extracting Config Installer"
-            CurrentWeight = $ScriptGlobalState.Value.CurrentWeight
-            TotalWeight   = $ScriptGlobalState.Value.TotalWeight
-        }
-        Write-Log -Level DEBUG -Message "($FunctionName) Intent: Update toast for Loxone Config extraction progress."
-        Write-Log -Level DEBUG -Message "($FunctionName) Attempting to update progress toast (Invoke-ExtractLoxoneConfig). Initialized: $($Global:PersistentToastInitialized)"
-        Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-ExtractLoxoneConfig): toastParams='$($toastParams | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
-        Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
-Write-Log -Message "($FunctionName) INVOKE-EXTRACTLOXONECONFIG: Logging before Update-PersistentToast call (Extracting)." -Level DEBUG
-        Write-Log -Message "($FunctionName)   Global:PersistentToastInitialized = $($Global:PersistentToastInitialized)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentStepNumber = $($ScriptGlobalState.Value.currentStep)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalStepsForUI = $($ScriptGlobalState.Value.totalSteps)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentWeight = $($ScriptGlobalState.Value.CurrentWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalWeight = $($ScriptGlobalState.Value.TotalWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.StepName = '$($toastParams.StepName)'" -Level DEBUG
-        $statusTextForLog = "Step $($ScriptGlobalState.Value.currentStep)/$($ScriptGlobalState.Value.totalSteps): $($toastParams.StepName)"
-        Write-Log -Message "($FunctionName)   Constructed StatusText = '$statusTextForLog'" -Level DEBUG
-        $progressValueForLog = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
-        Write-Log -Message "($FunctionName)   Calculated ProgressValue (percentage) = $progressValueForLog %" -Level DEBUG
-        try {
-            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
-            Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-ExtractLoxoneConfig) called successfully."
-        }
-        catch {
-            Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-ExtractLoxoneConfig: $($_.Exception.ToString())"
+        # Progress update
+        $progressPercent = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { 
+            [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) 
+        } else { 0 }
+        
+        # Use progress reporter if available, otherwise fall back to toast
+        if ($ProgressReporter) {
+            & $ProgressReporter -Operation "Extracting Config Installer" `
+                               -Status "Extracting from ZIP file" `
+                               -PercentComplete $progressPercent `
+                               -CurrentOperation "Extracting $($ConfigTargetInfo.ExpectedInstallerName)"
+        } else {
+            # Fallback to direct toast update for backward compatibility
+            $toastParams = @{
+                StepNumber    = $ScriptGlobalState.Value.currentStep
+                TotalSteps    = $ScriptGlobalState.Value.totalSteps
+                StepName      = "Extracting Config Installer"
+                CurrentWeight = $ScriptGlobalState.Value.CurrentWeight
+                TotalWeight   = $ScriptGlobalState.Value.TotalWeight
+            }
+            try {
+                Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
+                Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-ExtractLoxoneConfig) called successfully."
+            } catch {
+                Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-ExtractLoxoneConfig: $($_.Exception.ToString())"
+            }
         }
         if (Test-Path $expectedInstallerPath) {
             Write-Log -Level DEBUG -Message "($FunctionName) Removing existing installer before extraction: $expectedInstallerPath"
@@ -792,50 +935,49 @@ Write-Log -Message "($FunctionName) INVOKE-EXTRACTLOXONECONFIG: Logging before U
         Write-Log -Message "($FunctionName) Installer extracted to $expectedInstallerPath." -Level INFO
         $result.Succeeded = $true
         $ScriptGlobalState.Value.CurrentWeight += Get-StepWeight -StepID 'ExtractConfig'
+        
+        # Report extraction completion
+        if ($ProgressReporter) {
+            $progressPercent = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { 
+                [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) 
+            } else { 0 }
+            
+            & $ProgressReporter -Operation "Extracting Config Installer" `
+                               -Status "Extraction completed" `
+                               -PercentComplete $progressPercent `
+                               -CurrentOperation "Extracted $($ConfigTargetInfo.ExpectedInstallerName)"
+        }
 
         # Installer Signature Verification (as per original script logic post-extraction)
         # This could be a separate step in the pipeline, but original did it right after extraction.
         # For now, including it here.
         Write-Log -Message "($FunctionName) Verifying Config Installer Signature for '$expectedInstallerPath'..." -Level INFO
-        $toastParamsSig = @{
-            StepNumber    = $ScriptGlobalState.Value.currentStep
-            TotalSteps    = $ScriptGlobalState.Value.totalSteps
-            StepName      = "Verifying Config Installer Signature"
-            CurrentWeight = $ScriptGlobalState.Value.CurrentWeight
-            TotalWeight   = $ScriptGlobalState.Value.TotalWeight
-        }
-        Write-Log -Level DEBUG -Message "($FunctionName) Intent: Update toast for Loxone Config signature verification."
-        Write-Log -Level DEBUG -Message "($FunctionName) Attempting to update progress toast (Invoke-ExtractLoxoneConfig - Signature). Initialized: $($Global:PersistentToastInitialized)"
-        Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-ExtractLoxoneConfig - Signature): toastParamsSig='$($toastParamsSig | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
-        Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
-Write-Log -Message "($FunctionName) INVOKE-EXTRACTLOXONECONFIG: Logging before Update-PersistentToast call (Verifying Signature)." -Level DEBUG
-        Write-Log -Message "($FunctionName)   Global:PersistentToastInitialized = $($Global:PersistentToastInitialized)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentStepNumber = $($ScriptGlobalState.Value.currentStep)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalStepsForUI = $($ScriptGlobalState.Value.totalSteps)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentWeight = $($ScriptGlobalState.Value.CurrentWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalWeight = $($ScriptGlobalState.Value.TotalWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParamsSig.StepName = '$($toastParamsSig.StepName)'" -Level DEBUG
-        $statusTextForLogSig = "Step $($ScriptGlobalState.Value.currentStep)/$($ScriptGlobalState.Value.totalSteps): $($toastParamsSig.StepName)"
-        Write-Log -Message "($FunctionName)   Constructed StatusText (Sig) = '$statusTextForLogSig'" -Level DEBUG
-        $progressValueForLogSig = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
-        Write-Log -Message "($FunctionName)   Calculated ProgressValue (Sig percentage) = $progressValueForLogSig %" -Level DEBUG
-Write-Log -Message "($FunctionName) INVOKE-EXTRACTLOXONECONFIG: Logging before Update-PersistentToast call (Verifying Signature)." -Level DEBUG
-        Write-Log -Message "($FunctionName)   Global:PersistentToastInitialized = $($Global:PersistentToastInitialized)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentStepNumber = $($ScriptGlobalState.Value.currentStep)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalStepsForUI = $($ScriptGlobalState.Value.totalSteps)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentWeight = $($ScriptGlobalState.Value.CurrentWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalWeight = $($ScriptGlobalState.Value.TotalWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParamsSig.StepName = '$($toastParamsSig.StepName)'" -Level DEBUG
-        $statusTextForLogSig = "Step $($ScriptGlobalState.Value.currentStep)/$($ScriptGlobalState.Value.totalSteps): $($toastParamsSig.StepName)"
-        Write-Log -Message "($FunctionName)   Constructed StatusText (Sig) = '$statusTextForLogSig'" -Level DEBUG
-        $progressValueForLogSig = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
-        Write-Log -Message "($FunctionName)   Calculated ProgressValue (Sig percentage) = $progressValueForLogSig %" -Level DEBUG
-        try {
-            Update-PersistentToast @toastParamsSig -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
-            Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-ExtractLoxoneConfig - Signature) called successfully."
-        }
-        catch {
-            Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-ExtractLoxoneConfig (Signature): $($_.Exception.ToString())"
+        
+        # Use progress reporter if available
+        if ($ProgressReporter) {
+            $progressPercent = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { 
+                [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) 
+            } else { 0 }
+            
+            & $ProgressReporter -Operation "Verifying Config Installer" `
+                               -Status "Checking digital signature" `
+                               -PercentComplete $progressPercent `
+                               -CurrentOperation "Verifying $($ConfigTargetInfo.ExpectedInstallerName)"
+        } else {
+            # Fallback to direct toast update for backward compatibility
+            $toastParamsSig = @{
+                StepNumber    = $ScriptGlobalState.Value.currentStep
+                TotalSteps    = $ScriptGlobalState.Value.totalSteps
+                StepName      = "Verifying Config Installer Signature"
+                CurrentWeight = $ScriptGlobalState.Value.CurrentWeight
+                TotalWeight   = $ScriptGlobalState.Value.TotalWeight
+            }
+            try {
+                Update-PersistentToast @toastParamsSig -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
+                Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-ExtractLoxoneConfig - Signature) called successfully."
+            } catch {
+                Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-ExtractLoxoneConfig (Signature): $($_.Exception.ToString())"
+            }
         }
         # $ConfigTargetInfo should ideally have an ExpectedXmlSignature property if it's available from prerequisites
         # if ($ConfigTargetInfo.ExpectedXmlSignature) { ... }
@@ -852,6 +994,18 @@ Write-Log -Message "($FunctionName) INVOKE-EXTRACTLOXONECONFIG: Logging before U
         }
         $result.SignatureVerified = $true
         Write-Log -Message "($FunctionName) Installer signature verified successfully. Status: $($sigCheckResult.Status), Signer: $($sigCheckResult.SignerName)" -Level INFO
+        
+        # Report signature verification completion
+        if ($ProgressReporter) {
+            $progressPercent = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { 
+                [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) 
+            } else { 0 }
+            
+            & $ProgressReporter -Operation "Verifying Config Installer" `
+                               -Status "Signature verified successfully" `
+                               -PercentComplete $progressPercent `
+                               -CurrentOperation "Verified: $($sigCheckResult.SignerName)"
+        }
 
     } catch {
         $result.Succeeded = $false
@@ -871,7 +1025,9 @@ function Invoke-InstallLoxoneConfig {
         [Parameter(Mandatory=$true)]
         [PSCustomObject]$ConfigTargetInfo, # Contains InstallerPath, TargetVersion (Normalized)
         [Parameter(Mandatory=$true)]
-        [ref]$ScriptGlobalState
+        [ref]$ScriptGlobalState,
+        [Parameter(Mandatory=$false)]
+        [scriptblock]$ProgressReporter = $null
     )
     $FunctionName = $MyInvocation.MyCommand.Name
     # Determine if this is an update or install based on InitialVersion
@@ -1094,7 +1250,9 @@ function Invoke-DownloadLoxoneApp {
         [Parameter(Mandatory=$true)]
         [PSCustomObject]$AppTargetInfo, # Contains DownloadUrl, InstallerFileName, ExpectedSize, ExpectedCRC
         [Parameter(Mandatory=$true)]
-        [ref]$ScriptGlobalState
+        [ref]$ScriptGlobalState,
+        [Parameter(Mandatory=$false)]
+        [scriptblock]$ProgressReporter = $null
     )
     $FunctionName = $MyInvocation.MyCommand.Name
     $result = [pscustomobject]@{
@@ -1135,41 +1293,37 @@ function Invoke-DownloadLoxoneApp {
 
         $ScriptGlobalState.Value.currentStep++
         $ScriptGlobalState.Value.currentDownload++
-        $toastParams = @{
-            StepNumber       = $ScriptGlobalState.Value.currentStep
-            TotalSteps       = $ScriptGlobalState.Value.totalSteps
-            StepName         = "Downloading Loxone App"
-            DownloadFileName = $appInstallerFileName
-            DownloadNumber   = $ScriptGlobalState.Value.currentDownload
-            TotalDownloads   = $ScriptGlobalState.Value.totalDownloads
-            CurrentWeight    = $ScriptGlobalState.Value.CurrentWeight
-            TotalWeight      = $ScriptGlobalState.Value.TotalWeight
-        }
-        Write-Log -Level DEBUG -Message "($FunctionName) Intent: Update toast for Loxone App download progress."
-        Write-Log -Level DEBUG -Message "($FunctionName) Attempting to update progress toast (Invoke-DownloadLoxoneApp). Initialized: $($Global:PersistentToastInitialized)"
-        Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-DownloadLoxoneApp): toastParams='$($toastParams | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$([bool]$ScriptGlobalState.Value.anyUpdatePerformed)'")
-        Write-Log -Level DEBUG -Message ("($FunctionName) Current scriptGlobalState: StepNumber='$($ScriptGlobalState.Value.currentStep)', TotalSteps='$($ScriptGlobalState.Value.totalSteps)', CurrentWeight='$($ScriptGlobalState.Value.CurrentWeight)', TotalWeight='$($ScriptGlobalState.Value.TotalWeight)'")
-Write-Log -Message "($FunctionName) INVOKE-DOWNLOADLOXONEAPP: Logging before Update-PersistentToast call." -Level DEBUG
-        Write-Log -Message "($FunctionName)   Global:PersistentToastInitialized = $($Global:PersistentToastInitialized)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentStepNumber = $($ScriptGlobalState.Value.currentStep)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalStepsForUI = $($ScriptGlobalState.Value.totalSteps)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentWeight = $($ScriptGlobalState.Value.CurrentWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalWeight = $($ScriptGlobalState.Value.TotalWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.StepName = '$($toastParams.StepName)'" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.DownloadFileName = '$($toastParams.DownloadFileName)'" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.DownloadNumber = $($toastParams.DownloadNumber)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParams.TotalDownloads = $($toastParams.TotalDownloads)" -Level DEBUG
-        $statusTextForLogAppDownload = "Step $($ScriptGlobalState.Value.currentStep)/$($ScriptGlobalState.Value.totalSteps): $($toastParams.StepName)"
-        if ($toastParams.DownloadFileName) { $statusTextForLogAppDownload += " - $($toastParams.DownloadFileName) ($($toastParams.DownloadNumber)/$($toastParams.TotalDownloads))" }
-        Write-Log -Message "($FunctionName)   Constructed StatusText (App Download) = '$statusTextForLogAppDownload'" -Level DEBUG
-        $progressValueForLogAppDownload = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
-        Write-Log -Message "($FunctionName)   Calculated ProgressValue (App Download percentage) = $progressValueForLogAppDownload %" -Level DEBUG
-        try {
-            Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
-            Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-DownloadLoxoneApp) called successfully."
-        }
-        catch {
-            Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-DownloadLoxoneApp: $($_.Exception.ToString())"
+        
+        # Calculate progress percentage
+        $progressPercent = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { 
+            [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) 
+        } else { 0 }
+        
+        # Use progress reporter if available, otherwise fall back to toast
+        if ($ProgressReporter) {
+            $currentOp = "$appInstallerFileName ($($ScriptGlobalState.Value.currentDownload)/$($ScriptGlobalState.Value.totalDownloads))"
+            & $ProgressReporter -Operation "Downloading Loxone App" `
+                               -Status "Starting download" `
+                               -PercentComplete $progressPercent `
+                               -CurrentOperation $currentOp
+        } else {
+            # Fallback to direct toast update for backward compatibility
+            $toastParams = @{
+                StepNumber       = $ScriptGlobalState.Value.currentStep
+                TotalSteps       = $ScriptGlobalState.Value.totalSteps
+                StepName         = "Downloading Loxone App"
+                DownloadFileName = $appInstallerFileName
+                DownloadNumber   = $ScriptGlobalState.Value.currentDownload
+                TotalDownloads   = $ScriptGlobalState.Value.totalDownloads
+                CurrentWeight    = $ScriptGlobalState.Value.CurrentWeight
+                TotalWeight      = $ScriptGlobalState.Value.TotalWeight
+            }
+            try {
+                Update-PersistentToast @toastParams -IsInteractive ([bool]$WorkflowContext.IsInteractive) -ErrorOccurred ([bool]$ScriptGlobalState.Value.ErrorOccurred) -AnyUpdatePerformed ([bool]$ScriptGlobalState.Value.anyUpdatePerformed) -CallingScriptIsInteractive ([bool]$WorkflowContext.IsInteractive) -CallingScriptIsSelfInvoked ([bool]$WorkflowContext.IsSelfInvokedForUpdateCheck)
+                Write-Log -Level DEBUG -Message "($FunctionName) Update-PersistentToast (Invoke-DownloadLoxoneApp) called successfully."
+            } catch {
+                Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-DownloadLoxoneApp: $($_.Exception.ToString())"
+            }
         }
         $downloadParams = @{
             Url              = $AppTargetInfo.DownloadUrl
@@ -1191,7 +1345,11 @@ Write-Log -Message "($FunctionName) INVOKE-DOWNLOADLOXONEAPP: Logging before Upd
             TotalWeight      = $ScriptGlobalState.Value.TotalWeight
             ErrorAction      = 'Stop'
         }
-        # if ($WorkflowContext.Params.DebugMode) { $downloadParams.DebugMode = $true } # Removed: Invoke-LoxoneDownload does not support -DebugMode
+        
+        # Add ProgressReporter if available
+        if ($ProgressReporter) {
+            $downloadParams.ProgressReporter = $ProgressReporter
+        }
 
         Write-Log -Message "($FunctionName) Calling Invoke-LoxoneDownload for App installer..." -Level DEBUG
         $downloadSuccess = Invoke-LoxoneDownload @downloadParams
@@ -1203,6 +1361,18 @@ Write-Log -Message "($FunctionName) INVOKE-DOWNLOADLOXONEAPP: Logging before Upd
             $result.Succeeded = $true
             Write-Log -Message "($FunctionName) Loxone App download reported as successful." -Level INFO
             $ScriptGlobalState.Value.CurrentWeight += Get-StepWeight -StepID 'DownloadApp'
+            
+            # Report download completion
+            if ($ProgressReporter) {
+                $progressPercent = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { 
+                    [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) 
+                } else { 0 }
+                
+                & $ProgressReporter -Operation "Downloading Loxone App" `
+                                   -Status "Download completed" `
+                                   -PercentComplete $progressPercent `
+                                   -CurrentOperation "Downloaded $appInstallerFileName"
+            }
         }
 
     } catch {
@@ -1223,7 +1393,9 @@ function Invoke-InstallLoxoneApp {
         [Parameter(Mandatory=$true)]
         [PSCustomObject]$AppTargetInfo, # Contains InstallerFileName, TargetVersion, InitialVersion (from InitialLoxoneAppDetails)
         [Parameter(Mandatory=$true)]
-        [ref]$ScriptGlobalState
+        [ref]$ScriptGlobalState,
+        [Parameter(Mandatory=$false)]
+        [scriptblock]$ProgressReporter = $null
     )
     $FunctionName = $MyInvocation.MyCommand.Name
     # Determine if this is an update or install based on InitialVersion
@@ -1562,7 +1734,7 @@ function Invoke-CheckMiniserverVersions {
     Write-Log -Level DEBUG -Message "Entering function '$($FunctionName)'."
     Write-Log -Level DEBUG -Message "Parameters for '$($FunctionName)':"
     Write-Log -Level DEBUG -Message "  WorkflowContext.MSListPath: '$($WorkflowContext.MSListPath)'"
-    Write-Log -Level DEBUG -Message "  WorkflowContext.Params.SkipCertificateCheck: '$($WorkflowContext.Params.SkipCertificateCheck)'"
+    Write-Log -Level DEBUG -Message "  WorkflowContext.Params.EnforceSSLCertificate: '$($WorkflowContext.Params.EnforceSSLCertificate)'"
     Write-Log -Level DEBUG -Message "  WorkflowContext.Params.DebugMode: '$($WorkflowContext.Params.DebugMode)'"
     Write-Log -Level DEBUG -Message "  Prerequisites.LatestConfigVersionNormalized (Target Version for MS): '$($Prerequisites.LatestConfigVersionNormalized)'"
     Write-Log -Level DEBUG -Message "  UpdateTargetsToUpdate.Count (Initial): '$($UpdateTargetsToUpdate.Count)'"
@@ -1571,6 +1743,7 @@ function Invoke-CheckMiniserverVersions {
 
     $overallResult = [pscustomobject]@{
         Succeeded = $true # Overall success of the checking process, not individual MS
+        Reason    = ""    # Add Reason property for consistency with other steps
         Error     = $null
         Component = "MiniserverCheck"
         Action    = "VersionCheck"
@@ -1680,10 +1853,36 @@ Write-Log -Message "($FunctionName) INVOKE-UPDATEMINISERVERSINBULK: Logging befo
     }
     Write-Log -Message "($FunctionName) Processing MS entry $msCheckedCounter/$($msEntriesToProcess.Count): $msEntryForLog" -Level INFO
         Write-Log -Level DEBUG -Message "  ($FunctionName)   OriginalEntry (redacted for log): '$($msPlaceholderTarget.OriginalEntry -replace "([Pp]assword=)[^;]+", '$1********')'" # URL is part of OriginalEntry
-        Write-Log -Level DEBUG -Message "  ($FunctionName)   SkipCertificateCheck: '$($WorkflowContext.Params.SkipCertificateCheck)'"
-        Write-Log -Level DEBUG -Message "  ($FunctionName)   TimeoutSec: 1"
+        Write-Log -Level DEBUG -Message "  ($FunctionName)   EnforceSSLCertificate: '$($WorkflowContext.Params.EnforceSSLCertificate)'"
+        Write-Log -Level DEBUG -Message "  ($FunctionName)   TimeoutSec: 5"
         
-        $msVersionInfo = Get-MiniserverVersion -MSEntry $msPlaceholderTarget.OriginalEntry -SkipCertificateCheck:$WorkflowContext.Params.SkipCertificateCheck -TimeoutSec 1 -ErrorAction SilentlyContinue # Get-MiniserverVersion is from LoxoneUtils.Miniserver
+        # Skip certificate check by default unless EnforceSSLCertificate is specified
+        $skipCert = -not $WorkflowContext.Params.EnforceSSLCertificate
+        
+        # First try original method
+        $msVersionInfo = Get-MiniserverVersion -MSEntry $msPlaceholderTarget.OriginalEntry -SkipCertificateCheck:$skipCert -TimeoutSec 5 -ErrorAction SilentlyContinue
+        
+        # If HTTPS fails, try HTTP fallback only for SSL/TLS errors, not connectivity issues
+        if ($msVersionInfo.Error -and $msPlaceholderTarget.OriginalEntry -match '^https://') {
+            # Only try HTTP fallback for SSL/TLS errors, not timeouts or connectivity issues
+            if ($msVersionInfo.Error -match 'SSL|TLS|certificate|Unerwarteter Fehler beim Senden|underlying connection was closed' -and 
+                $msVersionInfo.Error -notmatch 'Zeitlimit|Timeout|timed out|cannot be resolved|host is unknown') {
+                Write-Log -Level INFO -Message "  ($FunctionName) HTTPS failed with SSL/TLS error for '$($msPlaceholderTarget.Name)', attempting HTTP fallback..."
+                $httpEntry = $msPlaceholderTarget.OriginalEntry -replace '^https://', 'http://'
+                $httpVersionInfo = Get-MiniserverVersion -MSEntry $httpEntry -SkipCertificateCheck:$skipCert -TimeoutSec 5 -ErrorAction SilentlyContinue
+                
+                if (-not $httpVersionInfo.Error) {
+                    Write-Log -Level INFO -Message "  ($FunctionName) HTTP fallback succeeded for '$($msPlaceholderTarget.Name)'"
+                    $msVersionInfo = $httpVersionInfo
+                    # Update the entry to use HTTP for future operations
+                    $msPlaceholderTarget.OriginalEntry = $httpEntry
+                } else {
+                    Write-Log -Level WARN -Message "  ($FunctionName) HTTP fallback also failed for '$($msPlaceholderTarget.Name)'"
+                }
+            } else {
+                Write-Log -Level INFO -Message "  ($FunctionName) Connection failed due to timeout/connectivity issue for '$($msPlaceholderTarget.Name)' - not attempting HTTP fallback"
+            }
+        }
 
         # Log result from Get-MiniserverVersion
         if ($msVersionInfo.Error) {
@@ -1723,6 +1922,31 @@ Write-Log -Message "($FunctionName) INVOKE-UPDATEMINISERVERSINBULK: Logging befo
     # Add weight for the "CheckMSVersions" step itself
     $ScriptGlobalState.Value.CurrentWeight += Get-StepWeight -StepID 'CheckMSVersions'
     Write-Log -Message "($FunctionName) Finished checking Miniserver versions. Found $($overallResult.NeedsUpdateCount) needing update out of $($overallResult.CheckedCount) checked." -Level INFO
+    
+    # Check if any MS had connection errors
+    Write-Log -Message "($FunctionName) DEBUG: Checking for miniserver connection errors..." -Level DEBUG
+    $msWithErrors = @($UpdateTargetsToUpdate | Where-Object {$_.Type -eq "Miniserver" -and $_.Status -eq "ErrorConnecting"})
+    Write-Log -Message "($FunctionName) DEBUG: UpdateTargetsToUpdate count: $($UpdateTargetsToUpdate.Count)" -Level DEBUG
+    Write-Log -Message "($FunctionName) DEBUG: Miniservers with ErrorConnecting: $($msWithErrors.Count)" -Level DEBUG
+    if ($msWithErrors -and $msWithErrors.Count -gt 0) {
+        $msWithErrors | ForEach-Object {
+            Write-Log -Message "($FunctionName) DEBUG: MS with error: $($_.Name), Status: $($_.Status)" -Level DEBUG
+        }
+    }
+    
+    # Force the count to be an integer
+    $connectionErrorCount = [int]$msWithErrors.Count
+    Write-Log -Message "($FunctionName) DEBUG: Connection error count (as int): $connectionErrorCount" -Level DEBUG
+    
+    if ($connectionErrorCount -gt 0) {
+        $overallResult.Succeeded = $false
+        $overallResult.Reason = "MiniserverConnectionErrors"
+        $overallResult.Error = "$connectionErrorCount Miniserver(s) had connection errors"
+        Write-Log -Message "($FunctionName) ERROR: $connectionErrorCount Miniserver(s) failed to connect. Setting result as failed." -Level ERROR
+        Write-Log -Message "($FunctionName) DEBUG: Set overallResult.Succeeded = $($overallResult.Succeeded), Reason = $($overallResult.Reason)" -Level DEBUG
+    } else {
+        Write-Log -Message "($FunctionName) DEBUG: No miniserver connection errors found" -Level DEBUG
+    }
     
 Write-Log -Message "($FunctionName) INVOKE-CHECKMINISERVERVERSIONS: After adding weight for 'CheckMSVersions' step." -Level DEBUG
     Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentStepNumber = $($ScriptGlobalState.Value.currentStep)" -Level DEBUG
@@ -1851,7 +2075,7 @@ function Invoke-UpdateMiniserversInBulk {
         LogFile                       = $WorkflowContext.LogFile
         MaxLogFileSizeMB              = $WorkflowContext.Params.MaxLogFileSizeMB
         ScriptSaveFolder              = $WorkflowContext.ScriptSaveFolder # For temp files Update-MS might use
-        SkipCertificateCheck          = $WorkflowContext.Params.SkipCertificateCheck
+        SkipCertificateCheck          = -not $WorkflowContext.Params.EnforceSSLCertificate
         IsInteractive                 = $WorkflowContext.IsInteractive
         StepNumber                    = $ScriptGlobalState.Value.currentStep # Pass current overall step
         TotalSteps                    = $ScriptGlobalState.Value.totalSteps    # Pass total overall steps
@@ -2011,7 +2235,15 @@ function Initialize-UpdatePipelineData {
                     $msIPForName = ($msEntryPreCheck -split '@')[-1] -split ':' | Select-Object -First 1
                     Write-Log -Level DEBUG -Message ("($FunctionName) [MS PreCheck] Processing MS Entry: {0}" -f ($msEntryPreCheck -replace "([Pp]assword=)[^;]+", '$1********'))
                     
-                    $msVersionInfo = Get-MiniserverVersion -MSEntry $msEntryPreCheck -SkipCertificateCheck:$WorkflowContext.Params.SkipCertificateCheck -ErrorAction SilentlyContinue
+                    # Skip certificate check by default unless EnforceSSLCertificate is specified
+                    $skipCert = -not $WorkflowContext.Params.EnforceSSLCertificate
+                    $msVersionInfo = Get-MiniserverVersion -MSEntry $msEntryPreCheck -SkipCertificateCheck:$skipCert -TimeoutSec 10 -ErrorAction SilentlyContinue
+                    
+                    # Log the error but do NOT fall back to HTTP for security reasons
+                    if ($msVersionInfo.Error -and $msEntryPreCheck -match '^https://') {
+                        Write-Log -Level WARN -Message "($FunctionName) [MS PreCheck] HTTPS connection failed for '$msIPForName': $($msVersionInfo.Error)"
+                        Write-Log -Level INFO -Message "($FunctionName) [MS PreCheck] NOT falling back to HTTP for security reasons. Please check the Miniserver HTTPS configuration or use HTTP in UpdateLoxoneMSList.txt"
+                    }
                     
                     $currentMSVersion = "Unknown"
                     $msStatus = "PendingCheck"
@@ -2030,6 +2262,10 @@ function Initialize-UpdatePipelineData {
                     } else {
                         $currentMSVersion = $msVersionInfo.Version
                         if (-not [string]::IsNullOrWhiteSpace($currentMSVersion) -and $currentMSVersion -ne "Unknown") {
+                            # Log connection encryption details
+                            $connectionType = if ($msEntryPreCheck -match '^https://') { 'HTTPS (Encrypted)' } else { 'HTTP (Plain text)' }
+                            Write-Log -Message "($FunctionName) [MS PreCheck] Connection details for '$msIPForName': Protocol=$connectionType, SkipCertCheck=$skipCert" -Level INFO
+                            
                             $normalizedCurrentMSVersion = Convert-VersionString $currentMSVersion
                             Write-Log -Message "($FunctionName) [MS PreCheck] MS '$msIPForName' current version: $currentMSVersion (Normalized: $normalizedCurrentMSVersion)" -Level INFO
 
@@ -2083,6 +2319,7 @@ function Initialize-UpdatePipelineData {
                            VersionAfterUpdate  = $null
                            OriginalEntry       = $msEntryPreCheck
                            Channel             = $WorkflowContext.Params.Channel
+                           Error               = $null
                        }
                        Write-Log -Message "($FunctionName) [MS PreCheck] Successfully created PSCustomObject for MS '$($msTargetEntry.Name)'." -Level DEBUG
                    } catch {

@@ -1,4 +1,4 @@
-# Integration tests for LoxoneUtils.Miniserver that require network connectivity
+﻿# Integration tests for LoxoneUtils.Miniserver that require network connectivity
 # These tests should only run when explicitly requested with -TestType Integration or All
 
 # Import the module at script level

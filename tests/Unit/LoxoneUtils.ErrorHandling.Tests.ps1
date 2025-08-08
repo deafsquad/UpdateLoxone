@@ -1,4 +1,4 @@
-# Tests for LoxoneUtils.ErrorHandling module
+﻿# Tests for LoxoneUtils.ErrorHandling module
 
 BeforeAll {
     # Set flag to suppress toast initialization

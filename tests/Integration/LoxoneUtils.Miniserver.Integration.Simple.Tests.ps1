@@ -1,4 +1,4 @@
-# Simplified integration tests for Miniserver functions
+﻿# Simplified integration tests for Miniserver functions
 # These should complete quickly even with network issues
 
 BeforeAll {

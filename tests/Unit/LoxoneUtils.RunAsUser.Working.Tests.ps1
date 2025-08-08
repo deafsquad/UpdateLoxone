@@ -1,4 +1,4 @@
-# Working tests for LoxoneUtils.RunAsUser based on actual behavior
+﻿# Working tests for LoxoneUtils.RunAsUser based on actual behavior
 
 BeforeAll {
     # Import the module

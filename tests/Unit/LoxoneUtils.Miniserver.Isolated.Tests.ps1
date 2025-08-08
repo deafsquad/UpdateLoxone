@@ -1,4 +1,4 @@
-# Isolated tests for LoxoneUtils.Miniserver that don't require network connectivity
+﻿# Isolated tests for LoxoneUtils.Miniserver that don't require network connectivity
 # These tests focus on parameter validation, module structure, and basic functionality
 #
 # NOTE: Tests that require network connectivity have been moved to:

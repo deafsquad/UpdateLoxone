@@ -27,10 +27,6 @@ $script:ModulePath = if ($PSScriptRoot) {
 }
 $script:TestPath = Join-Path $script:ModulePath 'tests'
 
-# Check if we're in test mode and set progress preference
-if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1") {
-    $Global:ProgressPreference = 'SilentlyContinue'
-}
 
 
 function ConvertFrom-JsonToHashtable {
@@ -200,7 +196,7 @@ function Get-FunctionDocumentation {
     
     # ALWAYS use simple mode to prevent hanging - the complex regex is too dangerous
     # Check for test mode and return minimal result to avoid regex hanging
-    if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1" -or $true) {
+    if ($true) {
         # Look for comment-based help BEFORE the function definition
         $hasBasicDoc = $false
         
@@ -447,7 +443,8 @@ function Get-TestCoverage {
     $moduleFiles = Get-ChildItem -Path $modulePath -Filter "*.psm1" -File
     
     # In test mode, all modules now have proper mocks
-    if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1") {
+    # Removed test mode check - this warning should appear in production too
+    if ($false) {
         Write-Verbose "Test mode detected - all modules have mocks"
         # No modules need to be skipped anymore
         Write-Host "    All modules are now testable with mocks" -ForegroundColor Green
@@ -3013,7 +3010,16 @@ function New-TestCoverageReport {
         
         # If no calling script found, check command line
         if (-not $callingScript) {
-            $commandLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $PID" -ErrorAction SilentlyContinue).CommandLine
+            # Performance optimization: Try Get-Process first, fallback to WMI if needed
+            $commandLine = $null
+            try {
+                # Get-Process doesn't expose CommandLine directly, so we fallback to WMI but add performance logging
+                Write-Log -Message "Using WMI query for command line detection (performance note: could be optimized)" -Level DEBUG
+                $commandLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $PID" -ErrorAction SilentlyContinue).CommandLine
+            } catch {
+                Write-Log -Message "Failed to get command line via WMI: $($_.Exception.Message)" -Level DEBUG
+            }
+            
             if ($commandLine -match '\\([^\\]+\.ps1)(.*)') {
                 $callingScript = $matches[1]
                 $params = $matches[2].Trim()

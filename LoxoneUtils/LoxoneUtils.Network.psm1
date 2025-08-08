@@ -1,37 +1,19 @@
-# Immediately check for test environment BEFORE any other code
-$isTestMode = ($env:PESTER_TEST_RUN -eq "1") -or 
-              ($Global:IsTestRun -eq $true) -or 
-              ($env:LOXONE_TEST_MODE -eq "1") -or
-              ($MyInvocation.PSCommandPath -and $MyInvocation.PSCommandPath -like "*test*") -or
-              ($PSCommandPath -and $PSCommandPath -like "*test*")
-
-if ($isTestMode) {
-    # Disable progress immediately to prevent any hanging
-    $Global:ProgressPreference = 'SilentlyContinue'
-    $ProgressPreference = 'SilentlyContinue'
+﻿
+#region Helper Functions
+function Format-Bytes {
+    param([int64]$Bytes)
     
-    Write-Warning "Test mode detected - network operations will be mocked"
-    function Invoke-LoxoneDownload {
-        param($Url, $DestinationPath, $ActivityName, $ExpectedCRC32, $ExpectedFilesize, $MaxRetries, $IsInteractive, $ErrorOccurred, $AnyUpdatePerformed, $StepNumber, $TotalSteps, $StepName, $DownloadNumber, $TotalDownloads, $ItemName)
-        
-        # Create mock file
-        "Mock download content for test" | Out-File $DestinationPath -Encoding UTF8
-        
-        return @{
-            Success = $true
-            Filesize = 100
-            CalculatedCRC32 = "MOCKCRC32"
-            ActualFilesize = 100
-            LocalPath = $DestinationPath
-        }
+    if ($Bytes -ge 1GB) {
+        return "{0:N2} GB" -f ($Bytes / 1GB)
+    } elseif ($Bytes -ge 1MB) {
+        return "{0:N2} MB" -f ($Bytes / 1MB)
+    } elseif ($Bytes -ge 1KB) {
+        return "{0:N2} KB" -f ($Bytes / 1KB)
+    } else {
+        return "$Bytes bytes"
     }
-    
-    # Export the mock function
-    Export-ModuleMember -Function Invoke-LoxoneDownload
-    
-    # Skip loading the rest of the module in test mode
-    return
 }
+#endregion Helper Functions
 
 #region Unified Download Function
 function Invoke-LoxoneDownload {
@@ -56,19 +38,6 @@ function Invoke-LoxoneDownload {
         [Parameter()][double]$TotalWeight = 1    # For overall progress
     )
     Write-Host "DEBUG: EXECUTING Invoke-LoxoneDownload from LoxoneUtils.Network.psm1 - VERSION WITH .NET COMPARE $(Get-Date)" -ForegroundColor Magenta
-    
-    # EMERGENCY FALLBACK: Check for test mode at function entry
-    if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1") {
-        Write-Warning "EMERGENCY FALLBACK: Test mode detected in Invoke-LoxoneDownload - returning mock result"
-        "Mock download content for test" | Out-File $DestinationPath -Encoding UTF8
-        return @{
-            Success = $true
-            Filesize = 100
-            CalculatedCRC32 = "MOCKCRC32"
-            ActualFilesize = 100
-            LocalPath = $DestinationPath
-        }
-    }
     
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
 
@@ -494,7 +463,10 @@ function Invoke-LoxoneDownload {
                             Write-Log -Message "Removing job $($job.Id)..." -Level DEBUG
                             Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
                         }
-                        $ProgressPreference = 'Continue'
+                        # Don't modify global preference in thread-safe mode
+                        if (-not $env:LOXONE_PARALLEL_MODE) {
+                            $ProgressPreference = 'Continue'
+                        }
                     }
                     
                     if ($iwrSuccess) {

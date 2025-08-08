@@ -1,4 +1,4 @@
-# Module for Loxone Update Script Logging Functions
+﻿# Module for Loxone Update Script Logging Functions
 
 # Check for test environment and skip initialization if in test mode
 if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1") {
@@ -43,10 +43,20 @@ function Enter-Function {
     $stackFrame = @{ Name = $FunctionName; Path = $FilePath; Line = $LineNumber; StartTime = (Get-Date) }
     $script:CallStack.Push($stackFrame)
     # Construct log message
-    $relativePath = $FilePath -replace [regex]::Escape($PSScriptRoot + '\'), '' -replace [regex]::Escape($PSScriptRoot + '/'), ''
+    $relativePath = $FilePath
+    if ($PSScriptRoot -and $FilePath) {
+        $relativePath = $FilePath -replace [regex]::Escape($PSScriptRoot + '\'), '' -replace [regex]::Escape($PSScriptRoot + '/'), ''
+    }
     # Corrected variable expansion
     $logMessage = "--> Entering Function: $FunctionName (Source: ${relativePath}:${LineNumber})"
-    Write-Log -Message $logMessage -Level Debug -SkipStackFrame # Skip stack frame here as we manually constructed it
+    
+    # Check if Write-Log is still available (module might be unloading)
+    if (Get-Command Write-Log -ErrorAction SilentlyContinue) {
+        Write-Log -Message $logMessage -Level Debug -SkipStackFrame # Skip stack frame here as we manually constructed it
+    } else {
+        # Fallback to Write-Debug if Write-Log is not available (e.g., during module unload)
+        Write-Debug $logMessage
+    }
 }
 
 function Exit-Function {
@@ -73,7 +83,14 @@ function Exit-Function {
     if (-not [string]::IsNullOrWhiteSpace($ResultMessage)) {
         $logMessage += " | Result: $ResultMessage"
     }
-    Write-Log -Message $logMessage -Level Debug -SkipStackFrame # Skip stack frame here
+    
+    # Check if Write-Log is still available (module might be unloading)
+    if (Get-Command Write-Log -ErrorAction SilentlyContinue) {
+        Write-Log -Message $logMessage -Level Debug -SkipStackFrame # Skip stack frame here
+    } else {
+        # Fallback to Write-Debug if Write-Log is not available (e.g., during module unload)
+        Write-Debug $logMessage
+    }
 }
 
 #endregion Function Entry/Exit Logging
@@ -163,16 +180,18 @@ function Write-Log {
                 $relativePath = $callerScriptName
                 try {
                     # Ensure $PSScriptRoot is available in this scope (it should be for a module)
-                    if ($PSScriptRoot -and $relativePath.StartsWith($PSScriptRoot)) {
+                    if ($PSScriptRoot -and $relativePath -and $relativePath.StartsWith($PSScriptRoot)) {
                          $relativePath = $relativePath.Substring($PSScriptRoot.Length).TrimStart('\/')
-                    } elseif ($PSScriptRoot) {
-                        # If not starting with PSScriptRoot, just use the leaf name
+                    } elseif ($callerScriptName) {
+                        # If not starting with PSScriptRoot or PSScriptRoot is null, just use the leaf name
                         $relativePath = Split-Path -Path $callerScriptName -Leaf
                     } else {
-                         # Fallback if PSScriptRoot isn't defined
-                         $relativePath = Split-Path -Path $callerScriptName -Leaf
+                         # Fallback if callerScriptName is null
+                         $relativePath = "Unknown"
                     }
-                } catch { $relativePath = Split-Path -Path $callerScriptName -Leaf } # Fallback on error
+                } catch { 
+                    $relativePath = if ($callerScriptName) { Split-Path -Path $callerScriptName -Leaf } else { "Unknown" }
+                } # Fallback on error
 
                 $callerInfo = "[${relativePath}:${callerLineNumber}"
                 # Add function name if it's not the top-level script or a simple block
@@ -199,11 +218,34 @@ function Write-Log {
     switch ($Level.ToUpper()) {
         'DEBUG' { Write-Debug $logEntry } # Only shows if $DebugPreference = 'Continue'
         'WARN'  { Write-Warning $logEntry } # Shows unless $WarningPreference = 'SilentlyContinue'
-        'ERROR' { Write-Error $logEntry -ErrorAction Continue } # Shows unless $ErrorActionPreference = 'SilentlyContinue'
+        'ERROR' { 
+            # In test mode, Write-Error output gets collected and shown after tests complete
+            # Check if we're in test context first
+            if ($env:PESTER_TEST_MODE -eq "1" -or $env:PESTER_TEST_RUN -eq "1") {
+                # In test mode, write to host with red color instead of using Write-Error
+                Write-Host $logEntry -ForegroundColor Red
+            } elseif ($env:LOXONE_PARALLEL_MODE -eq "1") {
+                # In parallel mode, use Write-Warning instead of Write-Error to avoid terminating errors
+                Write-Warning $logEntry
+            } else {
+                # In normal mode, use Write-Error as expected but ensure it's non-terminating
+                try {
+                    Write-Error $logEntry -ErrorAction Continue
+                } catch {
+                    # Fallback if Write-Error fails
+                    Write-Warning $logEntry
+                }
+            }
+        }
         'INFO'  {
             # Force INFO to console only when NOT debugging, otherwise it's just noise.
             if ($Global:DebugPreference -ne 'Continue') {
-                Write-Host $logEntry
+                # Check if this is a log rotation message and color it differently
+                if ($logEntry -match '\[LOG-ROTATION\]') {
+                    Write-Host $logEntry -ForegroundColor Cyan
+                } else {
+                    Write-Host $logEntry
+                }
             }
             # INFO messages are always written to the file regardless of console visibility.
         }
@@ -211,7 +253,11 @@ function Write-Log {
     }
     # --- Write to File (with Mutex) ---
     if (-not $Global:LogFile) {
-        Write-Warning "Global:LogFile variable not set. Cannot write to log file."
+        if ($Host.Name -like "*ISE*" -or $Host.Name -eq "ConsoleHost") {
+            Write-Host "[LOG] $logEntry" -ForegroundColor Gray
+        } else {
+            Write-Warning "Global:LogFile variable not set. Cannot write to log file."
+        }
         return
     }
 
@@ -223,7 +269,12 @@ function Write-Log {
         while ($retryCount -lt $maxRetries -and -not $mutexAcquired) {
             try {
                 # Try to acquire mutex with shorter timeout
-                $mutexAcquired = $script:LogMutex.WaitOne(1000) # 1 second timeout
+                if ($null -ne $script:LogMutex) {
+                    $mutexAcquired = $script:LogMutex.WaitOne(1000) # 1 second timeout
+                } else {
+                    # In test mode or if mutex is null, proceed without mutex
+                    $mutexAcquired = $true
+                }
                 if ($mutexAcquired) {
                     # Use file locking for inter-process synchronization
                     $fileWritten = $false
@@ -288,7 +339,7 @@ function Write-Log {
         # Avoid calling Write-Log within catch of Write-Log to prevent recursion on error
         Write-Warning "Write-Log: Error writing to log file '$Global:LogFile'. Error: $($_.Exception.Message). Log entry skipped: $logEntry"
     } finally {
-        if ($mutexAcquired) {
+        if ($mutexAcquired -and $null -ne $script:LogMutex) {
             $script:LogMutex.ReleaseMutex()
         }
     }
@@ -317,15 +368,21 @@ function Invoke-LogFileRotation {
 
     $logFileName = Split-Path -Path $LogFilePath -Leaf
     $logDir = Split-Path -Path $LogFilePath -Parent
-    Write-Log -Level INFO -Message "Starting log rotation check for '$logFileName'."
+    # Log rotation message with special prefix for coloring in terminals that support it
+    Write-Log -Level INFO -Message "[LOG-ROTATION] Starting log rotation check for '$logFileName'."
 
     $mutexAcquired = $false
     try {
         # Acquire Mutex at the beginning
-        $mutexAcquired = $script:LogMutex.WaitOne(10000) # Wait longer for rotation
-        if (-not $mutexAcquired) {
-            Write-Log -Level WARN -Message "Invoke-LogFileRotation: Could not acquire mutex. Skipping rotation for '$logFileName'."
-            return $null # Return null if mutex fails
+        if ($null -ne $script:LogMutex) {
+            $mutexAcquired = $script:LogMutex.WaitOne(10000) # Wait longer for rotation
+            if (-not $mutexAcquired) {
+                Write-Log -Level WARN -Message "Invoke-LogFileRotation: Could not acquire mutex. Skipping rotation for '$logFileName'."
+                return $null # Return null if mutex fails
+            }
+        } else {
+            # In test mode or if mutex is null, proceed without mutex
+            $mutexAcquired = $true
         }
 
         # Perform all file operations within the mutex lock
@@ -335,7 +392,7 @@ function Invoke-LogFileRotation {
         }
 
         # Rotation logic - if file already has timestamp, just move it; otherwise add timestamp
-        Write-Log -Level INFO -Message "Log file '$logFileName' exists. Rotating..."
+        Write-Log -Level INFO -Message "[LOG-ROTATION] Log file '$logFileName' exists. Rotating..."
         
         $baseLogFileName = [System.IO.Path]::GetFileNameWithoutExtension($logFileName)
         $logExtension = [System.IO.Path]::GetExtension($logFileName)
@@ -364,10 +421,10 @@ function Invoke-LogFileRotation {
                 $timeSinceWrite = (Get-Date) - $existingArchive.LastWriteTime
                 
                 if ($timeSinceCreation.TotalSeconds -lt 5 -or $timeSinceWrite.TotalSeconds -lt 5) {
-                    Write-Log -Level INFO -Message "Target archive '$archiveName' already exists and was modified recently (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Assuming rotation for '$logFileName' already completed."
+                    Write-Log -Level INFO -Message "[LOG-ROTATION] Target archive '$archiveName' already exists and was modified recently (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Assuming rotation for '$logFileName' already completed."
                     $renameSuccess = $true
                 } else {
-                    Write-Log -Level INFO -Message "Target archive '$archiveName' already exists but is older (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Normal rename attempt for '$logFileName' will proceed."
+                    Write-Log -Level INFO -Message "[LOG-ROTATION] Target archive '$archiveName' already exists but is older (Created: $($existingArchive.CreationTime), Written: $($existingArchive.LastWriteTime)). Normal rename attempt for '$logFileName' will proceed."
                 }
             }
         }
@@ -377,10 +434,10 @@ function Invoke-LogFileRotation {
             $maxRetries = 3
             while ($retryCount -lt $maxRetries -and -not $renameSuccess) {
                 $retryCount++
-                Write-Log -Level INFO -Message "Attempt ${retryCount}: Renaming '$logFileName' to '$archiveName'"
+                Write-Log -Level INFO -Message "[LOG-ROTATION] Attempt ${retryCount}: Renaming '$logFileName' to '$archiveName'"
                 try {
                     Rename-Item -LiteralPath $LogFilePath -NewName $archiveName -ErrorAction Stop
-                    Write-Log -Level INFO -Message "Attempt ${retryCount}: Successfully renamed log file '$logFileName' to '$archiveName'."
+                    Write-Log -Level INFO -Message "[LOG-ROTATION] Attempt ${retryCount}: Successfully renamed log file '$logFileName' to '$archiveName'."
                     $renameSuccess = $true
                 } catch {
                     $errorMessage = $_.Exception.Message
@@ -407,7 +464,7 @@ function Invoke-LogFileRotation {
         }
         
         # --- Cleanup Old Archives ---
-        Write-Log -Level INFO -Message "Starting cleanup of old archives in '$logDir' for series related to '$logFileName' (Max kept: $MaxArchiveCount)."
+        Write-Log -Level INFO -Message "[LOG-ROTATION] Starting cleanup of old archives in '$logDir' for series related to '$logFileName' (Max kept: $MaxArchiveCount)."
         try {
             # Extract the prefix (everything before the timestamp) for grouping
             $seriesPrefixForCleanup = ""
@@ -467,7 +524,7 @@ function Invoke-LogFileRotation {
                     Write-Log -Level WARN -Message "Invoke-LogFileRotation: Error deleting archive '$($archive.FullName)': $($_.Exception.Message)"
                 }
             }
-            Write-Log -Level INFO -Message "Log rotation and cleanup finished for series related to '$logFileName'. $deletedCount archive(s) deleted."
+            Write-Log -Level INFO -Message "[LOG-ROTATION] Log rotation and cleanup finished for series related to '$logFileName'. $deletedCount archive(s) deleted."
         } catch {
              Write-Log -Level WARN -Message "Invoke-LogFileRotation: Error during archive cleanup for '$logFileName': $($_.Exception.Message)"
         }
@@ -480,7 +537,7 @@ function Invoke-LogFileRotation {
         Write-Log -Level ERROR -Message "Invoke-LogFileRotation: An unhandled error occurred during log rotation for '$LogFilePath': $($_.Exception.Message)"
         Write-Log -Level DEBUG -Message "Full error record for Invoke-LogFileRotation: ($($_ | Out-String))"
     } finally {
-        if ($mutexAcquired) {
+        if ($mutexAcquired -and $null -ne $script:LogMutex) {
             $script:LogMutex.ReleaseMutex()
             Write-Log -Level DEBUG -Message "Log rotation mutex released for '$logFileName'."
         }
@@ -499,7 +556,9 @@ function Clear-LoggingResources {
     if ($script:LogMutex) {
         try {
             # Try to release if we own it
-            $script:LogMutex.ReleaseMutex()
+            if ($null -ne $script:LogMutex) {
+                $script:LogMutex.ReleaseMutex()
+            }
         } catch {
             # Ignore errors - we might not own it
         }

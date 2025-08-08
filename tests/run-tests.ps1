@@ -47,6 +47,14 @@
     • Logs all output to TestResults\TestRun_TIMESTAMP\live-progress-full.log
     • Best for interactive monitoring of long test runs
     
+.PARAMETER BlockNotifications
+    Completely disable Windows notifications at OS level during test run:
+    • Prevents ALL Windows toast notifications from appearing
+    • Kills existing notification processes
+    • Clears notification history
+    • Automatically restores notifications when tests complete
+    • Use this if you're getting unwanted notifications during tests
+    
 .PARAMETER LogToFile
     Enable detailed logging to file (default: true). Always creates a full transcript
     of all test output in TestResults\TestRun_TIMESTAMP\test-run-full.log
@@ -124,6 +132,10 @@
 .EXAMPLE
     .\run-tests.ps1 -TestType All -Coverage -LiveProgress
     Run all tests with coverage analysis and live progress notifications
+    
+.EXAMPLE
+    .\run-tests.ps1 -TestType All -BlockNotifications
+    Run all tests with Windows notifications completely disabled (no toast popups)
 #>
 [CmdletBinding(DefaultParameterSetName = "RunTests")]
 param(
@@ -156,6 +168,10 @@ param(
     [Parameter(ParameterSetName = "RunTests")]
     [Parameter(ParameterSetName = "RunAndCleanup")]
     [switch]$LiveProgress,
+    
+    [Parameter(ParameterSetName = "RunTests")]
+    [Parameter(ParameterSetName = "RunAndCleanup")]
+    [switch]$BlockNotifications,
     
     [Parameter(ParameterSetName = "RunTests")]
     [Parameter(ParameterSetName = "RunAndCleanup")]
@@ -210,6 +226,34 @@ param(
     [string[]]$UnrecognizedArgs
 )
 
+# ABSOLUTE FIRST: Initialize test mode blocking before ANYTHING else
+$earlyInitPath = Join-Path $PSScriptRoot "Helpers\Initialize-TestMode-Early.ps1"
+if (Test-Path $earlyInitPath) {
+    . $earlyInitPath -LiveProgress:$LiveProgress
+}
+
+# If BlockNotifications flag is set, disable Windows notifications at OS level
+if ($BlockNotifications) {
+    Write-Host "`n=== BLOCKING WINDOWS NOTIFICATIONS ===" -ForegroundColor Yellow
+    Write-Host "Disabling ALL Windows notifications for this test run..." -ForegroundColor Yellow
+    
+    $disableNotifPath = Join-Path $PSScriptRoot "Helpers\Disable-WindowsNotifications.ps1"
+    if (Test-Path $disableNotifPath) {
+        & $disableNotifPath
+    }
+    
+    # Kill any existing toast processes
+    Write-Host "Clearing existing notification processes..." -ForegroundColor DarkGray
+    Get-Process | Where-Object { $_.ProcessName -like "*toast*" -or $_.ProcessName -eq "Microsoft.Windows.ContentDeliveryManager" } | Stop-Process -Force -ErrorAction SilentlyContinue
+    
+    # Clear notification history  
+    Write-Host "Clearing notification history..." -ForegroundColor DarkGray
+    Get-ChildItem "$env:LOCALAPPDATA\Microsoft\Windows\Notifications\*.db" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    
+    Write-Host "Notification blocking active" -ForegroundColor Green
+    Write-Host ""
+}
+
 $ErrorActionPreference = 'Stop'
 
 # Ensure array parameters are properly initialized to avoid Count property errors
@@ -243,6 +287,11 @@ function Write-TestLog {
     
     # File output
     if ($LogToFile -and $script:LogFile) {
+        # Ensure the directory exists before writing
+        $logDir = Split-Path -Parent $script:LogFile
+        if (-not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
         $logMessage | Out-File -FilePath $script:LogFile -Append -Encoding UTF8
     }
 }
@@ -319,6 +368,28 @@ if ($LogToFile) {
     
     # Also set Global:LogFile for modules that expect it (like LoxoneUtils.Toast)
     $Global:LogFile = $script:LogFile
+    
+    # Set Pester test mode environment variable for Write-Log fallback
+    $env:PESTER_TEST_MODE = "1"
+}
+
+# Pre-load global mocks to avoid timeout issues and parameter prompts
+$globalScheduledTaskMockPath = Join-Path $script:TestsPath "Unit" | Join-Path -ChildPath "LoxoneUtils.ScheduledTask.GlobalMocks.ps1"
+if (Test-Path $globalScheduledTaskMockPath) {
+    Write-Host "Pre-loading global scheduled task mocks..." -ForegroundColor DarkGray
+    . $globalScheduledTaskMockPath
+}
+
+$globalWorkflowMockPath = Join-Path $script:TestsPath "Unit" | Join-Path -ChildPath "LoxoneUtils.WorkflowSteps.GlobalMocks.ps1"
+if (Test-Path $globalWorkflowMockPath) {
+    Write-Host "Pre-loading global workflow mocks..." -ForegroundColor DarkGray
+    . $globalWorkflowMockPath
+}
+
+$globalUpdateCheckMockPath = Join-Path $script:TestsPath "Unit" | Join-Path -ChildPath "LoxoneUtils.UpdateCheck.GlobalMocks.ps1"
+if (Test-Path $globalUpdateCheckMockPath) {
+    Write-Host "Pre-loading global update check mocks..." -ForegroundColor DarkGray
+    . $globalUpdateCheckMockPath
 }
 
 # Pre-load ScheduledTasks mocks if running in PowerShell 7 to avoid timeout issues
@@ -403,6 +474,20 @@ $script:CI = $CI
 $script:Detailed = $Detailed
 $script:DebugMode = $DebugMode
 
+# Ensure LiveProgress dependencies are loaded if needed
+if ($LiveProgress) {
+    try {
+        # Ensure BurntToast is loaded
+        if (-not (Get-Module BurntToast)) {
+            Import-Module BurntToast -Force -ErrorAction Stop
+        }
+        Write-Host "BurntToast module loaded for LiveProgress" -ForegroundColor DarkGray
+    } catch {
+        Write-Host "Warning: BurntToast module not available. LiveProgress will use console output only." -ForegroundColor Yellow
+        $script:LiveProgressNoToast = $true
+    }
+}
+
 # Set environment variables for coverage report context
 $env:UPDATELOXONE_TEST_TYPE = $TestType
 $env:UPDATELOXONE_IS_ADMIN = $script:IsAdmin.ToString()
@@ -413,6 +498,11 @@ $env:UPDATELOXONE_RUN_CATEGORIES = @(
     if ($script:RunIntegration) { "Integration" }
     if ($script:RunSystem) { "System" }
 ) -join ","
+
+# Set test mode environment variables early to ensure all modules detect test mode
+$env:PESTER_TEST_RUN = "1"
+$env:LOXONE_TEST_MODE = "1"
+$Global:IsTestRun = $true
 
 # Ensure paths exist
 if ($LogToFile -and -not (Test-Path $script:LogPath)) {
@@ -917,26 +1007,36 @@ if (-not $SkipSystemTests -and -not $isAdmin -and -not $CI) {
     }
 }
 
+# Toast blocking was already applied early, no need to re-apply
+
 # Import required modules
 try {
-    Import-Module Pester -MinimumVersion 5.0 -ErrorAction Stop
+    # Import Pester - use different approach for PS5.1 compatibility
+    $pesterModule = Get-Module -Name Pester -ListAvailable | Where-Object { $_.Version -ge [version]'5.0.0' } | Sort-Object Version -Descending | Select-Object -First 1
+    if ($pesterModule) {
+        Import-Module Pester -RequiredVersion $pesterModule.Version -Force -ErrorAction Stop
+    } else {
+        Import-Module Pester -ErrorAction Stop
+    }
     Write-TestLog "Pester v$(Get-Module Pester | Select-Object -ExpandProperty Version) loaded"
     
-    # Set up test environment flags before loading modules
-    # This ensures Toast functionality doesn't interfere with tests
-    $Global:SuppressLoxoneToastInit = $true
-    $Global:PersistentToastInitialized = $true
-    
-    # Mock all Toast functions to prevent any usage during tests
-    # UNLESS LiveProgress is enabled
+    # Toast blocking was already handled in Initialize-TestMode-Early.ps1
+    # But we need to ensure the Toast module respects it
     if (-not $LiveProgress) {
-        function Global:Show-UpdateLoxoneToast { Write-Verbose "MOCK: Toast function called" }
-        function Global:Update-PersistentToast { Write-Verbose "MOCK: Toast function called" }
-        function Global:Initialize-Toast { Write-Verbose "MOCK: Toast function called" }
-        function Global:Update-Toast { Write-Verbose "MOCK: Toast function called" }
-        function Global:Show-FinalStatusToast { Write-Verbose "MOCK: Toast function called" }
-        function Global:Initialize-LoxoneToastAppId { Write-Verbose "MOCK: Toast function called" }
-    } else {
+        # Force the Toast module to respect suppression even if tests try to override
+        if (Get-Module LoxoneUtils) {
+            $toastModule = Get-Module LoxoneUtils
+            # Set the module's script-scoped suppression flag
+            & $toastModule { 
+                $script:SuppressToastInit = $true 
+            } -ErrorAction SilentlyContinue
+        }
+    }
+    
+    if ($LiveProgress) {
+        # Set environment variable to prevent test files from loading toast mocks
+        $env:LOXONE_LIVEPROGRESS_MODE = "1"
+        
         # When LiveProgress is enabled, we need real toast functions that use DataBinding
         Import-Module BurntToast -Force
         
@@ -989,7 +1089,7 @@ try {
         $Global:LiveProgressToastId = "UpdateLoxoneTests"
         $Global:LiveProgressToastInitialized = $false
         
-        function Global:Initialize-Toast {
+        function Global:Initialize-LiveProgressToast {
             try {
                 # Create components with data binding - double progress bar like live implementation
                 $text1 = New-BTText -Content "StatusText"
@@ -1029,7 +1129,7 @@ try {
             }
         }
         
-        function Global:Update-Toast {
+        function Global:Update-LiveProgressToast {
             param($Message, [bool]$TestPassed = $true, [bool]$TestSkipped = $false)
             try {
                 $Global:LiveProgressTestCount++
@@ -1058,7 +1158,7 @@ try {
                     
                     # Initialize toast if needed
                     if (-not $Global:LiveProgressToastInitialized) {
-                        Initialize-Toast
+                        Initialize-LiveProgressToast
                     } else {
                         # Update existing toast with data binding
                         $updateParams = @{
@@ -1103,15 +1203,15 @@ try {
             }
         }
         
-        # Map other functions to Update-Toast
+        # Map other functions to Update-LiveProgressToast
         function Global:Update-PersistentToast { 
             param($Message) 
             # Always update progress when this is called during tests
-            Update-Toast -Message $Message 
+            Update-LiveProgressToast -Message $Message 
         }
         function Global:Show-UpdateLoxoneToast { 
             param($Message) 
-            Update-Toast -Message $Message 
+            Update-LiveProgressToast -Message $Message 
         }
         function Global:Show-FinalStatusToast { Write-Verbose "Final toast handled separately" }
     }
@@ -1300,8 +1400,18 @@ function Invoke-TestsWithLiveProgress {
     $testFiles = @()
     foreach ($path in $TestPaths) {
         if (Test-Path $path) {
-            $files = Get-ChildItem -Path $path -Filter $TestFilter -File -Recurse
-            $testFiles += $files
+            # Check if this is a file or directory
+            $item = Get-Item -Path $path
+            if ($item.PSIsContainer) {
+                # It's a directory, get files from it
+                $files = Get-ChildItem -Path $path -Filter $TestFilter -File -Recurse
+                $testFiles += $files
+            } else {
+                # It's a file, add it directly if it matches the filter
+                if ($item.Name -like $TestFilter) {
+                    $testFiles += $item
+                }
+            }
         }
     }
     
@@ -1355,6 +1465,7 @@ function Invoke-TestsWithLiveProgress {
     $discoveryConfig.Run.Path = $testFiles.FullName
     $discoveryConfig.Run.PassThru = $true
     $discoveryConfig.Run.SkipRun = $true  # Only discover, don't run
+    $discoveryConfig.Output.Verbosity = 'None'  # Suppress discovery output
     
     if (-not $NoTagFiltering) {
         if ($ExcludeTags.Count -gt 0) {
@@ -1391,8 +1502,8 @@ function Invoke-TestsWithLiveProgress {
     if (-not $script:LiveProgressNoToast) {
         try {
             # Initialize the toast with data binding
-            if (Get-Command Initialize-Toast -ErrorAction SilentlyContinue) {
-                Initialize-Toast
+            if (Get-Command Initialize-LiveProgressToast -ErrorAction SilentlyContinue) {
+                Initialize-LiveProgressToast
                 Write-TestLog "Initial progress toast notification sent with Loxone AppId and persistence" -Level "DEBUG"
             }
             
@@ -1409,8 +1520,8 @@ function Invoke-TestsWithLiveProgress {
     Write-TestLog "Running tests with live progress tracking..." -Color Cyan
     
     # Initialize toast before running tests
-    if (-not $script:LiveProgressNoToast -and (Get-Command Initialize-Toast -ErrorAction SilentlyContinue)) {
-        Initialize-Toast
+    if (-not $script:LiveProgressNoToast -and (Get-Command Initialize-LiveProgressToast -ErrorAction SilentlyContinue)) {
+        Initialize-LiveProgressToast
     }
     
     # Run tests with output monitoring for LiveProgress
@@ -1443,6 +1554,7 @@ function Invoke-TestsWithLiveProgress {
         $discoveryConfig.Run.Path = $testFiles.FullName
         $discoveryConfig.Run.PassThru = $true
         $discoveryConfig.Run.SkipRun = $true  # Discovery only
+        $discoveryConfig.Output.Verbosity = 'None'  # Suppress discovery output
         
         if (-not $NoTagFiltering) {
             if ($ExcludeTags.Count -gt 0) {
@@ -1589,9 +1701,9 @@ function Invoke-TestsWithLiveProgress {
             }
             
             # Update toast notification after EVERY test!
-            if (Get-Command Update-Toast -ErrorAction SilentlyContinue) {
-                # This calls the existing Update-Toast function which increments counters
-                Update-Toast -Message $test.Name -TestPassed $testPassed -TestSkipped $testSkipped
+            if (Get-Command Update-LiveProgressToast -ErrorAction SilentlyContinue) {
+                # This calls the existing Update-LiveProgressToast function which increments counters
+                Update-LiveProgressToast -Message $test.Name -TestPassed $testPassed -TestSkipped $testSkipped
             }
             
             # Also update progress directly for more accurate tracking
@@ -1705,9 +1817,45 @@ function Invoke-TestCategory {
         }
     }
     
+    # Get test files from all specified paths first (needed for both LiveProgress and normal execution)
+    $testFiles = @()
+    foreach ($path in $TestPaths) {
+        if (Test-Path $path) {
+            $files = Get-ChildItem -Path $path -Filter "*.Tests.ps1" -File -Recurse
+            $testFiles += $files
+        }
+    }
+    
+    # Show file list in Detailed mode
+    if ($script:Detailed -and $testFiles.Count -gt 0) {
+        Write-TestLog "Found $($testFiles.Count) test files to run:" -Level "INFO" -Color Gray
+        $testFiles | ForEach-Object {
+            Write-TestLog "  - $($_.Name)" -Level "INFO" -Color DarkGray
+        }
+    }
+    
+    # Apply name filter if specified
+    if ($Filter) {
+        $testFiles = $testFiles | Where-Object { $_.Name -like "*$Filter*" }
+        Write-TestLog "Filtered to $($testFiles.Count) test files matching '$Filter'"
+    }
+    
+    if (-not $testFiles -or $testFiles.Count -eq 0) {
+        Write-TestLog "No $CategoryName test files found" -Level "WARN" -Color Yellow
+        return
+    }
+    
     # LiveProgress is handled internally now
     if ($LiveProgress -and $script:LiveProgressState -eq $null) {
         Write-TestLog "Using live progress with toast notifications..." -Color Yellow
+        
+        # Debug output to verify filtering
+        Write-TestLog "LiveProgress: Processing $($testFiles.Count) filtered test files" -Level "DEBUG" -Color Yellow
+        if ($script:Detailed) {
+            $testFiles | ForEach-Object {
+                Write-TestLog "  - $($_.FullName)" -Level "DEBUG" -Color DarkGray
+            }
+        }
         
         # Build filter based on category
         $testFilter = switch ($CategoryName) {
@@ -1717,10 +1865,10 @@ function Invoke-TestCategory {
             default { "*.Tests.ps1" }
         }
         
-        # Call the internal live progress function
+        # Call the internal live progress function with filtered file paths
         # For Unit tests, don't use tag filtering to avoid Pester's aggressive exclusion
         $liveExcludeTags = if ($CategoryName -eq "Unit") { @() } else { $ExcludeTags }
-        $liveResults = Invoke-TestsWithLiveProgress -TestPaths $TestPaths -TestFilter $testFilter -ExcludeTags $liveExcludeTags
+        $liveResults = Invoke-TestsWithLiveProgress -TestPaths $testFiles.FullName -TestFilter $testFilter -ExcludeTags $liveExcludeTags
         
         if ($liveResults.PesterResult) {
             # Update our tracking with the results
@@ -1764,34 +1912,6 @@ function Invoke-TestCategory {
             }
         }
         
-        return
-    }
-    
-    # Get test files from all specified paths
-    $testFiles = @()
-    foreach ($path in $TestPaths) {
-        if (Test-Path $path) {
-            $files = Get-ChildItem -Path $path -Filter "*.Tests.ps1" -File -Recurse
-            $testFiles += $files
-        }
-    }
-    
-    # Show file list in Detailed mode
-    if ($script:Detailed -and $testFiles.Count -gt 0) {
-        Write-TestLog "Found $($testFiles.Count) test files to run:" -Level "INFO" -Color Gray
-        $testFiles | ForEach-Object {
-            Write-TestLog "  - $($_.Name)" -Level "INFO" -Color DarkGray
-        }
-    }
-    
-    # Apply name filter if specified
-    if ($Filter) {
-        $testFiles = $testFiles | Where-Object { $_.Name -like "*$Filter*" }
-        Write-TestLog "Filtered to $($testFiles.Count) test files matching '$Filter'"
-    }
-    
-    if (-not $testFiles -or $testFiles.Count -eq 0) {
-        Write-TestLog "No $CategoryName test files found" -Level "WARN" -Color Yellow
         return
     }
     
@@ -2893,18 +3013,30 @@ if ($script:Detailed) {
 
 # Phase 1: Run Unit Tests (only when not running All tests)
 if ($script:RunUnit -and $testCategories.Unit -and $testCategories.Unit.Count -gt 0) {
-    Write-TestLog "`nRunning $($testCategories.Unit.Count) Unit tests..." -Color Cyan
-    
     # When using LiveProgress, we need to handle this specially
     if ($LiveProgress) {
-        # For LiveProgress, we'll run all tests and filter results afterward
-        # This is a limitation of the current LiveProgress implementation
-        Write-TestLog "Note: LiveProgress mode runs all tests together, categorizing results afterward" -Level "DEBUG"
+        # Get all unit test files first
+        $unitPaths = @(Join-Path $script:TestsPath "Unit")
+        $unitTestFiles = @()
+        foreach ($path in $unitPaths) {
+            if (Test-Path $path) {
+                $files = Get-ChildItem -Path $path -Filter "*.Tests.ps1" -File -Recurse
+                $unitTestFiles += $files
+            }
+        }
         
-        # Run only Unit tests with LiveProgress
-        if ($script:RunUnit -or $script:RunIntegration -or $script:RunSystem) {
-            # Only use Unit path for Unit tests
-            $unitPaths = @(Join-Path $script:TestsPath "Unit")
+        # Apply name filter if specified
+        if ($Filter) {
+            $unitTestFiles = $unitTestFiles | Where-Object { $_.Name -like "*$Filter*" }
+            Write-TestLog "Filtered to $($unitTestFiles.Count) test files matching '$Filter'" -Color Yellow
+        }
+        
+        if ($unitTestFiles.Count -eq 0) {
+            Write-TestLog "No Unit test files found matching filter" -Level "WARN" -Color Yellow
+            $script:Results.UnitTests = @{ Status = "NotRun"; Total = 0; Passed = 0; Failed = 0; Skipped = 0; Duration = [TimeSpan]::Zero }
+        } else {
+            Write-TestLog "`nRunning $($unitTestFiles.Count) Unit test files..." -Color Cyan
+            Write-TestLog "Note: LiveProgress mode will discover and run all tests in these files" -Level "DEBUG"
             
             # Use proper tag filtering
             $excludeTags = @('System', 'RequiresAdmin')
@@ -2913,17 +3045,18 @@ if ($script:RunUnit -and $testCategories.Unit -and $testCategories.Unit.Count -g
                 $excludeTags += @('Integration', 'RequiresNetwork')
             }
             
-            $liveResults = Invoke-TestsWithLiveProgress -TestPaths $unitPaths -TestFilter "*.Tests.ps1" -ExcludeTags $excludeTags
+            # Pass the filtered file paths to LiveProgress
+            $liveResults = Invoke-TestsWithLiveProgress -TestPaths $unitTestFiles.FullName -TestFilter "*.Tests.ps1" -ExcludeTags $excludeTags
             
             if ($liveResults.PesterResult) {
-                # Use discovered counts for accurate reporting
+                # Use actual counts from LiveProgress results
                 $script:Results.UnitTests = @{
                     Status = "Completed"
-                    Total = $testCategories.Unit.Count
-                    Passed = [Math]::Min($liveResults.PassedTests, $testCategories.Unit.Count)
-                    Failed = 0  # Will be updated from detailed results
-                    Skipped = 0  # Will be updated from detailed results
-                    Duration = $liveResults.Duration
+                    Total = $liveResults.TotalTests
+                    Passed = $liveResults.PassedTests
+                    Failed = $liveResults.FailedTests
+                    Skipped = $liveResults.SkippedTests
+                    Duration = [TimeSpan]::FromSeconds($liveResults.Duration)
                 }
                 
                 # Store the full results for later processing
@@ -2931,6 +3064,8 @@ if ($script:RunUnit -and $testCategories.Unit -and $testCategories.Unit.Count -g
             }
         }
     } else {
+        Write-TestLog "`nRunning $($testCategories.Unit.Count) Unit tests..." -Color Cyan
+        
         # Use standard invocation with proper tag filtering
         $unitPaths = @(Join-Path $script:TestsPath "Unit")
         
@@ -3274,20 +3409,9 @@ if ($LiveProgress -and $script:LiveProgressFullResults) {
                 $unitFailed++
             }
             
-            # Collect failure details
-            $script:Results.FailedTestDetails += @{
-                Category = if ($testTags -contains 'System' -or $testTags -contains 'RequiresAdmin') { "System" }
-                          elseif ($testTags -contains 'Integration' -or $testTags -contains 'RequiresNetwork') { "Integration" }
-                          elseif ($testFile -match "\\Integration\\") { "Integration" }
-                          elseif ($testFile -match "\\System\\") { "System" }
-                          elseif ($testFile -like "*Integration*.Tests.ps1") { "Integration" }
-                          elseif ($testFile -like "*System*.Tests.ps1" -and $testFile -notmatch "\\Unit\\") { "System" }
-                          else { "Unit" }
-                Test = $failure.ExpandedPath
-                Error = $failure.ErrorRecord.Exception.Message
-                File = Split-Path $failure.ScriptBlock.File -Leaf
-                Description = $failure.Name
-            }
+            # Don't collect failure details here if already collected in main processing
+            # This prevents double-counting when LiveProgress is enabled
+            # The main result processing already added these to FailedTestDetails
         }
     }
     
@@ -4102,10 +4226,92 @@ $runtimeFormatted = "{0:mm\:ss\.fff}" -f $totalRuntime
 # Determine exit code
 $exitCode = if ($script:Results.FailedTests -eq 0) { 0 } else { 1 }
 
+# Clean up any remaining background jobs before exiting
+Write-TestLog "`nCleaning up background jobs..." -Level "DEBUG" -Color DarkGray
+$remainingJobs = @(Get-Job -ErrorAction SilentlyContinue)
+if ($remainingJobs.Count -gt 0) {
+    Write-TestLog "Found $($remainingJobs.Count) background jobs to clean up" -Level "DEBUG" -Color Yellow
+    foreach ($job in $remainingJobs) {
+        Write-TestLog "  Stopping job: $($job.Name) (State: $($job.State))" -Level "DEBUG" -Color DarkGray
+        try {
+            $job | Stop-Job -ErrorAction SilentlyContinue
+            $job | Remove-Job -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-TestLog "  Failed to stop job $($job.Name): $_" -Level "DEBUG" -Color Red
+        }
+    }
+}
+
+# Also clean up any ThreadJobs if the module is loaded
+if (Get-Module ThreadJob -ErrorAction SilentlyContinue) {
+    $threadJobs = @(Get-Job -ErrorAction SilentlyContinue | Where-Object { $_.GetType().Name -eq 'ThreadJob' })
+    if ($threadJobs.Count -gt 0) {
+        Write-TestLog "Found $($threadJobs.Count) ThreadJobs to clean up" -Level "DEBUG" -Color Yellow
+        foreach ($job in $threadJobs) {
+            Write-TestLog "  Stopping ThreadJob: $($job.Name)" -Level "DEBUG" -Color DarkGray
+            try {
+                $job | Stop-Job -ErrorAction SilentlyContinue
+                $job | Remove-Job -Force -ErrorAction SilentlyContinue
+            } catch {
+                Write-TestLog "  Failed to stop ThreadJob $($job.Name): $_" -Level "DEBUG" -Color Red
+            }
+        }
+    }
+}
+
+# Clean up any toast notification threads/mutexes
+if ($Global:ToastMutex) {
+    try {
+        $Global:ToastMutex.ReleaseMutex()
+        $Global:ToastMutex.Dispose()
+        $Global:ToastMutex = $null
+    } catch {
+        # Ignore errors during mutex cleanup
+    }
+}
+
+# Clean up LiveProgress toast notifications if they were created
+if ($LiveProgress -and $Global:LiveProgressToastId) {
+    Write-TestLog "Cleaning up LiveProgress toast notifications..." -Level "DEBUG" -Color DarkGray
+    try {
+        if (Get-Command Remove-BTNotification -ErrorAction SilentlyContinue) {
+            # Remove using the specific toast ID
+            Remove-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -ErrorAction SilentlyContinue
+            Write-TestLog "  Removed LiveProgress toast with ID: $Global:LiveProgressToastId" -Level "DEBUG" -Color DarkGray
+            
+            # Also try removing by AppId to ensure all UpdateLoxone toasts are cleared
+            $appId = if (Get-Command Get-LoxoneConfigToastAppId -ErrorAction SilentlyContinue) {
+                Get-LoxoneConfigToastAppId
+            } else {
+                '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+            }
+            Remove-BTNotification -AppId $appId -ErrorAction SilentlyContinue
+            Write-TestLog "  Removed all toasts for AppId: $appId" -Level "DEBUG" -Color DarkGray
+        }
+    } catch {
+        Write-TestLog "  Failed to remove toast notifications: $_" -Level "DEBUG" -Color Red
+    }
+    
+    # Clean up global variables
+    Remove-Variable -Name LiveProgressToastId -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name LiveProgressToastData -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name LiveProgressToastInitialized -Scope Global -ErrorAction SilentlyContinue
+}
+
 # Display final summary line (always show, even in CI mode)
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "Total Runtime: $runtimeFormatted | Exit Code: $exitCode" -ForegroundColor $(if ($exitCode -eq 0) { 'Green' } else { 'Red' })
 Write-Host "========================================" -ForegroundColor Cyan
+
+# If we disabled notifications, re-enable them before exiting
+if ($BlockNotifications) {
+    Write-Host "`nRe-enabling Windows notifications..." -ForegroundColor Green
+    $disableNotifPath = Join-Path $PSScriptRoot "Helpers\Disable-WindowsNotifications.ps1"
+    if (Test-Path $disableNotifPath) {
+        & $disableNotifPath -Enable
+    }
+    Write-Host "Windows notifications restored" -ForegroundColor Green
+}
 
 # Exit with appropriate code
 exit $exitCode

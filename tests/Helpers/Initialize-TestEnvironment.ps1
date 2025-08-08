@@ -1,4 +1,4 @@
-# Helper script to initialize test environment for modules that use logging functions
+﻿# Helper script to initialize test environment for modules that use logging functions
 
 # Set test mode flags
 $env:PESTER_TEST_RUN = "1"
@@ -45,10 +45,22 @@ function global:Write-Log {
     }
 }
 
+# Load toast notification mocks to prevent real notifications
+# But skip this if we're in LiveProgress mode (which needs real notifications)
+if (-not $env:LOXONE_LIVEPROGRESS_MODE) {
+    $toastMocksPath = Join-Path (Split-Path $PSScriptRoot) "Helpers\Mock-ToastNotifications.ps1"
+    if (Test-Path $toastMocksPath) {
+        . $toastMocksPath
+    }
+}
+
 # Initialize script-scoped variables that modules expect
 if (-not $script:CallStack) {
     $script:CallStack = [System.Collections.Generic.Stack[object]]::new()
 }
+
+# Load the module mocking helper
+. (Join-Path $PSScriptRoot 'Initialize-ModuleMocks.ps1')
 
 # Export a function to clean up after tests
 function global:Clear-TestEnvironment {
@@ -61,6 +73,56 @@ function global:Clear-TestEnvironment {
     $env:PESTER_TEST_RUN = $null
     $Global:IsTestRun = $null
     $env:LOXONE_TEST_MODE = $null
+}
+
+# Ensure functions are available in module scopes
+# This is needed because modules may not have imported LoxoneUtils.Logging yet
+$modules = @(
+    'LoxoneUtils.Installation',
+    'LoxoneUtils.Network', 
+    'LoxoneUtils.Miniserver',
+    'LoxoneUtils.System',
+    'LoxoneUtils.UpdateCheck',
+    'LoxoneUtils.Utility',
+    'LoxoneUtils.WorkflowSteps',
+    'LoxoneUtils.Toast',
+    'LoxoneUtils.RunAsUser',
+    'LoxoneUtils.ErrorHandling'
+)
+
+foreach ($moduleName in $modules) {
+    # Check if module is already loaded
+    $module = Get-Module -Name $moduleName -ErrorAction SilentlyContinue
+    if ($module) {
+        # Inject the functions into the module's scope
+        & $module {
+            if (-not (Get-Command Enter-Function -ErrorAction SilentlyContinue)) {
+                function Enter-Function {
+                    param($FunctionName, $FilePath, $LineNumber)
+                    # No-op in test mode
+                }
+            }
+            if (-not (Get-Command Exit-Function -ErrorAction SilentlyContinue)) {
+                function Exit-Function {
+                    param($FunctionName, $ExitTime)
+                    # No-op in test mode
+                }
+            }
+            if (-not (Get-Command Write-Log -ErrorAction SilentlyContinue)) {
+                function Write-Log {
+                    param(
+                        [string]$Message,
+                        [string]$Level = 'INFO',
+                        [switch]$SkipStackFrame
+                    )
+                    # Write to console in test mode if verbose
+                    if ($VerbosePreference -eq 'Continue') {
+                        Write-Verbose "[TEST-LOG] [$Level] $Message"
+                    }
+                }
+            }
+        }
+    }
 }
 
 Write-Verbose "Test environment initialized with logging function overrides"

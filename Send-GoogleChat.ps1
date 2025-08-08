@@ -1,4 +1,4 @@
-param(
+﻿param(
     # Parameters are now optional, logic below will decide which to use
     [string]$LogFilePath,
     [string]$Message,

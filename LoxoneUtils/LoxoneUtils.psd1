@@ -26,6 +26,9 @@ PowerShellVersion = '5.1'
 # External modules required by this module
 # RequiredModules = @('BurntToast') # Temporarily commented out, handled by main script
 
+# Scripts to run when module is imported
+ScriptsToProcess = @()
+
 # Modules to import as nested modules of the module specified in RootModule/ModuleToProcess
 # List all script modules (.psm1 files) that are part of this module
 NestedModules = @(
@@ -41,7 +44,12 @@ NestedModules = @(
     '.\LoxoneUtils.UpdateCheck.psm1',
     '.\LoxoneUtils.WorkflowSteps.psm1',
     '.\LoxoneUtils.TestCoverage.psm1',
-    '.\LoxoneUtils.TestTracking.psm1'
+    '.\LoxoneUtils.TestTracking.psm1',
+    '.\LoxoneUtils.ParallelWorkflow.psm1',
+    '.\LoxoneUtils.ConsoleProgress.psm1',
+    '.\LoxoneUtils.ThreadSafe.psm1',
+    '.\LoxoneUtils.ProgressReporter.psm1',
+    '.\LoxoneUtils.MiniserverCache.psm1'
 )
 # Functions to export from this module
     FunctionsToExport = @(
@@ -71,6 +79,7 @@ NestedModules = @(
         'Update-MS',
         
         # LoxoneUtils.Network.psm1
+        'Format-Bytes',
         'Invoke-LoxoneDownload',
         'Wait-ForPingSuccess',
         'Wait-ForPingTimeout',
@@ -90,6 +99,8 @@ NestedModules = @(
         'Initialize-LoxoneToastAppId',
         'Show-FinalStatusToast',
         'Update-PersistentToast',
+        'Initialize-Toast',
+        'Update-Toast',
         
         # LoxoneUtils.UpdateCheck.psm1
         'Get-LoxoneUpdateData',
@@ -145,7 +156,41 @@ NestedModules = @(
         'Find-AssertionMatch',
         'Get-AssertionMatchReport',
         'Get-AssertionPerformanceMetrics',
-        'Export-AssertionPerformanceReport'
+        'Export-AssertionPerformanceReport',
+        
+        # LoxoneUtils.ParallelWorkflow.psm1
+        'Start-ParallelWorkflow',
+        'Remove-ThreadJobs',
+        'Write-WorkerLog',
+        'Start-ProgressWorker',
+        'Start-ComponentDownloadWorker',
+        'Start-InstallWorker',
+        'Start-MiniserverWorker',
+        'Watch-DirectThreadJobs',
+        'Initialize-ProgressTracking',
+        'Update-MiniserverProgress',
+        
+        # LoxoneUtils.ConsoleProgress.psm1
+        'Get-ProgressBar',
+        'Show-ConsoleProgress',
+        'Start-ConsoleProgressMonitor',
+        
+        # LoxoneUtils.ThreadSafe.psm1
+        'Initialize-WorkflowStateMutex',
+        'Update-WorkflowState',
+        'Get-WorkflowState',
+        'Remove-WorkflowStateMutex',
+        
+        # LoxoneUtils.ProgressReporter.psm1
+        'New-ProgressReporter',
+        'Invoke-WithProgress',
+        'New-ProgressTracker',
+        
+        # LoxoneUtils.MiniserverCache.psm1
+        'ConvertFrom-MiniserverListEntry',
+        'Test-MiniserverCacheValid',
+        'Update-MiniserverListCache',
+        'Get-MiniserverListWithCache'
     )
 # Cmdlets to export from this module
 CmdletsToExport = @() # Explicitly export no cmdlets

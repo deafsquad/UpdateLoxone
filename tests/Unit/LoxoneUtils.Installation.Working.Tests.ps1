@@ -8,6 +8,9 @@ BeforeAll {
     $modulePath = Join-Path -Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) -ChildPath 'LoxoneUtils' | Join-Path -ChildPath 'LoxoneUtils.psd1'
     Import-Module $modulePath -Force -ErrorAction Stop
     
+    # Initialize mocks for all modules
+    Initialize-ModuleMocks
+    
     # Tests will use $TestDrive for file isolation (set by Pester)
     # No need to create temp directories manually
     
@@ -65,12 +68,8 @@ Describe "Invoke-ZipFileExtraction Function" -Tag 'Installation' {
     }
     
     It "Throws for non-existent zip file" {
-        # In test mode, the function doesn't validate zip existence
-        $result = Invoke-ZipFileExtraction -ZipPath "C:\nonexistent.zip" -DestinationPath $TestDrive
-        
-        # Should complete without error in test mode
-        # The TestDrive directory should exist
-        Test-Path $TestDrive | Should -Be $true
+        # The function should throw when zip file doesn't exist
+        { Invoke-ZipFileExtraction -ZipPath "C:\nonexistent.zip" -DestinationPath $TestDrive } | Should -Throw
     }
     
     It "Can extract from valid zip file" {

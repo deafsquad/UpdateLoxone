@@ -1,4 +1,4 @@
-# Tests for LoxoneUtils.System module
+﻿# Tests for LoxoneUtils.System module
 
 BeforeAll {
     # Skip these tests due to complex internal dependencies

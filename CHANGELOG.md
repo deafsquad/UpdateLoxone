@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.6.7] - 2025-08-09 00:34:35
+### Added
+- **Parallel Workflow Execution** - Major performance improvement for update process
+  - Added `-Parallel` switch to enable concurrent downloads and installations
+  - Config and App downloads/installs run simultaneously instead of sequentially
+  - Miniserver updates process concurrently with configurable concurrency limits
+  - ThreadJob-based architecture for efficient resource utilization
+  - Automatic fallback to sequential mode if issues detected
+- **Enhanced Progress Tracking for Parallel Mode**
+  - Component-specific progress bars (Config, App, Miniservers)
+  - Real-time download speeds and remaining time per component
+  - Elapsed time tracking with proper timer display (⏱️ mm:ss format)
+  - Weighted miniserver progress calculation (Init=0, Update=2, Reboot=3, Wait=4, Complete=5)
+  - Status symbols for miniserver stages (🔍🔄🚀⏳✓✗)
+- **Configuration File Support** - `UpdateLoxone.config.json`
+  - `UseParallelExecution` - Enable parallel mode by default
+  - `MaxConcurrency` - Control download/install concurrency
+  - `MaxMSConcurrency` - Control miniserver update concurrency
+  - Command-line switches override configuration settings
+- **Console Progress Display** - Alternative to toast notifications
+  - ASCII progress bars for non-toast environments
+  - Real-time updates with component status
+  - Individual miniserver status tracking
+  - Automatic fallback when toast notifications unavailable
+- **Thread-Safe State Management**
+  - New `LoxoneUtils.ThreadSafe` module with mutex-protected operations
+  - `Update-WorkflowState` for safe concurrent state updates
+  - `Get-WorkflowState` for consistent state reads across threads
+  - Named mutex for cross-process synchronization
+
+### Changed
+- **Progress Worker Architecture**
+  - Separated progress tracking into dedicated worker thread
+  - Prevents UI freezing during heavy operations
+  - Maintains toast data binding throughout workflow
+  - Graceful shutdown with proper cleanup
+- **Enhanced Logging**
+  - Comprehensive parallel mode detection logging
+  - Thread/job lifecycle tracking
+  - Performance metrics for concurrent operations
+  - Debug traces for troubleshooting parallel issues
+
+### Fixed
+- **Toast Notification Issues in Parallel Mode**
+  - Fixed progress bars resetting to 0% when Config completes
+  - Fixed App timer showing incorrect values after Config finishes
+  - Fixed "Waiting..." status during file validation (now shows "Checking existing files...")
+  - Fixed timer not starting until installation begins
+  - Fixed toast updates from main script interfering with progress worker
+- **Threading Issues**
+  - Fixed ThreadJob pool exhaustion with proper cleanup
+  - Fixed Ctrl+C handler to stop all worker threads
+  - Fixed environment variable scope issues in finally blocks
+  - Fixed race conditions between worker threads
+
 ## [0.6.6] - 2025-07-24 16:38:47
 ### Changed
 - **Improved test coverage calculation methodology** - Coverage now includes ALL functions without exclusions
@@ -102,7 +157,7 @@
   - Added display of commit bodies and multi-line messages for better context
   - Added comprehensive Git state display showing uncommitted changes and unpushed commits before proceeding
   - Added CHANGELOG preview showing Unreleased section that will be converted
-- Improved dry-run mode functionality  
+- Improved dry-run mode functionality
   - Added clear dry-run mode summary showing what actions will be performed vs skipped
   - Added support for skipping test execution in dry-run mode with proper state tracking
   - Added descriptive commit messages for dry-run releases indicating they are test runs
@@ -114,7 +169,7 @@
 - Reorganized CHANGELOG.md structure to have format declaration at the top instead of after version entries
 - Improved release script error handling with explicit exit code checks for all Git commands
   - Added error handling for `git branch --show-current` operations
-  - Added error handling for `git status --porcelain` operations  
+  - Added error handling for `git status --porcelain` operations
   - Added error handling for `git log` operations
 - Enhanced commit message formatting for both dry-run and production releases
   - Dry-run commits now include explanatory body text about their purpose

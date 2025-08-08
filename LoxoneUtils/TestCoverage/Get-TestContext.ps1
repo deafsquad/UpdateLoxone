@@ -1,4 +1,4 @@
-function Get-TestContext {
+﻿function Get-TestContext {
     <#
     .SYNOPSIS
         Extracts test context information from test content

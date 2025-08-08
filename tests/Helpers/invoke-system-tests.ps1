@@ -1,4 +1,4 @@
-# Helper script to run RunAsUser tests as SYSTEM and return results
+﻿# Helper script to run RunAsUser tests as SYSTEM and return results
 # This can be called from other test scripts to get SYSTEM test results
 
 param(

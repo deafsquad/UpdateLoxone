@@ -1,4 +1,4 @@
-# Module for Loxone Update Script Error Handling Functions
+﻿# Module for Loxone Update Script Error Handling Functions
 
 #region Error Handling
 function Invoke-ScriptErrorHandling {

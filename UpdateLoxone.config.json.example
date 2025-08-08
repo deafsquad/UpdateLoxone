@@ -1,0 +1,9 @@
+{
+    "UseParallelExecution": false,
+    "MaxConcurrency": 4,
+    "MaxMSConcurrency": 3,
+    "LogLevel": "INFO",
+    "ToastNotifications": true,
+    "AutoCleanupLogs": true,
+    "LogRetentionDays": 30
+}

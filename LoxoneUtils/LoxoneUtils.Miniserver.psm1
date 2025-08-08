@@ -1,4 +1,4 @@
-# Module for Loxone Update Script MS Interaction Functions
+﻿# Module for Loxone Update Script MS Interaction Functions
 
 #region Internal Helper Functions
 
@@ -10,46 +10,85 @@ function Invoke-MiniserverWebRequest {
         [hashtable]$Parameters
     )
     
-    # Check for test environment first
-    if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1") {
-        Write-Verbose "Test mode detected - returning mock web response"
+    # For HTTPS in PowerShell 5.1 with certificate bypass, use HttpWebRequest for reliability
+    if ($PSVersionTable.PSVersion.Major -lt 6 -and $Parameters.Uri -like "https://*" -and 
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback) {
         
-        # Check what type of request this is based on the URI
-        if ($Parameters.Uri -match '/dev/cfg/version|/dev/cfg/api|/dev/cfg/updatelevel') {
-            # Version/API request - return XML format expected by version check
-            return @{
-                StatusCode = 200
-                Content = '<LL control="test" value="14.0.0.0" Code="200"/>'
-                Headers = @{}
+        # Use HttpWebRequest for better SSL handling in PS 5.1
+        try {
+            $request = [System.Net.HttpWebRequest]::Create($Parameters.Uri)
+            $request.Method = if ($Parameters.Method) { $Parameters.Method } else { "GET" }
+            $request.Timeout = if ($Parameters.TimeoutSec) { $Parameters.TimeoutSec * 1000 } else { 100000 }
+            
+            # Add headers
+            if ($Parameters.Headers) {
+                foreach ($header in $Parameters.Headers.GetEnumerator()) {
+                    if ($header.Key -eq 'Authorization') {
+                        $request.Headers.Add($header.Key, $header.Value)
+                    } else {
+                        $request.Headers[$header.Key] = $header.Value
+                    }
+                }
             }
-        } elseif ($Parameters.Uri -match '/dev/sys/autoupdate') {
-            # Update trigger request
-            return @{
-                StatusCode = 200
-                Content = '<LL control="test" value="1" Code="200"/>'
-                Headers = @{}
+            
+            # Add credentials if provided
+            if ($Parameters.Credential) {
+                $request.Credentials = $Parameters.Credential
             }
-        } else {
-            # Other requests - return generic response
-            return @{
-                StatusCode = 200
-                Content = '{"status":"ok"}'
-                Headers = @{}
+            
+            # Get response
+            $response = $request.GetResponse()
+            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+            $content = $reader.ReadToEnd()
+            
+            # Create object similar to Invoke-WebRequest output
+            $result = [PSCustomObject]@{
+                StatusCode = [int]$response.StatusCode
+                StatusDescription = $response.StatusDescription
+                Content = $content
+                Headers = $response.Headers
+                RawContent = "HTTP/1.1 $([int]$response.StatusCode) $($response.StatusDescription)`r`n$($response.Headers.ToString())`r`n`r`n$content"
             }
+            
+            $reader.Close()
+            $response.Close()
+            
+            return $result
+        } catch {
+            throw
         }
-    }
-    
-    # This wrapper allows mocking in tests while maintaining the same functionality
-    # PowerShell 6+ requires explicit TLS for HTTPS
-    if ($PSVersionTable.PSVersion.Major -ge 6 -and $Parameters.Uri -like "https://*") {
-        # Add TLS 1.2 for PS Core if not already specified
-        if (-not $Parameters.ContainsKey('SslProtocol')) {
-            Invoke-WebRequest @Parameters -SslProtocol Tls12
+    } elseif ($PSVersionTable.PSVersion.Major -ge 6 -and $Parameters.Uri -like "https://*") {
+        # PowerShell 6+ requires explicit TLS for HTTPS
+        if ($Parameters.ContainsKey('SslProtocol')) {
+            $sslValue = $Parameters.SslProtocol
+            if ($sslValue -is [array]) {
+                # Already an array, just use it
+                Invoke-WebRequest @Parameters
+            } else {
+                # Convert bitmask to array
+                $protocols = @()
+                if ($sslValue -band [System.Net.SecurityProtocolType]::Tls) { $protocols += 'Tls' }
+                if ($sslValue -band [System.Net.SecurityProtocolType]::Tls11) { $protocols += 'Tls11' }
+                if ($sslValue -band [System.Net.SecurityProtocolType]::Tls12) { $protocols += 'Tls12' }
+                try {
+                    if ($sslValue -band [System.Net.SecurityProtocolType]::Tls13) { $protocols += 'Tls13' }
+                } catch {
+                    # TLS 1.3 not available
+                }
+                $Parameters.Remove('SslProtocol')
+                Invoke-WebRequest @Parameters -SslProtocol $protocols
+            }
         } else {
-            Invoke-WebRequest @Parameters
+            try {
+                # Try with all TLS versions including 1.3
+                Invoke-WebRequest @Parameters -SslProtocol @('Tls', 'Tls11', 'Tls12', 'Tls13')
+            } catch {
+                # Fallback without TLS 1.3 if not supported
+                Invoke-WebRequest @Parameters -SslProtocol @('Tls', 'Tls11', 'Tls12')
+            }
         }
     } else {
-        # PS 5.1 or HTTP requests
+        # PS 5.1 HTTP requests or PS 6+ without special handling
         Invoke-WebRequest @Parameters
     }
 }
@@ -68,7 +107,7 @@ function Get-MiniserverVersion {
         [switch]$SkipCertificateCheck,
 
         [Parameter()]
-        [int]$TimeoutSec = 1 # Default timeout
+        [int]$TimeoutSec = 3 # Default timeout increased for slow networks
     )
     $FunctionName = $MyInvocation.MyCommand.Name
     Enter-Function -FunctionName $FunctionName -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
@@ -77,6 +116,9 @@ function Get-MiniserverVersion {
     Write-Log -Level DEBUG -Message ("  MSEntry (original): '{0}'" -f ($MSEntry -replace "([Pp]assword=)[^;]+", '$1********'))
     Write-Log -Level DEBUG -Message ("  SkipCertificateCheck: {0}" -f $SkipCertificateCheck.IsPresent)
     Write-Log -Level DEBUG -Message ("  TimeoutSec: {0}" -f $TimeoutSec)
+    
+    # ConvertTo-SecureString is a built-in cmdlet, no need to import module
+    # In parallel execution, importing modules can cause conflicts
 
     $result = [PSCustomObject]@{
         MSIP       = "Unknown"
@@ -91,8 +133,21 @@ function Get-MiniserverVersion {
 
     try {
         $ProgressPreference = 'SilentlyContinue'
+        
+        # Ensure all TLS versions are supported for older Loxone devices
+        try {
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
+        } catch {
+            # TLS 1.3 might not be available, continue without it
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls12
+        }
 
+        # Extract only the URL part if entry contains cached data with commas
         $entryToParse = $MSEntry
+        if ($entryToParse -like '*,*') {
+            $entryToParse = $entryToParse.Split(',')[0].Trim()
+            Write-Log -Level DEBUG -Message ("$($FunctionName): Extracted URL from cached entry: '{0}'" -f ($entryToParse -replace "([Pp]assword=)[^;]+", '$1********'))
+        }
         if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
         if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
         
@@ -125,11 +180,35 @@ function Get-MiniserverVersion {
         # or if our manual parsing for the Auth Header fails.
         # Note: $uriBuilderForHostAndPath.Password IS URL-decoded.
         if (-not ([string]::IsNullOrWhiteSpace($uriBuilderForHostAndPath.UserName))) {
-            $securePasswordFromUriBuilder = $uriBuilderForHostAndPath.Password | ConvertTo-SecureString -AsPlainText -Force
-            $credential = New-Object System.Management.Automation.PSCredential($uriBuilderForHostAndPath.UserName, $securePasswordFromUriBuilder)
-            Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName (for general \$credential obj): '{0}'" -f $uriBuilderForHostAndPath.UserName)
-            Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.Password (for general \$credential obj, URL-decoded, length): {0}" -f $uriBuilderForHostAndPath.Password.Length)
-            Write-Log -Level DEBUG -Message ("$($FunctionName): General \$credential object created for user: '{0}'" -f $credential.UserName)
+            try {
+                # Ensure ConvertTo-SecureString is available - handle type data conflicts
+                if (-not (Get-Command ConvertTo-SecureString -ErrorAction SilentlyContinue)) {
+                    Write-Log -Level WARN -Message ("$($FunctionName): ConvertTo-SecureString not available, attempting to import Microsoft.PowerShell.Security module...")
+                    try {
+                        # First try to remove any conflicting type data
+                        $typeData = Get-TypeData -TypeName "System.Security.AccessControl.ObjectSecurity" -ErrorAction SilentlyContinue
+                        if ($typeData) {
+                            Remove-TypeData -TypeData $typeData -ErrorAction SilentlyContinue
+                        }
+                        Import-Module Microsoft.PowerShell.Security -Force -DisableNameChecking -ErrorAction Stop
+                    } catch {
+                        Write-Log -Level ERROR -Message ("$($FunctionName): Failed to import security module: $_")
+                        # Fall back to creating credential without ConvertTo-SecureString
+                        $credential = $null
+                        throw "Security module load failed: $_"
+                    }
+                }
+                
+                $securePasswordFromUriBuilder = $uriBuilderForHostAndPath.Password | ConvertTo-SecureString -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($uriBuilderForHostAndPath.UserName, $securePasswordFromUriBuilder)
+                Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName (for general \$credential obj): '{0}'" -f $uriBuilderForHostAndPath.UserName)
+                Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.Password (for general \$credential obj, URL-decoded, length): {0}" -f $uriBuilderForHostAndPath.Password.Length)
+                Write-Log -Level DEBUG -Message ("$($FunctionName): General \$credential object created for user: '{0}'" -f $credential.UserName)
+            } catch {
+                Write-Log -Level ERROR -Message ("$($FunctionName): Failed to create credential object: $_")
+                $result.Error = "Failed to create credential: $_"
+                return $result
+            }
         } else {
             Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName is NULL/Whitespace. No general \$credential object created from UriBuilder properties.")
         }
@@ -155,6 +234,35 @@ function Get-MiniserverVersion {
         Write-Log -Message ("$($FunctionName): Checking MS version for '{0}' (parsed host)." -f $msIP) -Level DEBUG
         Write-Log -Level DEBUG -Message ("$($FunctionName): Base URI for version check (scheme may change): {0}" -f $versionUri)
         
+        # Check if we can resolve the host first (for better diagnostics)
+        if ($msIP -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+            # It's an IP address, try reverse lookup
+            try {
+                $reverseLookup = [System.Net.Dns]::GetHostEntry($msIP)
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Reverse DNS lookup for ${msIP}: $($reverseLookup.HostName)")
+            } catch {
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Reverse DNS lookup failed for ${msIP}: $_")
+            }
+            
+            # Quick connectivity check
+            try {
+                $tcpClient = New-Object System.Net.Sockets.TcpClient
+                $port = if ($originalScheme -eq 'https') { 443 } else { 80 }
+                $asyncResult = $tcpClient.BeginConnect($msIP, $port, $null, $null)
+                $wait = $asyncResult.AsyncWaitHandle.WaitOne(1000, $false) # 1 second quick check
+                
+                if ($wait -and $tcpClient.Connected) {
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): Quick connectivity check passed - port $port is reachable on ${msIP}")
+                    $tcpClient.Close()
+                } else {
+                    Write-Log -Level WARN -Message ("$($FunctionName): Quick connectivity check failed - port $port is NOT reachable on ${msIP} (possible VPN/network issue)")
+                    if (-not $wait) { $tcpClient.Close() }
+                }
+            } catch {
+                Write-Log -Level WARN -Message ("$($FunctionName): Connectivity check error for ${msIP} : $_")
+            }
+        }
+        
         if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
             Write-Log -Level DEBUG -Message ("$($FunctionName): Credentials intended FOR BASIC AUTH HEADER - User: '{0}', Password (literal from input) Length: {1}" -f $usernameForAuthHeader, $passwordForAuthHeader.Length)
         } elseif ($credential) {
@@ -172,6 +280,15 @@ function Get-MiniserverVersion {
         $responseObject = $null
         $iwrParams = @{ Uri = $versionUri; TimeoutSec = $TimeoutSec; ErrorAction = 'Stop'; Method = 'Get' }
         if ($credential) { $iwrParams.Credential = $credential }
+        
+        # Force TLS 1.2 for compatibility with older Miniservers
+        if ($originalScheme -eq 'https') {
+            $iwrParams.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls
+        }
+        # Add SkipCertificateCheck for PowerShell 6+
+        if ($PSVersionTable.PSVersion.Major -ge 6 -and $SkipCertificateCheck.IsPresent) {
+            $iwrParams.SkipCertificateCheck = $true
+        }
 
         try { # Main try for Invoke-WebRequest logic
             # Determine the scheme from the original $entryToParse via $uriBuilderForHostAndPath
@@ -222,24 +339,97 @@ function Get-MiniserverVersion {
                 Write-Log -Level DEBUG -Message ("$($FunctionName): HTTP Direct: Invoke-MiniserverWebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
 
             } elseif ($originalScheme -eq 'https') {
-                # Original entry is HTTPS, try HTTPS first (using $credential object if present)
-                Write-Log -Level DEBUG -Message ("$($FunctionName): Original scheme is HTTPS. Attempting HTTPS connection first.")
-                $iwrParams.Uri = $versionUri # $versionUri is already https://.../dev/cfg/version
-                # $iwrParams.Credential would have been set earlier if $credential was created.
-                # For HTTPS, using $credential object is standard.
-                Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Attempt: iwrParams before invoke: $($iwrParams | Out-String)")
+                # Original entry is HTTPS, use HttpWebRequest for better certificate handling
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Original scheme is HTTPS. Using HttpWebRequest method for certificate bypass.")
+                
                 try {
-                    # Use wrapper function which handles PS version differences
-                    $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParams
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS Attempt: Invoke-MiniserverWebRequest successful. StatusCode: {0}" -f $responseObject.StatusCode)
-                } catch { # Catch for primary HTTPS attempt
+                    # Create HttpWebRequest for HTTPS with certificate bypass
+                    $request = [System.Net.HttpWebRequest]::Create($versionUri)
+                    $request.Method = "GET"
+                    $request.Timeout = $TimeoutSec * 1000
+                    $request.ServerCertificateValidationCallback = { $true }
+                    
+                    # Add authentication header if credentials are available
+                    if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
+                        $authInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${usernameForAuthHeader}:${passwordForAuthHeader}"))
+                        $request.Headers.Add("Authorization", "Basic $authInfo")
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): Added Basic Auth header for HTTPS request")
+                    } elseif ($credential) {
+                        $authInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($credential.UserName):$($credential.GetNetworkCredential().Password)"))
+                        $request.Headers.Add("Authorization", "Basic $authInfo")
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): Added Basic Auth header from credential object")
+                    }
+                    
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): Sending HTTPS request to $versionUri with certificate bypass...")
+                    
+                    # Get the response
+                    $httpResponse = $request.GetResponse()
+                    $reader = New-Object System.IO.StreamReader($httpResponse.GetResponseStream())
+                    $content = $reader.ReadToEnd()
+                    
+                    # Clean up
+                    $reader.Close()
+                    $httpResponse.Close()
+                    
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): HTTPS request successful using HttpWebRequest")
+                    
+                    # Create response object similar to Invoke-WebRequest
+                    $responseObject = [PSCustomObject]@{
+                        StatusCode = [int]$httpResponse.StatusCode
+                        StatusDescription = $httpResponse.StatusDescription
+                        Content = $content
+                        Headers = $httpResponse.Headers
+                    }
+                    
+                } catch { # Catch for HTTPS HttpWebRequest attempt
                     $CaughtPrimaryHttpsError = $_
-                    Write-Log -Level WARN -Message ("$($FunctionName): Primary HTTPS connection to '{0}' failed ('{1}')." -f $iwrParams.Uri, $CaughtPrimaryHttpsError.Exception.Message.Split([Environment]::NewLine)[0])
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): Full Exception for primary HTTPS failure: $($CaughtPrimaryHttpsError.Exception.ToString())")
-                    # No automatic HTTP fallback here if original was HTTPS, let it error out or be handled by outer catch.
-                    # If a specific fallback to HTTP for an originally HTTPS entry is desired, it would be added here.
-                    # For now, if HTTPS fails, the error from this catch will propagate.
-                    throw $CaughtPrimaryHttpsError
+                    Write-Log -Level WARN -Message ("$($FunctionName): HTTPS connection to '{0}' failed ('{1}')." -f $versionUri, $CaughtPrimaryHttpsError.Exception.Message.Split([Environment]::NewLine)[0])
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): Full Exception for HTTPS failure: $($CaughtPrimaryHttpsError.Exception.ToString())")
+                    
+                    # Try fallback to HTTP if HTTPS fails (common with self-signed certificates)
+                    Write-Log -Level INFO -Message ("$($FunctionName): HTTPS failed, attempting fallback to HTTP...")
+                    
+                    try {
+                        # Build HTTP version of the URI
+                        $httpUriBuilder = [System.UriBuilder]$versionUri
+                        $httpUriBuilder.Scheme = "http"
+                        $httpUriBuilder.Port = 80
+                        $httpVersionUri = $httpUriBuilder.Uri.AbsoluteUri
+                        
+                        Write-Log -Level INFO -Message ("$($FunctionName): Trying HTTP fallback to $httpVersionUri")
+                        
+                        # Create HTTP request parameters
+                        $httpParams = @{ 
+                            Uri = $httpVersionUri
+                            Method = 'Get'
+                            TimeoutSec = $TimeoutSec
+                            ErrorAction = 'Stop'
+                            UseBasicParsing = $true
+                        }
+                        
+                        # Add authentication if available
+                        if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
+                            $authInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${usernameForAuthHeader}:${passwordForAuthHeader}"))
+                            $httpParams.Headers = @{ Authorization = "Basic $authInfo" }
+                        } elseif ($credential) {
+                            if ($PSVersionTable.PSVersion.Major -ge 6) {
+                                $httpParams.Credential = $credential
+                                $httpParams.AllowUnencryptedAuthentication = $true
+                            } else {
+                                $authInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($credential.UserName):$($credential.GetNetworkCredential().Password)"))
+                                $httpParams.Headers = @{ Authorization = "Basic $authInfo" }
+                            }
+                        }
+                        
+                        $responseObject = Invoke-MiniserverWebRequest -Parameters $httpParams
+                        Write-Log -Level INFO -Message ("$($FunctionName): HTTP fallback successful")
+                        
+                    } catch {
+                        $httpFallbackError = $_
+                        Write-Log -Level WARN -Message ("$($FunctionName): HTTP fallback also failed: $($httpFallbackError.Exception.Message)")
+                        # Throw original HTTPS error as it's more relevant
+                        throw $CaughtPrimaryHttpsError
+                    }
                 }
             } else {
                 throw ("$($FunctionName): Unknown original scheme '$originalScheme' from MSEntry '$($entryToParse -replace "([Pp]assword=)[^;]+", '$1********')'")
@@ -266,6 +456,11 @@ function Get-MiniserverVersion {
             Write-Log -Level DEBUG -Message ("$($FunctionName): Full Invoke-WebRequest error details for MS '{0}': {1}" -f $msIP, $CaughtIwrError.Exception.ToString())
             if ($CaughtIwrError.Exception -is [System.Net.WebException] -and $null -ne $CaughtIwrError.Exception.Response) {
                  Write-Log -Level DEBUG -Message ("$($FunctionName): WebException Details - Status: {0}, Description: {1}" -f $CaughtIwrError.Exception.Response.StatusCode, $CaughtIwrError.Exception.Response.StatusDescription)
+            }
+            
+            # Add helpful diagnostics for timeout errors
+            if ($result.Error -match 'Zeitlimit|Timeout|timed out') {
+                Write-Log -Level INFO -Message ("$($FunctionName): Connection timeout for $msIP - this often indicates VPN is down or network connectivity issues")
             }
         }
     } catch {
@@ -317,7 +512,12 @@ $oldProgressPreference = $ProgressPreference
 try {
     $ProgressPreference = 'SilentlyContinue'
 
+    # Extract only the URL part if entry contains cached data with commas
     $entryToParse = $MSEntry
+    if ($entryToParse -like '*,*') {
+        $entryToParse = $entryToParse.Split(',')[0].Trim()
+        Write-Log -Level DEBUG -Message ("$($FunctionName): Extracted URL from cached entry: '{0}'" -f ($entryToParse -replace "([Pp]assword=)[^;]+", '$1********'))
+    }
     if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
     
     $uriBuilderForHostAndPath = [System.UriBuilder]$entryToParse
@@ -421,7 +621,15 @@ try {
         }
         
         if ($scheme -eq 'https') {
-             if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParams.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 }
+             if ($PSVersionTable.PSVersion.Major -ge 6) { 
+                 # For PS Core, pass protocols as array
+                 try {
+                     $iwrParams.SslProtocol = @('Tls', 'Tls11', 'Tls12', 'Tls13')
+                 } catch {
+                     # TLS 1.3 not available, continue with 1.0/1.1/1.2
+                     $iwrParams.SslProtocol = @('Tls', 'Tls11', 'Tls12')
+                 }
+             }
         }
 
         try {
@@ -522,7 +730,14 @@ $allMSResults = @()
 try { # Main function try
     $global:LogFile = $LogFile
     Write-Log -Message "Starting MS update process. Desired version: $DesiredVersion" -Level "INFO"
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+    # Support all TLS versions for older Loxone devices
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls12
+    try {
+        # Add TLS 1.3 if available
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls13
+    } catch {
+        # TLS 1.3 not available, continue with 1.0/1.1/1.2
+    }
 
     if (-not (Test-Path $MSListPath)) {
         Write-Log -Message ("MS list file not found at '{0}'. Skipping MS updates." -f $MSListPath) -Level "WARN"
@@ -556,7 +771,12 @@ try { # Main function try
             ErrorDuringProcessing = $false
         }
         try { # Per-MS processing
+            # Extract only the URL part if entry contains cached data with commas
             $entryToParse = $msEntry
+            if ($entryToParse -like '*,*') {
+                $entryToParse = $entryToParse.Split(',')[0].Trim()
+                Write-Log -Level DEBUG -Message ("Update-MS: Extracted URL from cached entry: '{0}'" -f ($entryToParse -replace "([Pp]assword=)[^;]+", '$1********'))
+            }
             if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
             $uriBuilder = [System.UriBuilder]$entryToParse
             $msIP = $uriBuilder.Host
@@ -602,7 +822,7 @@ try { # Main function try
                 }
     
                 try { # For IWR calls
-                    $iwrParamsInitialCheck = @{ TimeoutSec = 1; ErrorAction = 'Stop'; Method = 'Get' }
+                    $iwrParamsInitialCheck = @{ TimeoutSec = 3; ErrorAction = 'Stop'; Method = 'Get' }
                     # $credential (with URL-decoded password) is NOT set here by default anymore.
                     # We will explicitly build headers if $usernameForAuthHeaderUpdateMS is available.
 
@@ -630,7 +850,15 @@ try { # Main function try
                             $iwrParamsInitialCheck.Remove('Headers')
                             Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Attempt): No credentials available.")
                         }
-                        if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 }
+                        if ($PSVersionTable.PSVersion.Major -ge 6) { 
+                            # For PS Core, pass protocols as array
+                            try {
+                                $iwrParamsInitialCheck.SslProtocol = @('Tls', 'Tls11', 'Tls12', 'Tls13')
+                            } catch {
+                                # TLS 1.3 not available, continue with 1.0/1.1/1.2
+                                $iwrParamsInitialCheck.SslProtocol = @('Tls', 'Tls11', 'Tls12')
+                            }
+                        }
                         Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Attempt): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
                         try {
                             $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParamsInitialCheck
@@ -687,7 +915,15 @@ try { # Main function try
                             $iwrParamsInitialCheck.Remove('Headers')
                             Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Direct): No credentials available.")
                         }
-                        if ($PSVersionTable.PSVersion.Major -ge 6) { $iwrParamsInitialCheck.SslProtocol = [System.Net.SecurityProtocolType]::Tls12 }
+                        if ($PSVersionTable.PSVersion.Major -ge 6) { 
+                            # For PS Core, pass protocols as array
+                            try {
+                                $iwrParamsInitialCheck.SslProtocol = @('Tls', 'Tls11', 'Tls12', 'Tls13')
+                            } catch {
+                                # TLS 1.3 not available, continue with 1.0/1.1/1.2
+                                $iwrParamsInitialCheck.SslProtocol = @('Tls', 'Tls11', 'Tls12')
+                            }
+                        }
                         Write-Log -Level DEBUG -Message ("Update-MS InitialCheck (HTTPS Direct): iwrParams before invoke: $($iwrParamsInitialCheck | Out-String)")
                         $responseObject = Invoke-MiniserverWebRequest -Parameters $iwrParamsInitialCheck
                         $initialVersionCheckSuccess = $true
@@ -798,7 +1034,8 @@ param(
     [Parameter()][bool]$AnyUpdatePerformed = $false,
     [Parameter()][switch]$SkipCertificateCheck,
     [Parameter(Mandatory = $false)][int]$MSCounter = 1,
-    [Parameter(Mandatory = $false)][int]$TotalMS = 1
+    [Parameter(Mandatory = $false)][int]$TotalMS = 1,
+    [Parameter()][scriptblock]$ProgressReporter = $null
 )
 Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
 Write-Log -Level DEBUG -Message ("Invoke-MSUpdate: UsernameForAuthHeader is null/empty: $([string]::IsNullOrEmpty($UsernameForAuthHeader)), PasswordForAuthHeader is null/empty: $(($null -eq $PasswordForAuthHeader -or $PasswordForAuthHeader.Length -eq 0))")
@@ -818,6 +1055,14 @@ try { # Main try for ProgressPreference and SSL Callback restoration
 
     $invokeResult.StatusMessage = "TriggeringUpdate"
     Write-Log -Message ("Attempting to trigger update for MS '{0}'..." -f $hostForPingInInvoke) -Level INFO
+    
+    # Report progress if reporter is available
+    if ($ProgressReporter) {
+        & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
+                           -Status "Triggering update" `
+                           -PercentComplete 10 `
+                           -CurrentOperation "Sending update command to miniserver"
+    }
 
     if ($SkipCertificateCheck.IsPresent) {
         $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
@@ -825,7 +1070,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     }
 
     try { # For IWR - Trigger
-            $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = 1; ErrorAction = 'Stop' }
+            $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = 5; ErrorAction = 'Stop' }
             
             if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null -and $PasswordForAuthHeader.Length -gt 0)) {
                 Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Trigger): Using manually parsed credentials for Authorization header."
@@ -871,6 +1116,14 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             Invoke-MiniserverWebRequest -Parameters $triggerParams | Out-Null
             Write-Log -Message ("Update trigger sent to '{0}'." -f $hostForPingInInvoke) -Level INFO
             $invokeResult.StatusMessage = "UpdateTriggered_WaitingForReboot"
+            
+            # Report progress
+            if ($ProgressReporter) {
+                & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
+                                   -Status "Update triggered, waiting for reboot" `
+                                   -PercentComplete 20 `
+                                   -CurrentOperation "Miniserver is downloading and installing update"
+            }
         } catch {
         $invokeResult.ErrorOccurredInInvoke = $true; $invokeResult.StatusMessage = ("Error_TriggeringUpdate: {0}" -f $CaughtError.Exception.Message.Split([Environment]::NewLine)[0])
         Write-Log -Message ("Error triggering update for '{0}': {1}" -f $hostForPingInInvoke, $CaughtError.Exception.Message) -Level ERROR
@@ -882,7 +1135,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         Update-PersistentToast -StepNumber $StepNumber -TotalSteps $TotalSteps -StepName $toastStepNameWait -IsInteractive $IsInteractive -ErrorOccurred $ErrorOccurred -AnyUpdatePerformed $AnyUpdatePerformed
         
         $startTime = Get-Date; $timeout = New-TimeSpan -Minutes 15; $msResponsive = $false; $loggedUpdatingStatus = $false
-        $verifyParams = @{ Uri = $verificationUriForPolling; UseBasicParsing = $true; TimeoutSec = 1; ErrorAction = 'Stop' }
+        $verifyParams = @{ Uri = $verificationUriForPolling; UseBasicParsing = $true; TimeoutSec = 3; ErrorAction = 'Stop' }
 
         if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null -and $PasswordForAuthHeader.Length -gt 0)) {
             Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Polling): Using manually parsed credentials for Authorization header."
@@ -925,15 +1178,38 @@ try { # Main try for ProgressPreference and SSL Callback restoration
 
         $Attempts = 0; $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
         $LastPollStatusMessage = "Initiating..."
+        Write-Log -Message ("Starting polling loop for MS {0}, MaxAttempts: {1}, Timeout: {2} minutes" -f $hostForPingInInvoke, $MaxAttempts, $timeout.TotalMinutes) -Level INFO
+        
+        # Report progress
+        if ($ProgressReporter) {
+            & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
+                               -Status "Waiting for miniserver to reboot" `
+                               -PercentComplete 30 `
+                               -CurrentOperation "Polling for miniserver availability"
+        }
         while (((Get-Date) - $startTime) -lt $timeout) {
-            $Attempts++; Write-Host -NoNewline ("`rPolling MS $hostForPingInInvoke (Attempt $Attempts/$MaxAttempts): $LastPollStatusMessage".PadRight(120)); Start-Sleep -Seconds 10
+            $Attempts++
+            # In ThreadJob context, Write-Host doesn't work properly, use logging instead
+            Write-Log -Message ("Polling MS {0} (Attempt {1}/{2}): {3}" -f $hostForPingInInvoke, $Attempts, $MaxAttempts, $LastPollStatusMessage) -Level INFO
+            Start-Sleep -Seconds 10
             try {
+                Write-Log -Message ("Calling Invoke-MiniserverWebRequest for poll attempt {0}" -f $Attempts) -Level INFO
                 $lastResponse = Invoke-MiniserverWebRequest -Parameters $verifyParams
+                Write-Log -Message ("Poll response received, parsing XML..." -f $Attempts) -Level INFO
                 $msResponsive = $true; $xmlCurrent = [xml]$lastResponse.Content; $versionCurrentPoll = $xmlCurrent.LL.value
                 if ([string]::IsNullOrEmpty($versionCurrentPoll)) { throw "LL.value empty in poll response." }
                 $normalizedVersionCurrentPoll = Convert-VersionString $versionCurrentPoll; $invokeResult.ReportedVersion = $normalizedVersionCurrentPoll
                 if ($normalizedVersionCurrentPoll -eq $NormalizedDesiredVersion) {
-                    $invokeResult.VerificationSuccess = $true; $invokeResult.StatusMessage = "UpdateSuccessful_VersionVerified"; $LastPollStatusMessage = ("OK - Version {0}" -f $NormalizedDesiredVersion); break
+                    $invokeResult.VerificationSuccess = $true; $invokeResult.StatusMessage = "UpdateSuccessful_VersionVerified"; $LastPollStatusMessage = ("OK - Version {0}" -f $NormalizedDesiredVersion)
+                    
+                    # Report success
+                    if ($ProgressReporter) {
+                        & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
+                                           -Status "Update completed successfully" `
+                                           -PercentComplete 100 `
+                                           -CurrentOperation "Version verified: $NormalizedDesiredVersion"
+                    }
+                    break
                 } else { $invokeResult.StatusMessage = ("Polling_VersionMismatch_Current_{0}" -f $normalizedVersionCurrentPoll); $LastPollStatusMessage = ("OK - Version {0} (Expected {1})" -f $normalizedVersionCurrentPoll, $NormalizedDesiredVersion) }
             } catch [System.Net.WebException] {
                 $CaughtWebError = $_
@@ -942,6 +1218,15 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     $invokeResult.StatusMessage = "Polling_MS_Updating_503"; $errorDetail = 'Updating...'
                     if ($CaughtWebError.Exception.Response) { try { $responseStream = $CaughtWebError.Exception.Response.GetResponseStream(); $streamReader = New-Object System.IO.StreamReader($responseStream); $errorDetail = ($streamReader.ReadToEnd() -match '<errordetail>(.*?)</errordetail>') | Out-Null; if($matches[1]){$errorDetail = $matches[1].Trim()}; $streamReader.Close(); $responseStream.Close() } catch {} }
                     $LastPollStatusMessage = ("Updating ({0})" -f $errorDetail); if (-not $loggedUpdatingStatus) { Write-Log -Level INFO -Message ("MS {0} status: {1}" -f $hostForPingInInvoke, $errorDetail); $loggedUpdatingStatus = $true }
+                    
+                    # Report update progress
+                    if ($ProgressReporter) {
+                        $percentComplete = 40 + [Math]::Min(50, [Math]::Round(($Attempts / $MaxAttempts) * 50, 0))
+                        & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
+                                           -Status "Miniserver is updating" `
+                                           -PercentComplete $percentComplete `
+                                           -CurrentOperation $errorDetail
+                    }
                 } else { $invokeResult.StatusMessage = ("Polling_WebException_StatusCode_{0}" -f $statusCode); $LastPollStatusMessage = ("Error ({0})" -f $statusCode) }
                 Write-Log -Message ("MS {0} WebException during poll ({1}): {2}" -f $hostForPingInInvoke, $LastPollStatusMessage, $CaughtWebError.Exception.Message.Split([Environment]::NewLine)[0]) -Level WARN
         } catch {
@@ -949,7 +1234,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             $invokeResult.StatusMessage = ("Polling_Unreachable_Or_ParseError: {0}" -f $CaughtCatchError.Exception.Message.Split([Environment]::NewLine)[0]); $LastPollStatusMessage = "Unreachable/ParseError"; Write-Log -Message ("MS {0} unreachable/parse error: {1}" -f $hostForPingInInvoke, $CaughtCatchError.Exception.Message) -Level WARN
         }
     } # End while
-    Write-Host ""
+    Write-Log -Message ("Polling loop ended for MS {0}. Success: {1}, Final status: {2}" -f $hostForPingInInvoke, $invokeResult.VerificationSuccess, $LastPollStatusMessage) -Level INFO
     if (-not $invokeResult.VerificationSuccess) {
         if ($msResponsive) { $invokeResult.StatusMessage = ("VerificationFailed_Timeout_VersionMismatch_FinalReported_{0}" -f $invokeResult.ReportedVersion) }
         else { $invokeResult.StatusMessage = "VerificationFailed_Timeout_NoResponse" }

@@ -1,4 +1,4 @@
-# Fixed tests for LoxoneUtils.Logging with proper isolation and cleanup
+﻿# Fixed tests for LoxoneUtils.Logging with proper isolation and cleanup
 
 BeforeAll {
     # Import the module

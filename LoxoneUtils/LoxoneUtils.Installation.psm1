@@ -1,13 +1,8 @@
 ﻿# Module for Loxone Update Script Installation Functions
 
-# Test mode detection - must be at the very top
-$script:IsTestMode = ($env:PESTER_TEST_RUN -eq "1") -or 
-                     ($Global:IsTestRun -eq $true) -or 
-                     ($env:LOXONE_TEST_MODE -eq "1")
-
-if ($script:IsTestMode) {
-    Write-Verbose "Test mode detected - Installation operations will be mocked"
-}
+# Global cache for expensive path lookups (performance optimization)
+$script:LoxonePathCache = @{}
+$script:LoxoneAppIdCache = $null
 
 #region Installation Helpers
 function Get-InstalledVersion {
@@ -16,12 +11,6 @@ function Get-InstalledVersion {
         [string]$ExePath
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-    # Check test mode
-    if ($script:IsTestMode) {
-        Write-Log -Message "[MOCK] Returning mock version for: $ExePath" -Level INFO
-        Exit-Function
-        return "14.0.0.0"
-    }
     if (-not $ExePath.EndsWith(".exe")) {
         $ExePath = Join-Path -Path $ExePath -ChildPath "LoxoneConfig.exe"
     }
@@ -55,30 +44,34 @@ function Start-LoxoneUpdateInstaller {
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     Write-Log -Message "Starting update installer: ${InstallerPath} with install mode ${InstallMode}." -Level INFO
     try {
-        # Check test mode
-        if ($script:IsTestMode) {
-            Write-Log -Message "[MOCK] Would start update installer: $InstallerPath with mode $InstallMode" -Level INFO
-            return @{
-                ExitCode = 0
-                Success = $true
-                Mock = $true
-            }
-        }
         Write-Log -Message "Executing Start-Process: '$InstallerPath' /${InstallMode} -Wait" -Level DEBUG
         $process = Start-Process -FilePath $InstallerPath -ArgumentList "/${InstallMode}" -Wait -PassThru -ErrorAction Stop
         Write-Log -Message "Start-Process completed. PID: $($process.Id), ExitCode: $($process.ExitCode)" -Level DEBUG
-        if ($process.ExitCode -ne 0) {
-            Write-Log -Message "Installer process exited with non-zero code: $($process.ExitCode)." -Level WARN
-            # Optionally throw an error here if a non-zero exit code should be treated as failure
-            # throw "Installer failed with exit code $($process.ExitCode)."
+        $exitCode = $process.ExitCode
+        if ($exitCode -ne 0) {
+            Write-Log -Message "Installer process exited with non-zero code: $exitCode." -Level WARN
         }
-        Write-Log -Message "Update installer process finished waiting." -Level INFO # Changed message slightly
+        Write-Log -Message "Update installer process finished waiting." -Level INFO
+        
+        # Return result object before Exit-Function
+        $result = @{
+            Success = ($exitCode -eq 0)
+            ExitCode = $exitCode
+            Error = if ($exitCode -ne 0) { "Installer exited with code $exitCode" } else { $null }
+        }
+        
+        Exit-Function
+        return $result
     }
     catch {
-        Write-Log -Message "Error executing update installer: ${($_.Exception.Message)}" -Level ERROR
-        throw $_
-    } finally {
+        Write-Log -Message "Error executing update installer: $($_.Exception.Message)" -Level ERROR
+        $errorResult = @{
+            Success = $false
+            ExitCode = -1
+            Error = $_.Exception.Message
+        }
         Exit-Function
+        return $errorResult
     }
 }
 
@@ -94,22 +87,67 @@ function Start-LoxoneForWindowsInstaller {
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     Write-Log -Message "Starting Loxone for Windows installer: ${InstallerPath} with install mode ${InstallMode}." -Level INFO
     try {
-        # Check test mode
-        if ($script:IsTestMode) {
-            Write-Log -Message "[MOCK] Would start Windows installer: $InstallerPath with mode $InstallMode" -Level INFO
-            return @{
-                ExitCode = 0
-                Success = $true
-                Mock = $true
-            }
-        }
         # Assuming the same silent switches work. This might need adjustment based on the actual installer.
         # Use /S based on the provided XML example's likely installer type (InnoSetup often uses /VERYSILENT or /SILENT, but /S is common too)
         # We'll use the $InstallMode parameter passed in, assuming it's correctly set ('silent' or 'verysilent')
-        $arguments = "/${InstallMode}"
+        $arguments = if ($InstallMode) { "/${InstallMode}" } else { "/SILENT" }
         Write-Log -Message "Executing: '$InstallerPath' $arguments" -Level DEBUG
-        Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -ErrorAction Stop
-        Write-Log -Message "Loxone for Windows installer executed successfully." -Level INFO
+        
+        # Start the process without -Wait initially to avoid blocking
+        $process = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -PassThru -ErrorAction Stop
+        Write-Log -Message "Installer process started with PID: $($process.Id)" -Level DEBUG
+        
+        # Wait with timeout (5 minutes max for app installer)
+        $timeout = 300  # seconds
+        $waited = 0
+        while (-not $process.HasExited -and $waited -lt $timeout) {
+            Start-Sleep -Seconds 1
+            $waited++
+            if ($waited % 30 -eq 0) {
+                Write-Log -Message "Still waiting for installer (PID: $($process.Id))... ($waited seconds elapsed)" -Level DEBUG
+            }
+        }
+        
+        if (-not $process.HasExited) {
+            Write-Log -Message "WARNING: Installer (PID: $($process.Id)) did not complete within $timeout seconds" -Level WARNING
+            Write-Log -Message "Checking if installation succeeded anyway..." -Level INFO
+            
+            # Check if the app was installed successfully despite timeout
+            $appInstalled = $false
+            try {
+                # Try to find the installed app
+                $appPath = Get-InstalledApplicationPath -DisplayName "Loxone" -ErrorAction SilentlyContinue
+                if ($appPath) {
+                    Write-Log -Message "App appears to be installed at: $appPath (despite timeout)" -Level INFO
+                    $appInstalled = $true
+                }
+            } catch {
+                Write-Log -Message "Could not verify app installation: $_" -Level DEBUG
+            }
+            
+            if ($appInstalled) {
+                return @{
+                    ExitCode = 0
+                    Success = $true
+                    TimedOut = $true
+                }
+            } else {
+                return @{
+                    ExitCode = -1
+                    Success = $false
+                    TimedOut = $true
+                }
+            }
+        } else {
+            $exitCode = $process.ExitCode
+            Write-Log -Message "Loxone for Windows installer completed. Exit code: $exitCode (after $waited seconds)" -Level INFO
+            
+            return @{
+                ExitCode = $exitCode
+                Success = ($exitCode -eq 0)
+                TimedOut = $false
+            }
+        }
     }
     catch {
         Write-Log -Message "Error executing Loxone for Windows installer: ${($_.Exception.Message)}" -Level ERROR
@@ -131,12 +169,15 @@ function Get-InstalledApplicationPath {
         [string]$AppName = "Loxone Config"
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
-    # Check test mode
-    if ($script:IsTestMode) {
-        Write-Log -Message "[MOCK] Returning mock path for: $AppName" -Level INFO
+    
+    # Check cache first (performance optimization)
+    if ($script:LoxonePathCache.ContainsKey($AppName)) {
+        Write-Log -Message "[CACHE HIT] Returning cached path for '$AppName': $($script:LoxonePathCache[$AppName])" -Level DEBUG
         Exit-Function
-        return "C:\Program Files (x86)\Loxone\LoxoneConfig"
+        return $script:LoxonePathCache[$AppName]
     }
+    
+    Write-Log -Message "[CACHE MISS] Performing registry lookup for '$AppName'..." -Level DEBUG
     try {
         $registryPaths = @(
             "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -150,48 +191,105 @@ function Get-InstalledApplicationPath {
     foreach ($path in $registryPaths) {
         if (Test-Path $path) {
             Write-Log -Message "Checking registry path: $path" -Level DEBUG
-            $keys = Get-ChildItem -Path $path -ErrorAction SilentlyContinue
-            if (-not $keys) {
-                Write-Log -Message "No subkeys found under '$path'." -Level DEBUG
-                continue # Skip to next registry path
-            }
-            Write-Log -Message "Found $($keys.Count) subkeys under '$path'." -Level DEBUG
-            foreach ($key in $keys) {
-                $keyName = $key.PSChildName # Get the actual key name for logging
-                $displayName = $null
-                $installLocation = $null
-                try {
-                    $displayName = $key.GetValue("DisplayName") -as [string]
-                    $installLocation = $key.GetValue("InstallLocation") -as [string]
-                } catch {
-                    Write-Log -Message "Error reading values from key '$keyName' under '$path': $($_.Exception.Message)" -Level DEBUG
-                    continue # Skip this key
+            
+            # Performance optimization: Use direct registry access instead of Get-ChildItem
+            try {
+                # Extract the registry hive and path
+                if ($path -like "HKLM:*") {
+                    $registryPath = $path.Replace("HKLM:\", "")
+                    $hive = [Microsoft.Win32.Registry]::LocalMachine
+                } elseif ($path -like "HKCU:*") {
+                    $registryPath = $path.Replace("HKCU:\", "")
+                    $hive = [Microsoft.Win32.Registry]::CurrentUser
+                } else {
+                    throw "Unsupported registry path format: $path"
                 }
-
-                # Log details even if it's not the target app
-                # Write-Log -Message "Key: '$keyName', DisplayName: '$displayName', InstallLocation: '$installLocation'" -Level DEBUG
-
-                if ($displayName -eq $AppName) { # Use parameter
-                    Write-Log -Message "MATCH FOUND: Key '$keyName' has DisplayName '$AppName'." -Level DEBUG
-                    if ($installLocation) {
-                        Write-Log -Message "InstallLocation value found: '$installLocation'. Checking path validity..." -Level DEBUG
-                        if (Test-Path $installLocation -PathType Container) { # Check if it's a valid directory
-                            Write-Log -Message "SUCCESS: Found valid '$AppName' installation directory: '$installLocation'" -Level INFO # Use parameter
-                            return $installLocation
-                        } else {
-                            Write-Log -Message "InstallLocation '$installLocation' for '$AppName' exists but is NOT a valid directory. Continuing search..." -Level WARN # Use parameter
+                
+                $regKey = $hive.OpenSubKey($registryPath, $false)
+                if (-not $regKey) {
+                    Write-Log -Message "Could not open registry key: $path" -Level DEBUG
+                    continue
+                }
+                
+                $subKeyNames = $regKey.GetSubKeyNames()
+                Write-Log -Message "Found $($subKeyNames.Count) subkeys under '$path' (optimized enumeration)." -Level DEBUG
+                
+                foreach ($subKeyName in $subKeyNames) {
+                    $subKey = $null
+                    try {
+                        $subKey = $regKey.OpenSubKey($subKeyName, $false)
+                        if (-not $subKey) { continue }
+                        
+                        $displayName = $subKey.GetValue("DisplayName") -as [string]
+                        
+                        # Early exit optimization: Only check InstallLocation if DisplayName matches
+                        if ($displayName -eq $AppName) {
+                            Write-Log -Message "MATCH FOUND: Key '$subKeyName' has DisplayName '$AppName'." -Level DEBUG
+                            $installLocation = $subKey.GetValue("InstallLocation") -as [string]
+                            
+                            if ($installLocation) {
+                                Write-Log -Message "InstallLocation value found: '$installLocation'. Checking path validity..." -Level DEBUG
+                                if (Test-Path $installLocation -PathType Container) {
+                                    Write-Log -Message "SUCCESS: Found valid '$AppName' installation directory: '$installLocation'" -Level INFO
+                                    # Cache the successful result for future calls
+                                    $script:LoxonePathCache[$AppName] = $installLocation
+                                    Write-Log -Message "[CACHE STORE] Cached path for '$AppName': '$installLocation'" -Level DEBUG
+                                    
+                                    # Cleanup and return immediately
+                                    $subKey.Close()
+                                    $regKey.Close()
+                                    return $installLocation
+                                } else {
+                                    Write-Log -Message "InstallLocation '$installLocation' for '$AppName' exists but is NOT a valid directory. Continuing search..." -Level WARN
+                                }
+                            } else {
+                                Write-Log -Message "Found '$AppName' registry entry in key '$subKeyName', but InstallLocation value is missing or empty. Continuing search..." -Level WARN
+                            }
                         }
-                    } else {
-                         Write-Log -Message "Found '$AppName' registry entry in key '$keyName', but InstallLocation value is missing or empty. Continuing search..." -Level WARN # Use parameter
+                    } catch {
+                        Write-Log -Message "Error reading subkey '$subKeyName' under '$path': $($_.Exception.Message)" -Level DEBUG
+                    } finally {
+                        if ($subKey) { $subKey.Close() }
                     }
                 }
-            } # End foreach ($key in $keys)
+                
+                $regKey.Close()
+            } catch {
+                Write-Log -Message "Error with optimized registry access for '$path': $($_.Exception.Message). Falling back to Get-ChildItem." -Level DEBUG
+                
+                # Fallback to original method for this path
+                $keys = Get-ChildItem -Path $path -ErrorAction SilentlyContinue
+                if (-not $keys) {
+                    Write-Log -Message "No subkeys found under '$path' (fallback method)." -Level DEBUG
+                    continue
+                }
+                
+                foreach ($key in $keys) {
+                    $keyName = $key.PSChildName
+                    try {
+                        $displayName = $key.GetValue("DisplayName") -as [string]
+                        if ($displayName -eq $AppName) {
+                            $installLocation = $key.GetValue("InstallLocation") -as [string]
+                            if ($installLocation -and (Test-Path $installLocation -PathType Container)) {
+                                Write-Log -Message "SUCCESS: Found valid '$AppName' installation directory: '$installLocation' (fallback)" -Level INFO
+                                $script:LoxonePathCache[$AppName] = $installLocation
+                                return $installLocation
+                            }
+                        }
+                    } catch {
+                        continue
+                    }
+                }
+            }
         } else {
              Write-Log -Message "Registry path not found or inaccessible: $path" -Level DEBUG
-        } # End if (Test-Path $path)
+        }
     } # End foreach ($path in $registryPaths)
 
     Write-Log -Message "'$AppName' installation path not found after checking all registry locations." -Level INFO # Use parameter
+    # Cache the negative result to avoid repeated expensive lookups
+    $script:LoxonePathCache[$AppName] = $null
+    Write-Log -Message "[CACHE STORE] Cached negative result for '$AppName'" -Level DEBUG
     return $null # Explicitly return null if not found after checking all paths
     } finally {
         Exit-Function # Corrected function call
@@ -210,6 +308,19 @@ function Get-LoxoneExePath { # Renamed function
         [string]$ExeName = "LoxoneConfig.exe"
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
+    
+    # Create cache key for exe path (includes both AppName and ExeName)
+    $exeCacheKey = "$AppName|$ExeName"
+    
+    # Check cache first for exe path
+    if ($script:LoxonePathCache.ContainsKey($exeCacheKey)) {
+        Write-Log -Message "[CACHE HIT] Returning cached exe path for '$AppName\$ExeName': $($script:LoxonePathCache[$exeCacheKey])" -Level DEBUG
+        Exit-Function
+        return $script:LoxonePathCache[$exeCacheKey]
+    }
+    
+    Write-Log -Message "[CACHE MISS] Performing exe path lookup for '$AppName\$ExeName'..." -Level DEBUG
+    
     try {
         Write-Log -Message "Calling Get-InstalledApplicationPath for AppName '$AppName'..." -Level DEBUG
         $installDir = Get-InstalledApplicationPath -AppName $AppName # Pass AppName
@@ -220,13 +331,22 @@ function Get-LoxoneExePath { # Renamed function
             Write-Log -Message "Checking for executable at combined path: '$exePath'" -Level DEBUG
             if (Test-Path $exePath -PathType Leaf) {
                 Write-Log -Message "SUCCESS: Found executable '$ExeName' for '$AppName' at: '$exePath'" -Level INFO # Use parameters
+                # Cache the successful exe path result
+                $script:LoxonePathCache[$exeCacheKey] = $exePath
+                Write-Log -Message "[CACHE STORE] Cached exe path for '$AppName\$ExeName': '$exePath'" -Level DEBUG
                 return $exePath
             } else {
                 Write-Log -Message "Executable '$ExeName' NOT found at path '$exePath' (derived from InstallLocation '$installDir')." -Level WARN # Use parameters
+                # Cache the negative result
+                $script:LoxonePathCache[$exeCacheKey] = $null
+                Write-Log -Message "[CACHE STORE] Cached negative exe result for '$AppName\$ExeName'" -Level DEBUG
                 return $null
             }
         } else {
             Write-Log -Message "'$AppName' installation directory was not found by GetInstalledApplicationPath. Cannot determine '$ExeName' path." -Level INFO # Use parameters
+            # Cache the negative result (no install directory found)
+            $script:LoxonePathCache[$exeCacheKey] = $null
+            Write-Log -Message "[CACHE STORE] Cached negative exe result for '$AppName\$ExeName' (no install dir)" -Level DEBUG
             return $null
         }
     } finally {
@@ -247,18 +367,6 @@ function Test-ExistingInstaller {
         [string]$ComponentName = "Installer" # For logging purposes (e.g., "Config", "App")
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-
-    # Check test mode
-    if ($script:IsTestMode) {
-        Write-Log -Message "[MOCK] Returning mock existence check for: $InstallerPath" -Level INFO
-        Exit-Function
-        return @{
-            IsValid        = $true
-            Reason         = "Mock - file exists"
-            SkipDownload   = $true
-            SkipExtraction = $true
-        }
-    }
 
     $result = @{
         IsValid        = $false
@@ -352,17 +460,6 @@ function Invoke-ZipFileExtraction {
         [Parameter(Mandatory=$true)][string]$DestinationPath
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-    
-    # Check test mode
-    if ($script:IsTestMode) {
-        Write-Log -Message "[MOCK] Would extract: $ZipPath to $DestinationPath" -Level INFO
-        # Create destination directory in test mode
-        if (-not (Test-Path $DestinationPath)) {
-            New-Item -ItemType Directory -Path $DestinationPath -Force | Out-Null
-        }
-        Exit-Function
-        return
-    }
     
     Write-Log -Message "Extracting '$ZipPath' to '$DestinationPath'..." -Level INFO
     try {

@@ -1,4 +1,4 @@
-# Mock-ScheduledTasks.ps1
+﻿# Mock-ScheduledTasks.ps1
 # Provides mock implementations for ScheduledTasks module cmdlets to avoid PowerShell 7 timeout issues
 
 # Mock Get-ScheduledTask globally to avoid timeout issues

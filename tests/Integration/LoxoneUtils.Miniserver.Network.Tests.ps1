@@ -1,4 +1,4 @@
-# Network-dependent tests for LoxoneUtils.Miniserver functions
+﻿# Network-dependent tests for LoxoneUtils.Miniserver functions
 # These tests require network connectivity and should be run as integration tests
 
 BeforeAll {

@@ -1,4 +1,4 @@
-# LoxoneUtils.UpdateCheck.psm1
+﻿# LoxoneUtils.UpdateCheck.psm1
 # Module containing functions to check update status for various Loxone components.
 # NOTE: Most functions in this module have been refactored and their logic moved to UpdateLoxone.ps1 and WorkflowSteps module
 
@@ -49,9 +49,10 @@ function Get-LoxoneUpdateData {
     try {
         # --- Fetch XML ---
         Write-Log -Message "Loading update XML from $UpdateXmlUrl" -Level INFO
-        $webClient = New-Object System.Net.WebClient
         try {
-            $updateXmlString = $webClient.DownloadString($UpdateXmlUrl)
+            # Use Invoke-WebRequest for better SSL/TLS support
+            $response = Invoke-WebRequest -Uri $UpdateXmlUrl -UseBasicParsing -TimeoutSec 30
+            $updateXmlString = $response.Content
         } catch {
             $result.Error = "Failed to download update XML from '$UpdateXmlUrl'. Error: $($_.Exception.Message)."
             Write-Log -Message $result.Error -Level ERROR

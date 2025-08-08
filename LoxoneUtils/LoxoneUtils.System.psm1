@@ -47,11 +47,23 @@ function Test-ScheduledTask {
     Write-Log -Message "Executing Test-ScheduledTask function from module." -Level DEBUG # Adjusted log message
     # Removed outer try/catch, inner try/catch removed to allow errors to propagate
     try {
-        $parentProcessId = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").ParentProcessId
-        $parentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $parentProcessId"
-        $parentProcessName = $parentProcess.Name
-        Write-Log -Message "Parent process for PID $PID is ${parentProcessName} (PID: ${parentProcessId})" -Level DEBUG
-        if ($parentProcessName.Trim() -ieq "taskeng.exe" -or $parentProcessName.Trim() -ieq "svchost.exe") { return $true } else { return $false } # Added .Trim() for robustness
+        # Performance optimization: Use Get-Process instead of Get-CimInstance for speed
+        try {
+            $currentProcess = Get-Process -Id $PID -ErrorAction Stop
+            $parentProcessId = $currentProcess.Parent.Id
+            $parentProcess = Get-Process -Id $parentProcessId -ErrorAction SilentlyContinue
+            $parentProcessName = if ($parentProcess) { $parentProcess.Name } else { "Unknown" }
+            Write-Log -Message "Parent process for PID $PID is ${parentProcessName} (PID: ${parentProcessId})" -Level DEBUG
+            if ($parentProcessName.Trim() -ieq "taskeng" -or $parentProcessName.Trim() -ieq "svchost") { return $true } else { return $false }
+        } catch {
+            # Fallback to slower CIM query only if Get-Process fails
+            Write-Log -Message "Get-Process failed, falling back to CIM query: $($_.Exception.Message)" -Level DEBUG
+            $parentProcessId = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").ParentProcessId
+            $parentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $parentProcessId"
+            $parentProcessName = $parentProcess.Name
+            Write-Log -Message "Parent process (CIM) for PID $PID is ${parentProcessName} (PID: ${parentProcessId})" -Level DEBUG
+            if ($parentProcessName.Trim() -ieq "taskeng.exe" -or $parentProcessName.Trim() -ieq "svchost.exe") { return $true } else { return $false }
+        }
     } finally {
         Exit-Function
     }

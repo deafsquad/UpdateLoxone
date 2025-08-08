@@ -1,4 +1,4 @@
-﻿# Optimized LoxoneUtils.Toast Module
+# Optimized LoxoneUtils.Toast Module
 # Key improvements:
 # 1. Reduced redundant logging
 # 2. Centralized parameter validation
@@ -7,79 +7,12 @@
 # 5. Removed duplicate code blocks
 
 #region Module Initialization
-# Test mode detection - must be at the very top
-$script:IsTestMode = ($env:PESTER_TEST_RUN -eq "1") -or 
-                     ($Global:IsTestRun -eq $true) -or 
-                     ($env:LOXONE_TEST_MODE -eq "1")
 
-if ($script:IsTestMode) {
-    Write-Verbose "Test mode detected - Toast operations will be mocked"
-    
-    # Always create mock BurntToast functions in test mode to prevent real toasts
-    # Remove existing BurntToast commands if loaded
-    $btCommands = @('New-BTText', 'New-BTProgressBar', 'New-BTImage', 'New-BTBinding',
-                    'New-BTVisual', 'New-BTAudio', 'New-BTButton', 'New-BTAction',
-                    'New-BTContent', 'Submit-BTNotification', 'Update-BTNotification')
-    
-    foreach ($cmd in $btCommands) {
-        if (Get-Command $cmd -ErrorAction SilentlyContinue) {
-            Remove-Item "function:$cmd" -Force -ErrorAction SilentlyContinue
-        }
-    }
-    
-    # Create mock functions
-    function New-BTText { 
-        param($Content) 
-        return @{Type='Text'; Content=$Content} 
-    }
-    function New-BTProgressBar { 
-        param($Status, $Value, $Title) 
-        return @{Type='ProgressBar'; Status=$Status; Value=$Value; Title=$Title} 
-    }
-    function New-BTImage { 
-        param($Source, [switch]$AppLogoOverride) 
-        return @{Type='Image'; Source=$Source; AppLogoOverride=$AppLogoOverride} 
-    }
-    function New-BTBinding { 
-        param($Children, $AppLogoOverride) 
-        return @{Type='Binding'; Children=$Children; AppLogoOverride=$AppLogoOverride} 
-    }
-    function New-BTVisual { 
-        param($BindingGeneric) 
-        return @{Type='Visual'; Binding=$BindingGeneric} 
-    }
-    function New-BTAudio { 
-        param([switch]$Silent) 
-        return @{Type='Audio'; Silent=$Silent} 
-    }
-    function New-BTButton { 
-        param($Content, $Arguments, [switch]$Dismiss, [switch]$Snooze) 
-        return @{Type='Button'; Content=$Content; Arguments=$Arguments; Dismiss=$Dismiss; Snooze=$Snooze} 
-    }
-    function New-BTAction { 
-        param($Buttons) 
-        return @{Type='Action'; Buttons=$Buttons} 
-    }
-    function New-BTContent { 
-        param($Visual, $Audio, $Actions, $ActivationType, $Scenario, $Duration, $DataBinding) 
-        return @{Type='Content'; Visual=$Visual; Audio=$Audio; Actions=$Actions; Scenario=$Scenario; Duration=$Duration; DataBinding=$DataBinding} 
-    }
-    function Submit-BTNotification { 
-        param($Content, $UniqueIdentifier, $AppId, $DataBinding, $ErrorAction)
-        Write-Verbose "[MOCK] Would show toast: $UniqueIdentifier"
-        $Global:MockToastShown = $true
-        $Global:LastMockToastId = $UniqueIdentifier
-        $Global:LastMockToastContent = $Content
-        $Global:LastMockToastDataBinding = $DataBinding
-    }
-    function Update-BTNotification {
-        param($UniqueIdentifier, $DataBinding, $AppId, $ErrorAction)
-        Write-Verbose "[MOCK] Would update toast: $UniqueIdentifier"
-        $Global:MockToastUpdated = $true
-        $Global:LastMockToastUpdate = $DataBinding
-    }
-    Write-Verbose "Created mock BurntToast functions"
-}
+# Import safe wrapper functions
+. "$PSScriptRoot\LoxoneUtils.Toast.SafeWrappers.ps1"
+
+# Thread safety: Create mutex for toast operations
+$script:ToastMutex = [System.Threading.Mutex]::new($false, "Global\LoxoneToast_$([System.Diagnostics.Process]::GetCurrentProcess().Id)")
 
 # Check if toast initialization is suppressed
 $script:SuppressToastInit = $Global:SuppressLoxoneToastInit -eq $true
@@ -90,7 +23,7 @@ if ($script:SuppressToastInit) {
 
 $script:IsSystem = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).IsSystem
 
-if (-not $script:SuppressToastInit -and -not $script:IsSystem -and -not $script:IsTestMode -and -not (Get-Module -Name BurntToast -ListAvailable)) {
+if (-not $script:SuppressToastInit -and -not $script:IsSystem -and -not (Get-Module -Name BurntToast -ListAvailable)) {
     Write-Warning "BurntToast module not installed. Toast notifications unavailable."
     Write-Warning "Install with: Install-Module -Name BurntToast -Force"
 }
@@ -117,11 +50,19 @@ class ToastConfiguration {
         DownloadSpeedLine     = ""
         DownloadTimeLine      = ""
         DownloadSizeLine      = ""
+        # Parallel mode progress bars
+        ConfigStatus          = "Waiting..."
+        ConfigProgress        = 0.0
+        AppStatus             = "Waiting..."
+        AppProgress           = 0.0
+        MiniserverStatus      = "Waiting..."
+        MiniserverProgress    = 0.0
+        MiniserversTitle      = "Miniservers"
     }
 }
 
 # Initialize global state only if not suppressed OR in test mode
-if (-not $script:SuppressToastInit -or $script:IsTestMode) {
+if (-not $script:SuppressToastInit) {
     $script:Config = [ToastConfiguration]::new()
     if (-not (Test-Path variable:Global:PersistentToastId)) {
         $Global:PersistentToastId = $script:Config.DefaultId
@@ -139,13 +80,18 @@ if (-not $script:SuppressToastInit -or $script:IsTestMode) {
 }
 # CRITICAL FIX: Only initialize data binding ONCE per session
 # This prevents the toast from dismissing when transitioning between operations
-if (-not $script:SuppressToastInit -or $script:IsTestMode) {
-    if (-not (Test-Path variable:Global:PersistentToastData)) {
-        # Only log if logging infrastructure is ready (prevents errors during module import)
-        if ((Get-Command Write-Log -ErrorAction SilentlyContinue) -and $Global:LogFile) {
-            Write-Log -Level Debug -Message "Initializing Global:PersistentToastData for the first time"
-        }
-        $Global:PersistentToastData = [ordered]@{
+if (-not $script:SuppressToastInit) {
+    $mutexAcquired = $false
+    try {
+        # Thread-safe initialization check
+        $mutexAcquired = $script:ToastMutex.WaitOne(1000)
+        
+        if (-not (Test-Path variable:Global:PersistentToastData)) {
+            # Only log if logging infrastructure is ready (prevents errors during module import)
+            if ((Get-Command Write-SafeLog -ErrorAction SilentlyContinue) -and $Global:LogFile) {
+                Write-SafeLog -Level Debug -Message "Initializing Global:PersistentToastData for the first time"
+            }
+            $Global:PersistentToastData = [ordered]@{
             StatusText            = "Initializing..."
             ProgressBarStatus     = "Download: -"
             ProgressBarValue      = 0.0
@@ -161,11 +107,26 @@ if (-not $script:SuppressToastInit -or $script:IsTestMode) {
             TotalWeight           = 1
             DownloadSpeedLine     = ""
             DownloadTimeLine      = ""
+            ConfigTitle           = "Loxone Config"
+            AppTitle              = "Loxone App"
             DownloadSizeLine      = ""
+            # Component-specific progress (Parallel mode)
+            ConfigStatus          = "Waiting..."
+            ConfigProgress        = 0.0
+            AppStatus             = "Waiting..."
+            AppProgress           = 0.0
+            MiniserverStatus      = "Waiting..."
+            MiniserverProgress    = 0.0
+            MiniserversTitle      = "Miniservers"
         }
-    } else {
-        if (Get-Command Write-Log -ErrorAction SilentlyContinue) {
-            Write-Log -Level Debug -Message "Global:PersistentToastData already exists - preserving existing object"
+        } else {
+            if (Get-Command Write-SafeLog -ErrorAction SilentlyContinue) {
+                Write-SafeLog -Level Debug -Message "Global:PersistentToastData already exists - preserving existing object"
+            }
+        }
+    } finally {
+        if ($mutexAcquired) {
+            try { $script:ToastMutex.ReleaseMutex() } catch {}
         }
     }
 }
@@ -175,7 +136,7 @@ if (-not $script:SuppressToastInit -or $script:IsTestMode) {
 function Get-ParameterSummary {
     param([hashtable]$BoundParameters)
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     
     try {
         $summary = @{}
@@ -188,7 +149,7 @@ function Get-ParameterSummary {
         return $summary
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 #endregion
@@ -198,27 +159,27 @@ function Get-LoxoneToastAppId {
     [CmdletBinding()]
     param([string]$PreFoundPath)
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     try {
         $loxonePath = $PreFoundPath
         if (-not $loxonePath) {
-            Write-Log -Level Debug -Message "No pre-found path provided. Searching registry..."
+            Write-SafeLog -Level Debug -Message "No pre-found path provided. Searching registry..."
             try {
                 $loxonePath = Get-LoxoneExePath -ErrorAction SilentlyContinue
             } catch {
-                Write-Log -Level Warn -Message "Error calling Get-LoxoneExePath: $($_.Exception.Message)"
+                Write-SafeLog -Level Warn -Message "Error calling Get-LoxoneExePath: $($_.Exception.Message)"
             }
         }
         
         if ($loxonePath) {
-            Write-Log -Level Info -Message "Using hardcoded Loxone Config AppId"
+            Write-SafeLog -Level Info -Message "Using hardcoded Loxone Config AppId"
             return '{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}\Loxone\LoxoneConfig\LoxoneConfig.exe'
         }
         
-        Write-Log -Level Info -Message "No Loxone Config found. Using default AppId."
+        Write-SafeLog -Level Info -Message "No Loxone Config found. Using default AppId."
         return $null
     }
-    finally { Exit-Function }
+    finally { Exit-SafeFunction }
 }
 
 function Initialize-LoxoneToastAppId {
@@ -228,12 +189,12 @@ function Initialize-LoxoneToastAppId {
         return
     }
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     try {
         $script:ResolvedToastAppId = Get-LoxoneToastAppId -PreFoundPath $script:InstalledExePath
-        Write-Log -Level Debug -Message "Resolved Toast AppId: '$($script:ResolvedToastAppId | Out-String)'"
+        Write-SafeLog -Level Debug -Message "Resolved Toast AppId: '$($script:ResolvedToastAppId | Out-String)'"
     }
-    finally { Exit-Function }
+    finally { Exit-SafeFunction }
 }
 #endregion
 
@@ -245,37 +206,51 @@ function Update-ToastDataBinding {
     .DESCRIPTION
     CRITICAL: This function only updates individual keys to preserve the data binding.
     Never assign a new hashtable to $Global:PersistentToastData!
+    Thread-safe: Uses mutex to prevent concurrent modifications.
     #>
     param(
         [hashtable]$Updates,
         [switch]$PreserveExisting
     )
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     
+    $mutexAcquired = $false
     try {
-        # Check test mode
-        if ($script:IsTestMode) {
-            Write-Log -Message "[MOCK] Updating toast data in test mode" -Level DEBUG
-            # Don't return early - we still need to update the data for tests
+        # Acquire mutex for thread-safe access
+        try {
+            $mutexAcquired = $script:ToastMutex.WaitOne(5000) # 5 second timeout
+            if (-not $mutexAcquired) {
+                Write-SafeLog -Level Warn -Message "Could not acquire toast mutex within timeout"
+            }
+        } catch {
+            Write-SafeLog -Level Warn -Message "Error acquiring toast mutex: $_"
         }
+        
         if (-not $Updates) { return }
     
-    # Verify we're not accidentally trying to replace the entire object
-    if ($Updates -eq $Global:PersistentToastData) {
-        Write-Log -Level Error -Message "CRITICAL: Attempted to replace entire PersistentToastData object!"
-        throw "Cannot replace PersistentToastData object - use individual key updates only"
-    }
-    
-    foreach ($key in $Updates.Keys) {
-        if ($Updates[$key] -ne $null -or -not $PreserveExisting) {
-            # CRITICAL: Update individual key, never recreate the hashtable
-            $Global:PersistentToastData[$key] = $Updates[$key]
+        # Verify we're not accidentally trying to replace the entire object
+        if ($Updates -eq $Global:PersistentToastData) {
+            Write-SafeLog -Level Error -Message "CRITICAL: Attempted to replace entire PersistentToastData object!"
+            throw "Cannot replace PersistentToastData object - use individual key updates only"
+        }
+        
+        foreach ($key in $Updates.Keys) {
+            if ($Updates[$key] -ne $null -or -not $PreserveExisting) {
+                # CRITICAL: Update individual key, never recreate the hashtable
+                $Global:PersistentToastData[$key] = $Updates[$key]
+            }
         }
     }
-    }
     finally {
-        Exit-Function
+        if ($mutexAcquired) {
+            try {
+                $script:ToastMutex.ReleaseMutex()
+            } catch {
+                Write-SafeLog -Level Warn -Message "Error releasing toast mutex: $_"
+            }
+        }
+        Exit-SafeFunction
     }
 }
 
@@ -284,18 +259,11 @@ function Build-StatusText {
         [hashtable]$Params
     )
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     
     try {
-        # Build detailed info as primary content (reorganized from step info)
-        $details = @()
-        if ($Params.DownloadSpeed) { $details += "Speed: $($Params.DownloadSpeed)" }
-        if ($Params.DownloadRemainingTime) { $details += "Time Rem: $($Params.DownloadRemainingTime)" }
-        if ($Params.DownloadSizeProgress) { $details += "Size: $($Params.DownloadSizeProgress)" }
-        
-        if ($details.Count -gt 0) {
-            return $details -join "`n"
-        }
+        # Download details are now shown in progress bar text, not in main status text
+        # This keeps the main text area clean and focused on high-level status
         
         # When no details available, show enhanced context-based messages
         if ($Params.StepNumber -and $Params.TotalSteps -and $Params.StepName) {
@@ -303,7 +271,7 @@ function Build-StatusText {
             if ($Params.StepNumber -eq $Params.TotalSteps) {
                 # Get success/error status from parameters
                 $success = -not ($Params.ContainsKey('ErrorOccurred') -and $Params.ErrorOccurred)
-                $statusSymbol = if ($success) { "✓" } else { "✗" }
+                $statusSymbol = if ($success) { "?" } else { "?" }
                 
                 # Build runtime summary for completed steps only
                 $runtimeSummary = Build-RuntimeSummary -CurrentStep $Params.StepNumber -StepName $Params.StepName
@@ -336,46 +304,46 @@ function Build-StatusText {
             $stepName = $Params.StepName.ToLower()
             
             if ($stepName -eq 'downloads complete') {
-                return "✓ All downloads completed`nVerifying file integrity..."
+                return "? All downloads completed`nVerifying file integrity..."
             }
             elseif ($stepName -like '*initial*' -or $stepName -like '*check*') {
-                return "🔍 Checking for available updates`nConnecting to update servers..."
+                return "?? Checking for available updates`nConnecting to update servers..."
             }
             elseif ($stepName -like '*download*') {
-                return "⬇️ Preparing file downloads`nValidating download sources..."
+                return "?? Preparing file downloads`nValidating download sources..."
             }
             elseif ($stepName -like '*config*' -and $stepName -like '*install*') {
                 $displayName = $script:StepCategories['Conf'].DisplayName
-                return "⚙️ Installing $displayName`nUpdating system components..."
+                return "?? Installing $displayName`nUpdating system components..."
             }
             elseif ($stepName -like '*app*' -and $stepName -like '*install*') {
                 $displayName = $script:StepCategories['APP'].DisplayName
-                return "⚙️ Installing $displayName`nConfiguring application settings..."
+                return "?? Installing $displayName`nConfiguring application settings..."
             }
             elseif ($stepName -like '*extract*' -and $stepName -like '*config*') {
                 $displayName = $script:StepCategories['Conf'].DisplayName
-                return "📦 Extracting $displayName`nPreparing installation files..."
+                return "?? Extracting $displayName`nPreparing installation files..."
             }
             elseif ($stepName -like '*extract*' -and $stepName -like '*app*') {
                 $displayName = $script:StepCategories['APP'].DisplayName
-                return "📦 Extracting $displayName`nPreparing application files..."
+                return "?? Extracting $displayName`nPreparing application files..."
             }
             elseif ($stepName -like '*miniserver*' -or $stepName -like '*ms*') {
-                return "🔄 Updating Miniserver firmware`nEstablishing secure connection..."
+                return "?? Updating Miniserver firmware`nEstablishing secure connection..."
             }
             elseif ($stepName -like '*finali*' -or $stepName -like '*complet*') {
-                return "🏁 Finalizing installation`nCleaning up temporary files..."
+                return "?? Finalizing installation`nCleaning up temporary files..."
             }
             else {
-                return "⏳ Processing workflow step`nPlease wait..."
+                return "? Processing workflow step`nPlease wait..."
             }
         }
         
         # Initial state: clear any previous run text
-        return "🚀 Initializing update process`nPreparing system checks..."
+        return "?? Initializing update process`nPreparing system checks..."
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 
@@ -384,15 +352,28 @@ function Build-ProgressBarStatus {
         [hashtable]$Params
     )
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     
     try {
         # Active download in progress
         if ($Params.DownloadFileName) {
-            if ($Params.DownloadNumber -and $Params.TotalDownloads) {
-                return "Download $($Params.DownloadNumber)/$($Params.TotalDownloads): $($Params.DownloadFileName)"
+            $downloadText = if ($Params.DownloadNumber -and $Params.TotalDownloads) {
+                "Download $($Params.DownloadNumber)/$($Params.TotalDownloads): $($Params.DownloadFileName)"
+            } else {
+                "Download: $($Params.DownloadFileName)"
             }
-            return "Download: $($Params.DownloadFileName)"
+            
+            # Add download details to progress bar text
+            $downloadDetails = @()
+            if ($Params.DownloadSpeed) { $downloadDetails += $Params.DownloadSpeed }
+            if ($Params.DownloadRemainingTime) { $downloadDetails += $Params.DownloadRemainingTime }
+            if ($Params.DownloadSizeProgress) { $downloadDetails += $Params.DownloadSizeProgress }
+            
+            if ($downloadDetails.Count -gt 0) {
+                return "$downloadText | $($downloadDetails -join ' | ')"
+            }
+            
+            return $downloadText
         }
         
         # Downloads completed
@@ -446,7 +427,7 @@ function Build-ProgressBarStatus {
         return "Task: Initializing"
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 
@@ -455,7 +436,7 @@ function Build-OverallProgressStatus {
         [hashtable]$Params
     )
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     
     try {
         # New function: show step info in overall progress bar (reorganized from main text)
@@ -474,7 +455,7 @@ function Build-OverallProgressStatus {
         return $Global:PersistentToastData['OverallProgressStatus']
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 
@@ -484,7 +465,7 @@ function Reset-RuntimeTracking {
     $Global:StepTimings = @{}
     $Global:StepRuntimes = @{}
     $Global:LastStepKey = $null
-    Write-Log -Level Debug -Message "Reset runtime tracking - new process started"
+    Write-SafeLog -Level Debug -Message "Reset runtime tracking - new process started"
 }
 
 function Track-StepTiming {
@@ -527,23 +508,23 @@ function Track-StepTiming {
             $Global:StepRuntimes[$previousStep] = $runtime
         }
         
-        Write-Log -Level Debug -Message "Accumulated time for $previousStep`: $runtime min (total: $($Global:StepRuntimes[$previousStep]) min)"
+        Write-SafeLog -Level Debug -Message "Accumulated time for $previousStep`: $runtime min (total: $($Global:StepRuntimes[$previousStep]) min)"
     }
     
     # Track active category timing
     if (-not $Global:StepTimings.ContainsKey($stepKey)) {
         # First time seeing this category - start timing
         $Global:StepTimings[$stepKey] = $now
-        Write-Log -Level Debug -Message "Started timing for category: $stepKey ($StepName)"
+        Write-SafeLog -Level Debug -Message "Started timing for category: $stepKey ($StepName)"
     }
     elseif ($previousStep -eq $stepKey) {
         # Same category continuing
-        Write-Log -Level Debug -Message "Continuing category $stepKey with: $StepName"
+        Write-SafeLog -Level Debug -Message "Continuing category $stepKey with: $StepName"
     }
     else {
         # Returning to a category that was tracked before
         $Global:StepTimings[$stepKey] = $now
-        Write-Log -Level Debug -Message "Resumed timing for category: $stepKey ($StepName)"
+        Write-SafeLog -Level Debug -Message "Resumed timing for category: $stepKey ($StepName)"
     }
     
     # Remember the current category for next call
@@ -556,7 +537,7 @@ function Build-RuntimeSummary {
         [string]$StepName
     )
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     
     try {
         # Finalize timing for the last active category
@@ -578,7 +559,7 @@ function Build-RuntimeSummary {
                 $Global:StepRuntimes[$lastKey] = $runtime
             }
             
-            Write-Log -Level Debug -Message "Final accumulation for $lastKey`: $runtime min (total: $($Global:StepRuntimes[$lastKey]) min)"
+            Write-SafeLog -Level Debug -Message "Final accumulation for $lastKey`: $runtime min (total: $($Global:StepRuntimes[$lastKey]) min)"
         }
         
         # Calculate total runtime from script start (fallback if not set)
@@ -627,7 +608,7 @@ function Build-RuntimeSummary {
         }
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 
@@ -687,7 +668,7 @@ function Calculate-ProgressValues {
         [hashtable]$Params
     )
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     
     try {
         $result = @{}
@@ -711,7 +692,7 @@ function Calculate-ProgressValues {
         return $result
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 #endregion
@@ -735,6 +716,16 @@ function Update-PersistentToast {
         # Weight Info
         [double]$CurrentWeight,
         [double]$TotalWeight,
+        # Component-specific progress (Parallel mode)
+        [string]$ConfigStatus,
+        [double]$ConfigProgress,
+        [string]$ConfigTitle,
+        [string]$AppStatus,
+        [double]$AppProgress,
+        [string]$AppTitle,
+        [string]$MiniserverStatus,
+        [double]$MiniserverProgress,
+        [string]$MiniserversTitle,
         # Context (Required)
         [Parameter(Mandatory)][bool]$IsInteractive,
         [Parameter(Mandatory)][bool]$ErrorOccurred,
@@ -750,18 +741,18 @@ function Update-PersistentToast {
     }
     
     Start-Sleep -Milliseconds 50  # Small delay for visibility
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     
     try {
         # Verify data binding object still exists (safety check)
         if (-not (Test-Path variable:Global:PersistentToastData)) {
-            Write-Log -Level Error -Message "CRITICAL: Global:PersistentToastData was deleted! This should never happen."
+            Write-SafeLog -Level Error -Message "CRITICAL: Global:PersistentToastData was deleted! This should never happen."
             throw "PersistentToastData was deleted - toast binding is broken"
         }
         
         # Log parameter summary (consolidated)
         $paramSummary = Get-ParameterSummary $PSBoundParameters
-        Write-Log -Level Debug -Message "Update-PersistentToast called with $($PSBoundParameters.Count) parameters: $($paramSummary | ConvertTo-Json -Compress)"
+        Write-SafeLog -Level Debug -Message "Update-PersistentToast called with $($PSBoundParameters.Count) parameters: $($paramSummary | ConvertTo-Json -Compress)"
         
         # Track step timing for runtime summary
         Track-StepTiming -StepName $StepName -StepNumber $StepNumber
@@ -804,6 +795,51 @@ function Update-PersistentToast {
             $updates.ProgressBarValue = 1.0
         }
         
+        # Component-specific progress updates (Parallel mode)
+        # IMPORTANT: Only update component progress if explicitly passed to avoid resetting them
+        if ($env:LOXONE_PARALLEL_MODE -eq "1") {
+            # In parallel mode, only update component values if they were explicitly passed
+            if ($PSBoundParameters.ContainsKey('ConfigStatus')) { $updates.ConfigStatus = $ConfigStatus }
+            if ($PSBoundParameters.ContainsKey('ConfigProgress')) { $updates.ConfigProgress = $ConfigProgress }
+            if ($PSBoundParameters.ContainsKey('ConfigTitle')) { $updates.ConfigTitle = $ConfigTitle }
+            if ($PSBoundParameters.ContainsKey('AppStatus')) { $updates.AppStatus = $AppStatus }
+            if ($PSBoundParameters.ContainsKey('AppProgress')) { $updates.AppProgress = $AppProgress }
+            if ($PSBoundParameters.ContainsKey('AppTitle')) { $updates.AppTitle = $AppTitle }
+            if ($PSBoundParameters.ContainsKey('MiniserverStatus')) { $updates.MiniserverStatus = $MiniserverStatus }
+            if ($PSBoundParameters.ContainsKey('MiniserverProgress')) { $updates.MiniserverProgress = $MiniserverProgress }
+            if ($PSBoundParameters.ContainsKey('MiniserversTitle')) { $updates.MiniserversTitle = $MiniserversTitle }
+            
+            # If this is called from main script without component params, skip StatusText and progress bar updates
+            # to avoid interfering with component progress bars
+            if (-not ($PSBoundParameters.ContainsKey('ConfigStatus') -or 
+                     $PSBoundParameters.ContainsKey('AppStatus') -or 
+                     $PSBoundParameters.ContainsKey('MiniserverStatus'))) {
+                Write-SafeLog -Level Debug -Message "Parallel mode: Main script call detected - preserving component progress bars"
+                
+                # Remove all updates that could interfere with component progress
+                $keysToRemove = @('StatusText', 'ProgressBarStatus', 'ProgressBarValue', 
+                                  'OverallProgressValue', 'OverallProgressStatus',
+                                  'ConfigStatus', 'ConfigProgress', 'ConfigTitle',
+                                  'AppStatus', 'AppProgress', 'AppTitle',
+                                  'MiniserverStatus', 'MiniserverProgress', 'MiniserversTitle')
+                
+                foreach ($key in $keysToRemove) {
+                    if ($updates.ContainsKey($key)) {
+                        Write-SafeLog -Level Debug -Message "Removing $key from updates to preserve component state"
+                        $updates.Remove($key)
+                    }
+                }
+            }
+        } else {
+            # Legacy mode - update as before
+            if ($PSBoundParameters.ContainsKey('ConfigStatus')) { $updates.ConfigStatus = $ConfigStatus }
+            if ($PSBoundParameters.ContainsKey('ConfigProgress')) { $updates.ConfigProgress = $ConfigProgress }
+            if ($PSBoundParameters.ContainsKey('AppStatus')) { $updates.AppStatus = $AppStatus }
+            if ($PSBoundParameters.ContainsKey('AppProgress')) { $updates.AppProgress = $AppProgress }
+            if ($PSBoundParameters.ContainsKey('MiniserverStatus')) { $updates.MiniserverStatus = $MiniserverStatus }
+            if ($PSBoundParameters.ContainsKey('MiniserverProgress')) { $updates.MiniserverProgress = $MiniserverProgress }
+        }
+        
         # Update global data
         Update-ToastDataBinding -Updates $updates
         
@@ -812,46 +848,110 @@ function Update-PersistentToast {
         
         # Create or update toast
         if (-not $Global:PersistentToastInitialized -and -not $shouldDefer) {
-            Initialize-Toast
+            # In parallel mode, only the progress worker should initialize the toast
+            if ($env:LOXONE_PARALLEL_MODE -eq "1") {
+                Write-SafeLog -Level Debug -Message "Skipping toast initialization in parallel mode (should be handled by progress worker)"
+                # Still mark as initialized to prevent further attempts
+                $Global:PersistentToastInitialized = $true
+            } else {
+                Initialize-Toast
+            }
         }
         elseif ($Global:PersistentToastInitialized) {
             Update-Toast
         }
         else {
-            Write-Log -Level Debug -Message "Toast update deferred (self-invoked context)"
+            Write-SafeLog -Level Debug -Message "Toast update deferred (self-invoked context)"
         }
     }
     catch {
-        Write-Log -Level Error -Message "Error in Update-PersistentToast: $_"
+        Write-SafeLog -Level Error -Message "Error in Update-PersistentToast: $_"
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 
 function Initialize-Toast {
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
-    Write-Log -Level Info -Message "Creating initial toast notification with buttons"
+    # Check for global force suppression first (for testing)
+    # Only suppress if ForceToastSuppression is explicitly set to true
+    if ($Global:ForceToastSuppression -eq $true) {
+        Write-Verbose "Initialize-Toast: Suppressed by global override"
+        $Global:PersistentToastInitialized = $true
+        return $true
+    }
+    
+    # Check module-level suppression
+    if ($script:SuppressToastInit) {
+        Write-Verbose "Initialize-Toast: Suppressed by module flag"
+        $Global:PersistentToastInitialized = $true
+        return $true
+    }
+    
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Write-SafeLog -Level Info -Message "Creating initial toast notification with buttons"
     
     try {
-        # Check test mode
-        if ($script:IsTestMode) {
-            Write-Log -Message "[MOCK] Would initialize toast notification" -Level INFO
-            $Global:PersistentToastInitialized = $true
-            Exit-Function
-            return
+        # Create components based on parallel mode
+        $components = @()
+        
+        # Header text
+        $components += New-BTText -Content "StatusText"
+        
+        # Check if we're in parallel mode and have workflow info
+        # Try to get components from environment variable if global is not available
+        $parallelComponents = if ($Global:ParallelWorkflowComponents) {
+            $Global:ParallelWorkflowComponents
+        } elseif ($env:LOXONE_PARALLEL_COMPONENTS) {
+            try {
+                $env:LOXONE_PARALLEL_COMPONENTS | ConvertFrom-Json
+            } catch {
+                Write-Log "Failed to parse LOXONE_PARALLEL_COMPONENTS: $_" -Level "WARN"
+                $null
+            }
+        } else {
+            $null
         }
-        # Create components
-        $text = New-BTText -Content "StatusText"
-        $progressBar1 = New-BTProgressBar -Status "ProgressBarStatus" -Value "ProgressBarValue" -Title "Task Progress"
-        $progressBar2 = New-BTProgressBar -Status "OverallProgressStatus" -Value "OverallProgressValue" -Title "Workflow Progress"
+        
+        Write-Log "Toast init - Parallel mode: $($env:LOXONE_PARALLEL_MODE), Components: $($parallelComponents | ConvertTo-Json -Compress)" -Level "DEBUG"
+        
+        # DEBUG: Force output to console
+        Write-Host "[TOAST DEBUG] env:LOXONE_PARALLEL_MODE = '$($env:LOXONE_PARALLEL_MODE)'" -ForegroundColor Magenta
+        Write-Host "[TOAST DEBUG] parallelComponents = $($parallelComponents | ConvertTo-Json -Compress)" -ForegroundColor Magenta
+        Write-Host "[TOAST DEBUG] Condition result: $(($env:LOXONE_PARALLEL_MODE -eq "1") -and $parallelComponents)" -ForegroundColor Magenta
+        
+        if ($env:LOXONE_PARALLEL_MODE -eq "1" -and $parallelComponents) {
+            Write-Log "Creating component-specific progress bars" -Level "INFO"
+            Write-Host "[TOAST DEBUG] CREATING COMPONENT BARS!" -ForegroundColor Green
+            # Create progress bars based on what's actually being updated
+            if ($parallelComponents.Config) {
+                Write-Host "[TOAST DEBUG] Adding Config progress bar" -ForegroundColor Yellow
+                $components += New-BTProgressBar -Status "ConfigStatus" -Value "ConfigProgress" -Title "ConfigTitle"
+            }
+            if ($parallelComponents.App) {
+                Write-Host "[TOAST DEBUG] Adding App progress bar" -ForegroundColor Yellow
+                $components += New-BTProgressBar -Status "AppStatus" -Value "AppProgress" -Title "AppTitle"
+            }
+            if ($parallelComponents.Miniservers -gt 0) {
+                Write-Host "[TOAST DEBUG] Adding Miniserver progress bar ($($parallelComponents.Miniservers) servers)" -ForegroundColor Yellow
+                $components += New-BTProgressBar -Status "MiniserverStatus" -Value "MiniserverProgress" -Title "MiniserversTitle"
+            }
+        } else {
+            Write-Log "Using legacy 2 progress bars mode" -Level "INFO"
+            Write-Host "[TOAST DEBUG] USING LEGACY MODE!" -ForegroundColor Red
+            Write-Host "[TOAST DEBUG] Parallel mode check failed!" -ForegroundColor Red
+            # Legacy mode with 2 progress bars
+            $components += New-BTProgressBar -Status "ProgressBarStatus" -Value "ProgressBarValue" -Title "Task Progress"
+            $components += New-BTProgressBar -Status "OverallProgressStatus" -Value "OverallProgressValue" -Title "Workflow Progress"
+        }
+        
         $appLogo = Join-Path $PSScriptRoot '..\ms.png'
         
         # Create binding
-        $binding = New-BTBinding -Children $text, $progressBar1, $progressBar2
+        $binding = New-BTBinding -Children $components
         if (Test-Path $appLogo) {
             $image = New-BTImage -Source $appLogo -AppLogoOverride
-            $binding = New-BTBinding -Children $text, $progressBar1, $progressBar2 -AppLogoOverride $image
+            $binding = New-BTBinding -Children $components -AppLogoOverride $image
         }
         
         # Create visual
@@ -885,31 +985,30 @@ function Initialize-Toast {
         }
         
         # Submit notification with scenario
+        Write-Host "[TOAST DEBUG] Submitting notification with $($components.Count) components" -ForegroundColor Cyan
         Submit-BTNotification @params
         $Global:PersistentToastInitialized = $true
         
-        Write-Log -Level Info -Message "Toast created successfully with Reminder scenario"
+        Write-SafeLog -Level Info -Message "Toast created successfully with Reminder scenario"
+        
+        # Give toast time to appear
+        Start-Sleep -Milliseconds 500
     }
     catch {
         $Global:PersistentToastInitialized = $false
-        Write-Log -Level Error -Message "Failed to create toast: $_"
+        Write-SafeLog -Level Error -Message "Failed to create toast: $_"
         throw
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 
 function Update-Toast {
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
-    Write-Log -Level Debug -Message "Updating existing toast"
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Write-SafeLog -Level Debug -Message "Updating existing toast"
     
     try {
-        # Check test mode
-        if ($script:IsTestMode) {
-            Write-Log -Message "[MOCK] Updating toast data in test mode" -Level DEBUG
-            # Don't return early - we still need to update the data for tests
-        }
         $params = @{
             UniqueIdentifier = $Global:PersistentToastId
             DataBinding      = $Global:PersistentToastData
@@ -921,14 +1020,14 @@ function Update-Toast {
         }
         
         Update-BTNotification @params
-        Write-Log -Level Debug -Message "Toast updated successfully"
+        Write-SafeLog -Level Debug -Message "Toast updated successfully"
     }
     catch {
-        Write-Log -Level Error -Message "Failed to update toast: $_"
+        Write-SafeLog -Level Error -Message "Failed to update toast: $_"
         throw
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 #endregion
@@ -947,21 +1046,22 @@ function Show-FinalStatusToast {
         [bool]$LoxoneAppInstalled
     )
     
+    # Check for global force suppression first (for testing)
+    # Only suppress if ForceToastSuppression is explicitly set to true
+    if ($Global:ForceToastSuppression -eq $true) {
+        Write-Verbose "Show-FinalStatusToast: Suppressed by global override"
+        return
+    }
+    
     # Exit early if suppressed
     if ($script:SuppressToastInit) {
         Write-Verbose "Show-FinalStatusToast: Suppressed by SuppressToastInit"
         return
     }
     
-    Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
+    Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     try {
-        # Check test mode
-        if ($script:IsTestMode) {
-            Write-Log -Message "[MOCK] Would show final status toast: $Status" -Level INFO
-            Exit-Function
-            return
-        }
-        Write-Log -Level Info -Message "Creating final status toast (Success: $Success)"
+        Write-SafeLog -Level Info -Message "Creating final status toast (Success: $Success)"
         
         # Determine resources
         $appLogo = Join-Path (Join-Path $PSScriptRoot "..") $(if ($Success) { "ok.png" } else { "nok.png" })
@@ -1024,13 +1124,13 @@ function Show-FinalStatusToast {
         }
         
         Submit-BTNotification @params
-        Write-Log -Level Info -Message "Final status toast submitted successfully"
+        Write-SafeLog -Level Info -Message "Final status toast submitted successfully"
     }
     catch {
-        Write-Log -Level Error -Message "Failed to show final status toast: $_"
+        Write-SafeLog -Level Error -Message "Failed to show final status toast: $_"
     }
     finally {
-        Exit-Function
+        Exit-SafeFunction
     }
 }
 #endregion
@@ -1042,15 +1142,13 @@ $functionsToExport = @(
     'Initialize-LoxoneToastAppId'
     'Update-PersistentToast'
     'Show-FinalStatusToast'
+    'Initialize-Toast'
+    'Update-Toast'
+    # Safe wrapper functions
+    'Write-SafeLog'
+    'Enter-SafeFunction' 
+    'Exit-SafeFunction'
 )
 
-# In test mode, also export the mock BurntToast functions
-if ($script:IsTestMode) {
-    $functionsToExport += @(
-        'New-BTText', 'New-BTProgressBar', 'New-BTImage', 'New-BTBinding',
-        'New-BTVisual', 'New-BTAudio', 'New-BTButton', 'New-BTAction',
-        'New-BTContent', 'Submit-BTNotification', 'Update-BTNotification'
-    )
-}
 
 Export-ModuleMember -Function $functionsToExport

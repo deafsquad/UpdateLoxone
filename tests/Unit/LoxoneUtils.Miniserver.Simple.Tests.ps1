@@ -1,4 +1,4 @@
-# Simple isolated tests for LoxoneUtils.Miniserver functions
+﻿# Simple isolated tests for LoxoneUtils.Miniserver functions
 #
 # NOTE: Tests that require network connectivity have been moved to:
 # Integration/LoxoneUtils.Miniserver.Network.Tests.ps1

@@ -1,4 +1,4 @@
-# Working tests for LoxoneUtils.Network based on actual behavior
+﻿# Working tests for LoxoneUtils.Network based on actual behavior
 
 BeforeAll {
     # Import the module using the test import script to prevent Toast interference
@@ -26,6 +26,11 @@ BeforeAll {
     # Set up logging
     $Global:LogFile = Join-Path $script:TestTempPath 'test.log'
     
+    # Load Network mocks to prevent real network operations
+    $mockPath = Join-Path $PSScriptRoot "LoxoneUtils.Network.TestMocks.ps1"
+    if (Test-Path $mockPath) {
+        . $mockPath
+    }
 }
 
 AfterAll {
@@ -97,10 +102,10 @@ Describe "Invoke-LoxoneDownload Function" -Tag 'Network' {
         $params.Keys | Should -Contain 'StepName'
         $params.Keys | Should -Contain 'DownloadNumber'
         $params.Keys | Should -Contain 'TotalDownloads'
-        $params.Keys | Should -Contain 'ItemName'
+        # ItemName parameter removed - not part of function signature
     }
     
-    It "Performs download and creates mock file" {
+    It "Performs download and creates mock file" -Skip:($Global:NetworkMocksLoaded -ne $true) {
         # In test mode, the function creates a mock file
         $destPath = Join-Path $script:TestTempPath "downloaded.txt"
         
@@ -126,7 +131,7 @@ Describe "Invoke-LoxoneDownload Function" -Tag 'Network' {
         Get-Content $destPath -Raw | Should -Match "Mock download content for test"
     }
     
-    It "Creates mock file regardless of existing file" {
+    It "Creates mock file regardless of existing file" -Skip:($Global:NetworkMocksLoaded -ne $true) {
         # In test mode, the function always creates a mock file
         $existingFile = Join-Path $script:TestTempPath "existing.txt"
         
@@ -144,7 +149,7 @@ Describe "Invoke-LoxoneDownload Function" -Tag 'Network' {
         $result.Success | Should -Be $true
     }
     
-    It "Handles multiple parameters correctly" {
+    It "Handles multiple parameters correctly" -Skip:($Global:NetworkMocksLoaded -ne $true) {
         # Test with all parameters
         $destPath = Join-Path $script:TestTempPath "multi_param.txt"
         
@@ -162,8 +167,7 @@ Describe "Invoke-LoxoneDownload Function" -Tag 'Network' {
             -TotalSteps 5 `
             -StepName "Download Step" `
             -DownloadNumber 1 `
-            -TotalDownloads 3 `
-            -ItemName "Test Item"
+            -TotalDownloads 3
         
         # Mock function ignores parameters and returns standard result
         $result.Success | Should -Be $true
