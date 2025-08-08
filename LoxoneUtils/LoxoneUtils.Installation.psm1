@@ -44,10 +44,66 @@ function Start-LoxoneUpdateInstaller {
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
     Write-Log -Message "Starting update installer: ${InstallerPath} with install mode ${InstallMode}." -Level INFO
     try {
-        Write-Log -Message "Executing Start-Process: '$InstallerPath' /${InstallMode} -Wait" -Level DEBUG
-        $process = Start-Process -FilePath $InstallerPath -ArgumentList "/${InstallMode}" -Wait -PassThru -ErrorAction Stop
-        Write-Log -Message "Start-Process completed. PID: $($process.Id), ExitCode: $($process.ExitCode)" -Level DEBUG
-        $exitCode = $process.ExitCode
+        Write-Log -Message "Executing Start-Process: '$InstallerPath' /${InstallMode}" -Level DEBUG
+        
+        # Start the process without -Wait to allow periodic toast updates
+        $process = Start-Process -FilePath $InstallerPath -ArgumentList "/${InstallMode}" -PassThru -ErrorAction Stop
+        Write-Log -Message "Installer process started with PID: $($process.Id)" -Level DEBUG
+        
+        # Wait with timeout (5 minutes max for config installer)
+        $timeout = 300  # seconds
+        $waited = 0
+        while (-not $process.HasExited -and $waited -lt $timeout) {
+            Start-Sleep -Seconds 1
+            $waited++
+            
+            # Update toast every 2 seconds to prevent auto-dismissal
+            if ($waited % 2 -eq 0) {
+                # Check if we can update the toast
+                if ($Global:PersistentToastInitialized -and (Get-Command Update-PersistentToast -ErrorAction SilentlyContinue)) {
+                    try {
+                        # Create a pulsing dots animation to show activity
+                        $dots = '.' * (($waited / 2) % 4)
+                        $statusText = "Installing Loxone Config$dots"
+                        
+                        # Update the toast data directly if available
+                        if ($Global:PersistentToastData) {
+                            if ($Global:PersistentToastData.ContainsKey('ConfigStatus')) {
+                                $Global:PersistentToastData['ConfigStatus'] = $statusText
+                            }
+                            if ($Global:PersistentToastData.ContainsKey('StatusText')) {
+                                $Global:PersistentToastData['StatusText'] = $statusText
+                            }
+                            
+                            # Call Update-PersistentToast to refresh the notification
+                            Update-PersistentToast -StepNumber 0 -StepName "Config Installation" -UpdateText $statusText
+                        }
+                    } catch {
+                        # Silently ignore toast update errors during installation
+                        Write-Log -Message "Could not update toast during installation: $_" -Level DEBUG
+                    }
+                }
+            }
+            
+            if ($waited % 30 -eq 0) {
+                Write-Log -Message "Still waiting for installer (PID: $($process.Id))... ($waited seconds elapsed)" -Level DEBUG
+            }
+        }
+        
+        if (-not $process.HasExited) {
+            Write-Log -Message "Installation timeout after $timeout seconds" -Level WARNING
+            # Try to get exit code anyway
+            try {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                $exitCode = -1
+            } catch {
+                $exitCode = -1
+            }
+        } else {
+            $exitCode = $process.ExitCode
+        }
+        
+        Write-Log -Message "Start-Process completed. PID: $($process.Id), ExitCode: $exitCode" -Level DEBUG
         if ($exitCode -ne 0) {
             Write-Log -Message "Installer process exited with non-zero code: $exitCode." -Level WARN
         }
@@ -103,6 +159,35 @@ function Start-LoxoneForWindowsInstaller {
         while (-not $process.HasExited -and $waited -lt $timeout) {
             Start-Sleep -Seconds 1
             $waited++
+            
+            # Update toast every 2 seconds to prevent auto-dismissal
+            if ($waited % 2 -eq 0) {
+                # Check if we can update the toast
+                if ($Global:PersistentToastInitialized -and (Get-Command Update-PersistentToast -ErrorAction SilentlyContinue)) {
+                    try {
+                        # Create a pulsing dots animation to show activity
+                        $dots = '.' * (($waited / 2) % 4)
+                        $statusText = "Installing Loxone App$dots"
+                        
+                        # Update the toast data directly if available
+                        if ($Global:PersistentToastData) {
+                            if ($Global:PersistentToastData.ContainsKey('AppStatus')) {
+                                $Global:PersistentToastData['AppStatus'] = $statusText
+                            }
+                            if ($Global:PersistentToastData.ContainsKey('StatusText')) {
+                                $Global:PersistentToastData['StatusText'] = $statusText
+                            }
+                            
+                            # Call Update-PersistentToast to refresh the notification
+                            Update-PersistentToast -StepNumber 0 -StepName "App Installation" -UpdateText $statusText
+                        }
+                    } catch {
+                        # Silently ignore toast update errors during installation
+                        Write-Log -Message "Could not update toast during installation: $_" -Level DEBUG
+                    }
+                }
+            }
+            
             if ($waited % 30 -eq 0) {
                 Write-Log -Message "Still waiting for installer (PID: $($process.Id))... ($waited seconds elapsed)" -Level DEBUG
             }

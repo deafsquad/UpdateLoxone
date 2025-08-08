@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.8] - 2025-08-09 01:07:48
+### Changed
+- Modified installer behavior to provide real-time progress updates during Loxone Config and App installations
+- Improved toast notification updates to prevent auto-dismissal by refreshing every 2 seconds during installations
+- Enhanced Miniserver cache validation to handle clock skew and future timestamps gracefully
+- Optimized parallel workflow progress worker to use persistent global toast data for consistent updates
+- Updated main update logic to always run MS PreCheck for accurate version detection before proceeding with updates
+
+### Fixed
+- Fixed installer processes hanging indefinitely by implementing 5-minute timeout for Config installer
+- Fixed toast notifications auto-dismissing during long-running operations by adding periodic refresh mechanism
+- Fixed cache validation incorrectly rejecting entries with minor clock skew (within 1 minute tolerance)
+- Fixed toast notification binding issues in parallel workflow by maintaining same dataframe reference
+- Fixed unnecessary update attempts when all Miniservers are already current by checking actual versions via PreCheck
+- Fixed missing cache timestamp handling that could cause invalid cache entries to be accepted
+
 ## [0.6.7] - 2025-08-09 00:34:35
 ### Added
 - **Parallel Workflow Execution** - Major performance improvement for update process

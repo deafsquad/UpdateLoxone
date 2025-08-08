@@ -260,27 +260,48 @@ function Start-ProgressWorker {
                 
                 $visual = New-BTVisual -BindingGeneric $binding
                 
-                # Create initial data binding
-                $initialData = @{
-                    statusMessage = 'Starting parallel update process...'
-                    configStatus = 'Waiting...'
-                    configProgress = 0.0
-                    appStatus = 'Waiting...'
-                    appProgress = 0.0
-                    MiniserversTitle = "Miniservers (0/$msCount)"
-                    msCompleted = 0
-                    msStatus = 'Waiting...'
-                    msProgress = 0.0
+                # Use or initialize the global persistent toast data
+                # CRITICAL: We must use the SAME global dataframe for all toast operations
+                if (-not $Global:PersistentToastData) {
+                    # Initialize if not exists (this should normally be done by Toast module)
+                    $Global:PersistentToastData = @{
+                        statusMessage = 'Starting parallel update process...'
+                        configStatus = 'Waiting...'
+                        configProgress = 0.0
+                        appStatus = 'Waiting...'
+                        appProgress = 0.0
+                        MiniserversTitle = "Miniservers (0/$msCount)"
+                        msCompleted = 0
+                        msStatus = 'Waiting...'
+                        msProgress = 0.0
+                    }
+                } else {
+                    # Update existing global data
+                    $Global:PersistentToastData.statusMessage = 'Starting parallel update process...'
+                    $Global:PersistentToastData.configStatus = 'Waiting...'
+                    $Global:PersistentToastData.configProgress = 0.0
+                    $Global:PersistentToastData.appStatus = 'Waiting...'
+                    $Global:PersistentToastData.appProgress = 0.0
+                    $Global:PersistentToastData.MiniserversTitle = "Miniservers (0/$msCount)"
+                    $Global:PersistentToastData.msCompleted = 0
+                    $Global:PersistentToastData.msStatus = 'Waiting...'
+                    $Global:PersistentToastData.msProgress = 0.0
                 }
+                
+                # Use the global data for initial binding
+                $initialData = $Global:PersistentToastData
                 
                 # Create content with data binding template
                 $content = New-BTContent -Visual $visual
                 
                 # Submit initial toast with AppId and data binding
+                # CRITICAL: Use the same toast ID as the main module
+                $toastId = if ($Global:PersistentToastId) { $Global:PersistentToastId } else { 'LoxoneUpdateStatusToast' }
+                
                 if ($appId) {
-                    Submit-BTNotification -Content $content -UniqueIdentifier 'LoxoneUpdateProgress' -AppId $appId -DataBinding $initialData
+                    Submit-BTNotification -Content $content -UniqueIdentifier $toastId -AppId $appId -DataBinding $initialData
                 } else {
-                    Submit-BTNotification -Content $content -UniqueIdentifier 'LoxoneUpdateProgress' -DataBinding $initialData
+                    Submit-BTNotification -Content $content -UniqueIdentifier $toastId -DataBinding $initialData
                 }
                 
                 Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "ProgressWorker" -Message "Initial toast notification created with data binding" -Level "DEBUG"
@@ -585,21 +606,33 @@ function Start-ProgressWorker {
                         }
                         
                         # Update the toast notification using ONLY data binding
-                        # Initialize updateData with ALL required keys to prevent toast dismissal
-                        $updateData = @{
-                            statusMessage = $detailText
-                            # Always include all keys from initial data
-                            configStatus = 'Waiting...'
-                            configProgress = 0.0
-                            appStatus = 'Waiting...'
-                            appProgress = 0.0
-                            MiniserversTitle = "Miniservers ($completedMS/$totalMS)"
-                            msCompleted = $completedMS
-                            msStatus = 'Waiting...'
-                            msProgress = 0.0
+                        # CRITICAL: We must use the SAME dataframe object that was bound during initialization
+                        # Creating a new hashtable will break the binding and cause auto-dismissal
+                        
+                        # Check if we have the global persistent toast data
+                        if (-not $Global:PersistentToastData) {
+                            Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "ProgressWorker" -Message "PersistentToastData not found, creating new" -Level "WARN"
+                            # If not exists, we need to create it (but this shouldn't happen in normal flow)
+                            $Global:PersistentToastData = @{
+                                statusMessage = $detailText
+                                configStatus = 'Waiting...'
+                                configProgress = 0.0
+                                appStatus = 'Waiting...'
+                                appProgress = 0.0
+                                MiniserversTitle = "Miniservers ($completedMS/$totalMS)"
+                                msCompleted = $completedMS
+                                msStatus = 'Waiting...'
+                                msProgress = 0.0
+                            }
                         }
                         
-                        # Update component progress data
+                        # Update the EXISTING dataframe - DO NOT create a new one!
+                        $updateData = $Global:PersistentToastData
+                        $updateData.statusMessage = $detailText
+                        $updateData.MiniserversTitle = "Miniservers ($completedMS/$totalMS)"
+                        $updateData.msCompleted = $completedMS
+                        
+                        # Update component progress data - modify the existing dataframe
                         if ($componentStates.Config) {
                             $updateData.configStatus = switch ($componentStates.Config.State) {
                                 'Downloading' { "Downloading... $($componentStates.Config.Progress)%" }
@@ -660,16 +693,20 @@ function Start-ProgressWorker {
                             $appId = Get-LoxoneToastAppId
                         }
                         
-                        # Update notification with new content (BurntToast doesn't support data binding updates)
+                        # Update notification with the SAME dataframe reference
                         try {
-                            Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "ProgressWorker" -Message "Updating toast notification with new data" -Level "DEBUG"
+                            Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "ProgressWorker" -Message "Updating toast notification with existing dataframe" -Level "DEBUG"
                             
-                            # Update notification using existing function from BurntToast
+                            # CRITICAL: Pass the same dataframe reference that was bound during initialization
+                            # Do NOT create a new hashtable or the binding will break
+                            # Use the same toast ID as the main module
+                            $toastId = if ($Global:PersistentToastId) { $Global:PersistentToastId } else { 'LoxoneUpdateStatusToast' }
+                            
                             if ($appId) {
-                                Update-BTNotification -UniqueIdentifier 'LoxoneUpdateProgress' -DataBinding $updateData -AppId $appId
+                                Update-BTNotification -UniqueIdentifier $toastId -DataBinding $updateData -AppId $appId
                                 Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "ProgressWorker" -Message "Toast updated successfully with AppId" -Level "DEBUG"
                             } else {
-                                Update-BTNotification -UniqueIdentifier 'LoxoneUpdateProgress' -DataBinding $updateData
+                                Update-BTNotification -UniqueIdentifier $toastId -DataBinding $updateData
                                 Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "ProgressWorker" -Message "Toast updated successfully without AppId" -Level "DEBUG"
                             }
                         } catch {

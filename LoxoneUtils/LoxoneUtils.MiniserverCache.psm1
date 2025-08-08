@@ -93,11 +93,30 @@ function Test-MiniserverCacheValid {
     
     # Check cache age if timestamp available
     if ($MSEntry.LastChecked) {
-        $ageHours = ((Get-Date) - $MSEntry.LastChecked).TotalHours
+        $now = Get-Date
+        $ageHours = ($now - $MSEntry.LastChecked).TotalHours
+        
+        # Handle future timestamps (clock skew or recent cache update)
+        if ($ageHours -lt 0) {
+            # If timestamp is in the future but within 1 minute, accept it (clock skew tolerance)
+            if ($ageHours -gt -0.0167) { # -1 minute
+                Write-Log -Message "MS $($MSEntry.IP) cache has minor future timestamp ($('{0:N2}' -f ($ageHours * 60)) min), accepting" -Level DEBUG
+                return $true
+            } else {
+                Write-Log -Message "MS $($MSEntry.IP) cache has invalid future timestamp ($($MSEntry.LastChecked) vs $now)" -Level WARN
+                return $false
+            }
+        }
+        
+        # Check if cache is too old
         if ($ageHours -gt $MaxCacheAgeHours) {
             Write-Log -Message "MS $($MSEntry.IP) cache expired (age: $([Math]::Round($ageHours, 1))h, max: ${MaxCacheAgeHours}h)" -Level DEBUG
             return $false
         }
+    } else {
+        # No timestamp means cache validity unknown - be conservative
+        Write-Log -Message "MS $($MSEntry.IP) cache has no timestamp, treating as invalid" -Level DEBUG
+        return $false
     }
     
     return $true

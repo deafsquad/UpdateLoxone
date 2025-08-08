@@ -638,61 +638,102 @@ if (-not $prerequisites.ConfigUpdateNeeded -and -not $prerequisites.AppUpdateNee
     } else {
         Write-Log -Message "(UpdateLoxone.ps1) Some miniservers need checking. Proceeding with full pipeline..." -Level INFO
         
-        # Create pipeline data but ensure uncached miniservers are included for checking
-        $pipelineDataResult = @{
-            Succeeded = $false  # Will be set to true after pipeline runs
-            UpdateTargetsInfo = [System.Collections.ArrayList]::new()
-            WorkflowDefinition = @{
-                TotalWeight = 0
-                WorkflowSteps = @()
-                ConfigUpdate = $false
-                AppUpdate = $false
-                MiniserverUpdates = @()
-            }
-        }
+        # CRITICAL FIX: Always call Get-LoxonePipelineData to run MS PreCheck
+        # This will check actual versions and may find no updates are needed
+        Write-Log -Message "(UpdateLoxone.ps1) Calling Get-LoxonePipelineData to run MS PreCheck..." -Level INFO
         
-        # Add ALL miniserver entries to UpdateTargetsInfo for proper tracking and final summary
-        foreach ($msEntry in $msEntries) {
-            if (-not (Test-MiniserverCacheValid -MSEntry $msEntry -TargetVersion $targetVersion -MaxCacheAgeHours 24)) {
-                # Uncached or expired - needs version checking
-                $msTarget = @{
-                    Type = "Miniserver"
-                    Name = Get-RedactedPassword $msEntry.Url  # Use redacted URL for logging
-                    UpdateNeeded = $true  # Need to check this one
-                    Status = "NeedsVersionCheck"
-                    OriginalEntry = $msEntry.Url  # Sequential mode expects URL string here
-                    CacheEntry = $msEntry  # Store full cache entry for parallel mode processing
-                    CachedVersion = $msEntry.CachedVersion
-                    IP = $msEntry.IP
-                    Url = $msEntry.Url
-                    TargetVersion = $targetVersion
-                    Channel = $Channel  # Add channel info
+        # Call the pipeline data function which includes MS PreCheck
+        $pipelineDataResult = Get-LoxonePipelineData -Prerequisites $prerequisites -WorkflowContext $scriptContext
+        
+        # If pipeline succeeded and no updates needed, we can exit early
+        if ($pipelineDataResult.Succeeded) {
+            $hasUpdates = $false
+            foreach ($target in $pipelineDataResult.UpdateTargetsInfo) {
+                if ($target.UpdateNeeded) {
+                    $hasUpdates = $true
+                    break
                 }
-                $null = $pipelineDataResult.UpdateTargetsInfo.Add($msTarget)
-                Write-Log -Message "(UpdateLoxone.ps1) Added MS $($msEntry.IP) to pipeline for version checking (cached: $($msEntry.CachedVersion), target: $targetVersion)" -Level DEBUG
+            }
+            
+            if (-not $hasUpdates) {
+                Write-Log -Message "(UpdateLoxone.ps1) MS PreCheck found all miniservers are current. No updates needed." -Level INFO
+                
+                # Update cache for all checked miniservers
+                foreach ($target in $pipelineDataResult.UpdateTargetsInfo) {
+                    if ($target.Type -eq "Miniserver" -and $target.InitialVersion -and $target.InitialVersion -ne "Unknown") {
+                        $msListPath = Join-Path -Path $scriptContext.ScriptSaveFolder -ChildPath "UpdateLoxoneMSList.txt"
+                        if ($target.IP) {
+                            Update-MiniserverListCache -FilePath $msListPath -IP $target.IP -Version $target.InitialVersion
+                            Write-Log -Message "(UpdateLoxone.ps1) Updated cache for MS $($target.IP): $($target.InitialVersion)" -Level DEBUG
+                        }
+                    }
+                }
+                
+                $UpdateTargetsInfo = $pipelineDataResult.UpdateTargetsInfo
+                $canSkipAllMS = $true
             } else {
-                # Cached and valid - already up-to-date but add for final summary
-                $msTarget = @{
-                    Type = "Miniserver"
-                    Name = Get-RedactedPassword $msEntry.Url  # Use redacted URL for logging
-                    UpdateNeeded = $false  # Already known to be current from cache
-                    Status = "UpToDate"  # Mark as up-to-date for final summary
-                    InitialVersion = $msEntry.CachedVersion
-                    VersionAfterUpdate = $msEntry.CachedVersion
-                    OriginalEntry = $msEntry.Url
-                    CacheEntry = $msEntry
-                    IP = $msEntry.IP
-                    Url = $msEntry.Url
-                    TargetVersion = $targetVersion
-                    Channel = $Channel  # Add channel info
-                }
-                $null = $pipelineDataResult.UpdateTargetsInfo.Add($msTarget)
-                Write-Log -Message "(UpdateLoxone.ps1) Added cached MS $($msEntry.IP) as up-to-date (version: $($msEntry.CachedVersion))" -Level DEBUG
+                Write-Log -Message "(UpdateLoxone.ps1) MS PreCheck found updates needed. Proceeding with pipeline." -Level INFO
+                $UpdateTargetsInfo = $pipelineDataResult.UpdateTargetsInfo
             }
+        } else {
+            Write-Log -Message "(UpdateLoxone.ps1) Pipeline data collection failed. Creating fallback structure." -Level WARN
+            
+            # Fallback: Create minimal pipeline data if Get-LoxonePipelineData fails
+            $pipelineDataResult = @{
+                Succeeded = $false
+                UpdateTargetsInfo = [System.Collections.ArrayList]::new()
+                WorkflowDefinition = @{
+                    TotalWeight = 0
+                    WorkflowSteps = @()
+                    ConfigUpdate = $false
+                    AppUpdate = $false
+                    MiniserverUpdates = @()
+                }
+            }
+            
+            # Only add miniserver entries if we're in fallback mode
+            foreach ($msEntry in $msEntries) {
+                if (-not (Test-MiniserverCacheValid -MSEntry $msEntry -TargetVersion $targetVersion -MaxCacheAgeHours 24)) {
+                    # Uncached or expired - needs version checking
+                    $msTarget = @{
+                        Type = "Miniserver"
+                        Name = Get-RedactedPassword $msEntry.Url  # Use redacted URL for logging
+                        UpdateNeeded = $true  # Need to check this one
+                        Status = "NeedsVersionCheck"
+                        OriginalEntry = $msEntry.Url  # Sequential mode expects URL string here
+                        CacheEntry = $msEntry  # Store full cache entry for parallel mode processing
+                        CachedVersion = $msEntry.CachedVersion
+                        IP = $msEntry.IP
+                        Url = $msEntry.Url
+                        TargetVersion = $targetVersion
+                        Channel = $Channel  # Add channel info
+                    }
+                    $null = $pipelineDataResult.UpdateTargetsInfo.Add($msTarget)
+                    Write-Log -Message "(UpdateLoxone.ps1) Added MS $($msEntry.IP) to fallback pipeline for version checking (cached: $($msEntry.CachedVersion), target: $targetVersion)" -Level DEBUG
+                } else {
+                    # Cached and valid - already up-to-date but add for final summary
+                    $msTarget = @{
+                        Type = "Miniserver"
+                        Name = Get-RedactedPassword $msEntry.Url  # Use redacted URL for logging
+                        UpdateNeeded = $false  # Already known to be current from cache
+                        Status = "UpToDate"  # Mark as up-to-date for final summary
+                        InitialVersion = $msEntry.CachedVersion
+                        VersionAfterUpdate = $msEntry.CachedVersion
+                        OriginalEntry = $msEntry.Url
+                        CacheEntry = $msEntry
+                        IP = $msEntry.IP
+                        Url = $msEntry.Url
+                        TargetVersion = $targetVersion
+                        Channel = $Channel  # Add channel info
+                    }
+                    $null = $pipelineDataResult.UpdateTargetsInfo.Add($msTarget)
+                    Write-Log -Message "(UpdateLoxone.ps1) Added cached MS $($msEntry.IP) as up-to-date in fallback (version: $($msEntry.CachedVersion))" -Level DEBUG
+                }
+            }
+            
+            $UpdateTargetsInfo = $pipelineDataResult.UpdateTargetsInfo
+            Write-Log -Message "(UpdateLoxone.ps1) Fallback pipeline will check $($UpdateTargetsInfo.Count) miniserver(s) for version updates." -Level INFO
         }
-        
-        $UpdateTargetsInfo = $pipelineDataResult.UpdateTargetsInfo
-        Write-Log -Message "(UpdateLoxone.ps1) Pipeline will check $($UpdateTargetsInfo.Count) miniserver(s) for version updates." -Level INFO
     }
 } else {
     Write-Log -Message "(UpdateLoxone.ps1) Updates detected or forced - proceeding with full pipeline initialization..." -Level INFO
