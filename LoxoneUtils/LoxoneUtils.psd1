@@ -38,6 +38,7 @@ NestedModules = @(
     '.\LoxoneUtils.Network.psm1',
     '.\LoxoneUtils.ErrorHandling.psm1',
     '.\LoxoneUtils.Installation.psm1',
+    '.\LoxoneUtils.CertificateHelper.psm1',
     '.\LoxoneUtils.Miniserver.psm1',
     '.\LoxoneUtils.RunAsUser.psm1',
     '.\LoxoneUtils.System.psm1',
@@ -49,12 +50,20 @@ NestedModules = @(
     '.\LoxoneUtils.ConsoleProgress.psm1',
     '.\LoxoneUtils.ThreadSafe.psm1',
     '.\LoxoneUtils.ProgressReporter.psm1',
-    '.\LoxoneUtils.MiniserverCache.psm1'
+    '.\LoxoneUtils.MiniserverCache.psm1',
+    '.\LoxoneUtils.NetworkCore.psm1',
+    '.\LoxoneUtils.MiniserverHardware.psm1',
+    '.\LoxoneUtils.MiniserverGeneration.psm1',
+    '.\LoxoneUtils.Monitor.psm1'
 )
 # Functions to export from this module
     FunctionsToExport = @(
         # LoxoneUtils.ErrorHandling.psm1
         'Invoke-ScriptErrorHandling',
+        
+        # LoxoneUtils.CertificateHelper.psm1
+        'Set-CertificateValidationBypass',
+        'Clear-CertificateValidationBypass',
         
         # LoxoneUtils.Installation.psm1
         'Get-InstalledApplicationPath',
@@ -83,6 +92,7 @@ NestedModules = @(
         'Invoke-LoxoneDownload',
         'Wait-ForPingSuccess',
         'Wait-ForPingTimeout',
+        'Test-MiniserverConnectivity',
         
         # LoxoneUtils.RunAsUser.psm1
         'Invoke-AsCurrentUser',
@@ -163,7 +173,6 @@ NestedModules = @(
         'Remove-ThreadJobs',
         'Write-WorkerLog',
         'Start-ProgressWorker',
-        'Start-ComponentDownloadWorker',
         'Start-InstallWorker',
         'Start-MiniserverWorker',
         'Watch-DirectThreadJobs',
@@ -190,7 +199,35 @@ NestedModules = @(
         'ConvertFrom-MiniserverListEntry',
         'Test-MiniserverCacheValid',
         'Update-MiniserverListCache',
-        'Get-MiniserverListWithCache'
+        'Get-MiniserverListWithCache',
+        
+        # LoxoneUtils.MiniserverHardware.psm1
+        'Get-MiniserverHardwareInfo',
+        'Get-MiniserverGeneration',
+        'Test-MiniserverRequiresHTTPS',
+        
+        # LoxoneUtils.MiniserverGeneration.psm1
+        'Get-MiniserverGenerationInfo',
+        'Update-MiniserverGenerationCache',
+        
+        # LoxoneUtils.NetworkCore.psm1
+        'Initialize-NetworkCore',
+        'Invoke-NetworkRequest',
+        'Test-NetworkEndpoint',
+        'Test-FastNetworkEndpoint',
+        'Test-StandardNetworkEndpoint',
+        'Clear-NetworkCore',
+
+        # LoxoneUtils.Monitor.psm1
+        'Find-LoxoneMonitorExe',
+        'Start-LoxoneMonitorProcess',
+        'Stop-LoxoneMonitorProcess',
+        'Enable-MiniserverLogging',
+        'Disable-MiniserverLogging',
+        'Get-LocalIPAddress',
+        'Find-LxmonFiles',
+        'Watch-MonitorLogs',
+        'Remove-OldMonitorLogs'
     )
 # Cmdlets to export from this module
 CmdletsToExport = @() # Explicitly export no cmdlets

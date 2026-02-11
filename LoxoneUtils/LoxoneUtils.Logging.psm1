@@ -1,11 +1,15 @@
 ﻿# Module for Loxone Update Script Logging Functions
 
 # Check for test environment and skip initialization if in test mode
-if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1") {
-    Write-Verbose "Test mode detected - skipping logging initialization"
-    # Create dummy variables to avoid errors
+# Also skip mutex in parallel mode to avoid contention
+if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE_TEST_MODE -eq "1" -or $env:LOXONE_PARALLEL_MODE -eq "1") {
+    # In test/parallel mode, don't use mutex - it kills performance
+    # Each runspace can write independently
+    # IMPORTANT: In parallel mode, we skip ALL file I/O to prevent serialization
     $script:LogMutex = $null
     $script:CallStack = $null
+    $script:SkipMutex = $true
+    $script:SkipFileLogging = ($env:LOXONE_PARALLEL_MODE -eq "1")
 } else {
     # Mutex for Log File Access - PID-based to allow multiple instances
     # Each process gets its own mutex for thread safety within that process
@@ -14,13 +18,19 @@ if ($env:PESTER_TEST_RUN -eq "1" -or $Global:IsTestRun -eq $true -or $env:LOXONE
         # Create a mutex unique to this process
         $mutexName = "UpdateLoxoneLogMutex_$PID"
         $script:LogMutex = New-Object System.Threading.Mutex($false, $mutexName)
-        Write-Debug "Created process-specific mutex: $mutexName"
+        # Don't use Write-Debug here as it causes recursive logging
+        # Set a flag instead that can be checked if needed
+        $script:LogMutexCreated = $true
+        $script:LogMutexName = $mutexName
     } catch {
         # If named mutex fails, create a local one
-        Write-Warning "Could not create named mutex. Using process-local mutex."
+        # Don't use Write-Warning here as it causes recursive logging
         $script:LogMutex = New-Object System.Threading.Mutex($false)
+        $script:LogMutexCreated = $true
+        $script:LogMutexName = "Local"
     }
     $script:CallStack = [System.Collections.Generic.Stack[object]]::new() # Corrected type to hold objects
+    $script:SkipFileLogging = $false
 }
 
 #region Function Entry/Exit Logging
@@ -252,6 +262,30 @@ function Write-Log {
         # No default needed as levels are validated
     }
     # --- Write to File (with Mutex) ---
+    # SKIP FILE I/O COMPLETELY IN PARALLEL MODE TO AVOID SERIALIZATION
+    # UNLESS FORCE FILE LOGGING IS SET (for tests that need actual log files)
+    if (($script:SkipFileLogging -or $env:LOXONE_PARALLEL_MODE -eq "1") -and $env:LOXONE_FORCE_FILE_LOGGING -ne "1") {
+        # In parallel mode, write to memory instead of file
+        if (-not $Global:InMemoryLogs) {
+            # Initialize thread-safe collection if not already done
+            $Global:InMemoryLogs = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
+        }
+        # Add to in-memory collection (thread-safe ConcurrentBag)
+        $Global:InMemoryLogs.Add($logEntry)
+        # Log entries are already written to console streams above
+        return
+    }
+    
+    # Check for in-memory logging pattern
+    if ($Global:LogFile -and $Global:LogFile.StartsWith("InMemory:")) {
+        # This is an in-memory log, store in collection
+        if (-not $Global:InMemoryLogs) {
+            $Global:InMemoryLogs = [System.Collections.ArrayList]::new()
+        }
+        [void]$Global:InMemoryLogs.Add($logEntry)
+        return
+    }
+    
     if (-not $Global:LogFile) {
         if ($Host.Name -like "*ISE*" -or $Host.Name -eq "ConsoleHost") {
             Write-Host "[LOG] $logEntry" -ForegroundColor Gray
@@ -261,6 +295,17 @@ function Write-Log {
         return
     }
 
+    # PERFORMANCE: In parallel mode, skip mutex entirely and write directly
+    if ($env:LOXONE_PARALLEL_MODE -eq "1") {
+        # Direct write without any locking - let filesystem handle concurrency
+        try {
+            $logEntry | Out-File -FilePath $Global:LogFile -Encoding UTF8 -Append -ErrorAction Stop
+        } catch {
+            # Silently ignore file write failures in parallel mode
+        }
+        return
+    }
+    
     $mutexAcquired = $false
     $retryCount = 0
     $maxRetries = 3
@@ -546,6 +591,80 @@ function Invoke-LogFileRotation {
 
 #endregion Log File Rotation
 
+#region Downloads Folder Cleanup
+
+function Invoke-DownloadsFolderCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$DownloadsPath,
+
+        [Parameter(Mandatory=$false)]
+        [int]$MaxAgeDays = 7,  # Default to keep downloads for 7 days
+
+        [Parameter(Mandatory=$false)]
+        [int]$MaxFilesToKeep = 10  # Keep the most recent N files regardless of age
+    )
+
+    if (-not (Test-Path -LiteralPath $DownloadsPath -PathType Container)) {
+        Write-Log -Level DEBUG -Message "[DOWNLOADS-CLEANUP] Downloads folder '$DownloadsPath' does not exist. Nothing to clean."
+        return
+    }
+
+    Write-Log -Level INFO -Message "[DOWNLOADS-CLEANUP] Starting cleanup of downloads folder: '$DownloadsPath' (MaxAge: $MaxAgeDays days, KeepRecent: $MaxFilesToKeep)"
+
+    try {
+        # Get all files in the downloads folder (not recursive)
+        $allFiles = Get-ChildItem -Path $DownloadsPath -File -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending
+
+        if (-not $allFiles -or $allFiles.Count -eq 0) {
+            Write-Log -Level DEBUG -Message "[DOWNLOADS-CLEANUP] Downloads folder is empty. Nothing to clean."
+            return
+        }
+
+        Write-Log -Level DEBUG -Message "[DOWNLOADS-CLEANUP] Found $($allFiles.Count) file(s) in downloads folder."
+
+        # Determine which files to delete:
+        # 1. Keep the most recent $MaxFilesToKeep files
+        # 2. Delete files older than $MaxAgeDays
+        $cutoffDate = (Get-Date).AddDays(-$MaxAgeDays)
+        $deletedCount = 0
+        $skippedCount = 0
+
+        for ($i = 0; $i -lt $allFiles.Count; $i++) {
+            $file = $allFiles[$i]
+
+            # Keep the most recent files
+            if ($i -lt $MaxFilesToKeep) {
+                $skippedCount++
+                Write-Log -Level DEBUG -Message "[DOWNLOADS-CLEANUP] Keeping recent file: $($file.Name) (rank $($i + 1)/$MaxFilesToKeep)"
+                continue
+            }
+
+            # Delete files older than MaxAgeDays
+            if ($file.LastWriteTime -lt $cutoffDate) {
+                try {
+                    Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                    $deletedCount++
+                    Write-Log -Level DEBUG -Message "[DOWNLOADS-CLEANUP] Deleted old file: $($file.Name) (Last modified: $($file.LastWriteTime))"
+                } catch {
+                    Write-Log -Level WARN -Message "[DOWNLOADS-CLEANUP] Failed to delete '$($file.Name)': $($_.Exception.Message)"
+                }
+            } else {
+                $skippedCount++
+            }
+        }
+
+        Write-Log -Level INFO -Message "[DOWNLOADS-CLEANUP] Cleanup complete. Deleted: $deletedCount file(s), Kept: $skippedCount file(s)"
+
+    } catch {
+        Write-Log -Level WARN -Message "[DOWNLOADS-CLEANUP] Error during downloads cleanup: $($_.Exception.Message)"
+    }
+}
+
+#endregion Downloads Folder Cleanup
+
 #region Module Cleanup
 
 # Cleanup function to properly release mutex
@@ -579,4 +698,4 @@ $ExecutionContext.SessionState.Module.OnRemove = {
 #endregion Module Cleanup
 
 # Ensure functions are available
-Export-ModuleMember -Function Write-Log, Enter-Function, Exit-Function, Invoke-LogFileRotation, Clear-LoggingResources
+Export-ModuleMember -Function Write-Log, Enter-Function, Exit-Function, Invoke-LogFileRotation, Invoke-DownloadsFolderCleanup, Clear-LoggingResources

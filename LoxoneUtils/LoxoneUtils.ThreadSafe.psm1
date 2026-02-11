@@ -92,15 +92,15 @@ function Update-WorkflowState {
     }
     
     $acquired = $false
-    $timeout = [TimeSpan]::FromSeconds(5)
-    
+    $timeoutMs = 5000
+
     try {
         # Try to acquire the mutex with timeout
         Write-Log "Attempting to acquire workflow state mutex..." -Level "DEBUG"
-        $acquired = $script:WorkflowStateMutex.WaitOne($timeout)
-        
+        $acquired = $script:WorkflowStateMutex.WaitOne($timeoutMs)
+
         if (-not $acquired) {
-            Write-Warning "Failed to acquire workflow state mutex within timeout ($($timeout.TotalSeconds)s)"
+            Write-Warning "Failed to acquire workflow state mutex within timeout (5s)"
             throw "Mutex acquisition timeout"
         }
         
@@ -206,13 +206,13 @@ function Get-WorkflowState {
     }
     
     $acquired = $false
-    $timeout = [TimeSpan]::FromSeconds(5)
+    $timeoutMs = 5000
     $result = $null
-    
+
     try {
         # Try to acquire the mutex with timeout
-        $acquired = $script:WorkflowStateMutex.WaitOne($timeout)
-        
+        $acquired = $script:WorkflowStateMutex.WaitOne($timeoutMs)
+
         if (-not $acquired) {
             Write-Warning "Failed to acquire workflow state mutex for read within timeout"
             throw "Mutex acquisition timeout"

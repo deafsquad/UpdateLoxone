@@ -141,6 +141,44 @@ function Start-LoxoneForWindowsInstaller {
         [string]$ScriptSaveFolder
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+    
+    # Kill any running Loxone app processes before installation
+    $maxAttempts = 5
+    $attempt = 0
+    while ($attempt -lt $maxAttempts) {
+        $loxoneProcesses = @(Get-Process -Name "Loxone" -ErrorAction SilentlyContinue)
+        if ($loxoneProcesses.Count -eq 0) {
+            if ($attempt -eq 0) {
+                Write-Log -Message "No running Loxone processes found" -Level DEBUG
+            } else {
+                Write-Log -Message "All Loxone processes successfully terminated after $attempt attempt(s)" -Level INFO
+            }
+            break
+        }
+        
+        $attempt++
+        Write-Log -Message "Attempt $attempt of $maxAttempts - Found $($loxoneProcesses.Count) running Loxone process(es). Terminating..." -Level INFO
+        foreach ($proc in $loxoneProcesses) {
+            try {
+                $proc | Stop-Process -Force -ErrorAction Stop
+                Write-Log -Message "Terminated Loxone process (PID: $($proc.Id))" -Level DEBUG
+            } catch {
+                Write-Log -Message "Failed to terminate Loxone process (PID: $($proc.Id)): $_" -Level WARN
+            }
+        }
+        
+        if ($attempt -lt $maxAttempts) {
+            # Brief pause before rechecking (100ms)
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    
+    # Final check
+    $remainingProcesses = @(Get-Process -Name "Loxone" -ErrorAction SilentlyContinue)
+    if ($remainingProcesses.Count -gt 0) {
+        Write-Log -Message "WARNING: $($remainingProcesses.Count) Loxone process(es) still running after $maxAttempts attempts" -Level WARN
+    }
+    
     Write-Log -Message "Starting Loxone for Windows installer: ${InstallerPath} with install mode ${InstallMode}." -Level INFO
     try {
         # Assuming the same silent switches work. This might need adjustment based on the actual installer.
@@ -226,6 +264,149 @@ function Start-LoxoneForWindowsInstaller {
         } else {
             $exitCode = $process.ExitCode
             Write-Log -Message "Loxone for Windows installer completed. Exit code: $exitCode (after $waited seconds)" -Level INFO
+            
+            # NOTE: Shortcut icon fix code commented out - Loxone has fixed the bug in their installer (2024-11)
+            # If the bug resurfaces, uncomment the block below
+            <#
+            # Fix shortcut icons if installation was successful
+            if ($exitCode -eq 0) {
+                Write-Log -Message "Installation successful, attempting to fix shortcut icons..." -Level INFO
+                try {
+                    # Find the Loxone App executable directly
+                    $exePath = $null
+
+                    # Check common installation paths
+                    $possiblePaths = @(
+                        # The actual location where the App installs
+                        "${env:LOCALAPPDATA}\Programs\kerberos\Loxone.exe",
+                        # Other common paths
+                        "C:\Program Files\Loxone\Loxone.exe",
+                        "C:\Program Files (x86)\Loxone\Loxone.exe",
+                        "${env:ProgramFiles}\Loxone\Loxone.exe",
+                        "${env:ProgramFiles(x86)}\Loxone\Loxone.exe",
+                        "${env:LOCALAPPDATA}\Loxone\Loxone.exe",
+                        "${env:APPDATA}\Loxone\Loxone.exe"
+                    )
+
+                    Write-Log -Message "Searching for Loxone.exe in common paths..." -Level DEBUG
+                    foreach ($path in $possiblePaths) {
+                        Write-Log -Message "Checking: '$path'" -Level DEBUG
+                        if (Test-Path $path) {
+                            $exePath = $path
+                            Write-Log -Message "Found Loxone executable at: '$exePath'" -Level INFO
+                            break
+                        }
+                    }
+
+                    # If not found in common paths, try searching user AppData directories
+                    if (-not $exePath) {
+                        Write-Log -Message "Not found in common paths, searching AppData directories..." -Level DEBUG
+
+                        # Search in user AppData (where per-user apps install)
+                        $searchPaths = @(
+                            "${env:LOCALAPPDATA}\Programs",
+                            "${env:LOCALAPPDATA}",
+                            "${env:APPDATA}"
+                        )
+                        foreach ($searchPath in $searchPaths) {
+                            if (Test-Path $searchPath) {
+                                Write-Log -Message "Searching in: $searchPath" -Level DEBUG
+                                # Look for Loxone.exe but exclude LoxoneConfig folder
+                                $found = Get-ChildItem -Path $searchPath -Filter "Loxone.exe" -Recurse -ErrorAction SilentlyContinue |
+                                         Where-Object { $_.FullName -notmatch "LoxoneConfig" } |
+                                         Select-Object -First 1
+                                if ($found) {
+                                    $exePath = $found.FullName
+                                    Write-Log -Message "Found Loxone App executable at: '$exePath'" -Level INFO
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    if ($exePath) {
+
+                        # Build shortcut paths - check multiple possible locations
+                        $userProfile = [Environment]::GetFolderPath("UserProfile")
+                        $possibleShortcutPaths = @(
+                            (Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone.lnk"),
+                            (Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone\Loxone.lnk"),
+                            "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Loxone.lnk",
+                            "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Loxone\Loxone.lnk"
+                        )
+
+                        $fixedStartMenu = $false
+                        foreach ($shortcutPath in $possibleShortcutPaths) {
+                            if (Test-Path $shortcutPath) {
+                                Write-Log -Message "Found Start Menu shortcut at: '$shortcutPath'" -Level DEBUG
+                                try {
+                                    $shell = New-Object -ComObject WScript.Shell
+                                    $shortcut = $shell.CreateShortcut($shortcutPath)
+
+                                    # Log current properties
+                                    Write-Log -Message "Current TargetPath: '$($shortcut.TargetPath)', IconLocation: '$($shortcut.IconLocation)'" -Level DEBUG
+
+                                    # Update shortcut properties
+                                    $shortcut.TargetPath = $exePath
+                                    $shortcut.Arguments = ""
+                                    $shortcut.WorkingDirectory = Split-Path $exePath -Parent
+                                    $shortcut.IconLocation = "$exePath,0"
+                                    $shortcut.Description = "Loxone Smart Home App"
+                                    $shortcut.Save()
+
+                                    # Release COM objects
+                                    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) | Out-Null
+                                    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
+
+                                    Write-Log -Message "Successfully fixed Start Menu shortcut icon at: $shortcutPath" -Level INFO
+                                    $fixedStartMenu = $true
+                                    break  # Only fix the first found shortcut
+                                } catch {
+                                    Write-Log -Message "Error fixing Start Menu shortcut: $_" -Level WARN
+                                }
+                            }
+                        }
+
+                        if (-not $fixedStartMenu) {
+                            Write-Log -Message "No Start Menu shortcut found in any of the checked locations" -Level WARN
+                        }
+
+                        # Also fix desktop shortcut if it exists
+                        $desktopPath = [Environment]::GetFolderPath("Desktop")
+                        $desktopShortcut = Join-Path $desktopPath "Loxone.lnk"
+
+                        if (Test-Path $desktopShortcut) {
+                            Write-Log -Message "Found desktop shortcut, attempting to fix..." -Level DEBUG
+                            try {
+                                $shell2 = New-Object -ComObject WScript.Shell
+                                $desktop = $shell2.CreateShortcut($desktopShortcut)
+
+                                $desktop.TargetPath = $exePath
+                                $desktop.Arguments = ""
+                                $desktop.WorkingDirectory = Split-Path $exePath -Parent
+                                $desktop.IconLocation = "$exePath,0"
+                                $desktop.Description = "Loxone Smart Home App"
+                                $desktop.Save()
+
+                                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($desktop) | Out-Null
+                                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell2) | Out-Null
+
+                                Write-Log -Message "Successfully fixed desktop shortcut icon" -Level INFO
+                            } catch {
+                                Write-Log -Message "Error fixing desktop shortcut: $_" -Level WARN
+                            }
+                        } else {
+                            Write-Log -Message "No desktop shortcut found" -Level DEBUG
+                        }
+                    } else {
+                        Write-Log -Message "Could not find Loxone executable in common installation paths" -Level WARN
+                    }
+                } catch {
+                    Write-Log -Message "Error during icon fixing process: $_" -Level WARN
+                    # Non-critical error, continue
+                }
+            }
+            #>
             
             return @{
                 ExitCode = $exitCode
@@ -473,7 +654,30 @@ function Test-ExistingInstaller {
         $normalizedExisting = $null
         $versionMatch = $false
         try {
-            $existingVersionRaw = (Get-Item -Path $InstallerPath -ErrorAction Stop).VersionInfo.FileVersion
+            $fileItem = Get-Item -Path $InstallerPath -ErrorAction Stop
+            $existingVersionRaw = $fileItem.VersionInfo.FileVersion
+            
+            # Log more details about the file
+            Write-Log -Message "[$ComponentName] File details: Size=$($fileItem.Length) bytes, LastWrite=$($fileItem.LastWriteTime)" -Level DEBUG
+            Write-Log -Message "[$ComponentName] VersionInfo.FileVersion='$existingVersionRaw', ProductVersion='$($fileItem.VersionInfo.ProductVersion)'" -Level DEBUG
+            
+            # Handle case where FileVersion might be null or empty for some installers
+            if ([string]::IsNullOrWhiteSpace($existingVersionRaw)) {
+                Write-Log -Message "[$ComponentName] Installer has no FileVersion info. Checking by filename and size..." -Level WARN
+                
+                # For App installer, if file exists with reasonable size, consider it valid
+                if ($ComponentName -eq "App" -and $fileItem.Length -gt 10000000) { # > 10MB
+                    Write-Log -Message "[$ComponentName] App installer exists with size $($fileItem.Length) bytes. Considering it valid based on size." -Level INFO
+                    $result.IsValid = $true
+                    $result.SkipDownload = $true
+                    $result.Reason = "File exists with reasonable size"
+                    return $result
+                } else {
+                    $result.Reason = "No version info available"
+                    return $result
+                }
+            }
+            
             $normalizedExisting = Convert-VersionString $existingVersionRaw -ErrorAction Stop
             Write-Log -Message "[$ComponentName] Existing installer version: $normalizedExisting (Raw: '$existingVersionRaw'). Target version: $TargetVersion." -Level DEBUG
             if ($normalizedExisting -eq $TargetVersion) {

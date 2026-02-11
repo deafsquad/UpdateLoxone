@@ -113,10 +113,16 @@ if (-not $script:SuppressToastInit) {
             # Component-specific progress (Parallel mode)
             ConfigStatus          = "Waiting..."
             ConfigProgress        = 0.0
+            ConfigDuration        = $null  # Clear any previous duration
+            ConfigSymbol          = $null  # Clear any previous symbol
             AppStatus             = "Waiting..."
             AppProgress           = 0.0
+            AppDuration           = $null  # Clear any previous duration
+            AppSymbol             = $null  # Clear any previous symbol
             MiniserverStatus      = "Waiting..."
             MiniserverProgress    = 0.0
+            MiniserverDuration    = $null  # Clear any previous duration
+            MiniserverSymbol      = $null  # Clear any previous symbol
             MiniserversTitle      = "Miniservers"
         }
         } else {
@@ -172,11 +178,11 @@ function Get-LoxoneToastAppId {
         }
         
         if ($loxonePath) {
-            Write-SafeLog -Level Info -Message "Using hardcoded Loxone Config AppId"
+            Write-SafeLog -Level Debug -Message "Using hardcoded Loxone Config AppId"
             return '{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}\Loxone\LoxoneConfig\LoxoneConfig.exe'
         }
         
-        Write-SafeLog -Level Info -Message "No Loxone Config found. Using default AppId."
+        Write-SafeLog -Level Debug -Message "No Loxone Config found. Using default AppId."
         return $null
     }
     finally { Exit-SafeFunction }
@@ -731,12 +737,71 @@ function Update-PersistentToast {
         [Parameter(Mandatory)][bool]$ErrorOccurred,
         [bool]$AnyUpdatePerformed = $false,
         [bool]$CallingScriptIsInteractive = $false,
+        [string]$ActivityName,  # Add ActivityName parameter for component detection
         [bool]$CallingScriptIsSelfInvoked = $false
     )
     
     # Exit early if suppressed
     if ($script:SuppressToastInit) {
         Write-Verbose "Update-PersistentToast: Suppressed by SuppressToastInit"
+        return
+    }
+    
+    # In parallel mode worker threads, we can't update toast directly (RPC_E_WRONG_THREAD)
+    # Send the update through the queue instead
+    if ($env:LOXONE_PARALLEL_MODE -eq "1" -and $env:LOXONE_PARALLEL_WORKER -eq "1") {
+        Write-SafeLog -Level Debug -Message "Worker thread - sending toast update through queue"
+        
+        # Check if we have access to the progress queue
+        if ($Global:WorkerProgressQueue) {
+            # Build progress update message from parameters
+            # Determine component from activity name or filename
+            $component = 'Unknown'
+            # Check ActivityName first (e.g., "Downloading Config", "Downloading App")
+            if ($ActivityName) {
+                if ($ActivityName -match 'Config') { 
+                    $component = 'Config' 
+                } elseif ($ActivityName -match 'App') { 
+                    $component = 'App' 
+                }
+            }
+            # Fall back to DownloadFileName if component still unknown
+            if ($component -eq 'Unknown' -and $DownloadFileName) {
+                if ($DownloadFileName -match 'Config') { 
+                    $component = 'Config' 
+                } elseif ($DownloadFileName -match 'App|160120250812|LoxoneApp') { 
+                    $component = 'App' 
+                }
+            }
+            
+            Write-SafeLog -Level Debug -Message "Component detection: ActivityName='$ActivityName', DownloadFileName='$DownloadFileName', Detected='$component'"
+            
+            $progressMsg = @{
+                Type = 'Download'
+                Component = $component
+                Progress = if ($PSBoundParameters.ContainsKey('ProgressPercentage')) { [int]$ProgressPercentage } else { 0 }
+                Message = if ($PSBoundParameters.ContainsKey('StepName')) { $StepName } 
+                         elseif ($PSBoundParameters.ContainsKey('DownloadSpeed')) { "Downloading..." }
+                         else { "Processing..." }
+                State = 'Downloading'
+            }
+            
+            # Add step numbering if available
+            if ($PSBoundParameters.ContainsKey('StepNumber')) { $progressMsg.StepNumber = $StepNumber }
+            if ($PSBoundParameters.ContainsKey('TotalSteps')) { $progressMsg.TotalSteps = $TotalSteps }
+            
+            # Add download details if available
+            if ($PSBoundParameters.ContainsKey('DownloadSpeed')) { $progressMsg.Speed = $DownloadSpeed }
+            if ($PSBoundParameters.ContainsKey('DownloadSizeProgress')) { $progressMsg.SizeProgress = $DownloadSizeProgress }
+            if ($PSBoundParameters.ContainsKey('DownloadRemainingTime')) { $progressMsg.RemainingTime = $DownloadRemainingTime }
+            
+            try {
+                $Global:WorkerProgressQueue.Enqueue($progressMsg)
+                Write-SafeLog -Level Info -Message "Enqueued progress update: Component=$($progressMsg.Component), Type=$($progressMsg.Type), Progress=$($progressMsg.Progress), State=$($progressMsg.State), Message=$($progressMsg.Message)"
+            } catch {
+                Write-SafeLog -Level Warn -Message "Failed to enqueue progress update: $_"
+            }
+        }
         return
     }
     
@@ -843,25 +908,28 @@ function Update-PersistentToast {
         # Update global data
         Update-ToastDataBinding -Updates $updates
         
-        # Determine if we should defer initial creation
-        $shouldDefer = $CallingScriptIsSelfInvoked
-        
         # Create or update toast
-        if (-not $Global:PersistentToastInitialized -and -not $shouldDefer) {
-            # In parallel mode, only the progress worker should initialize the toast
-            if ($env:LOXONE_PARALLEL_MODE -eq "1") {
-                Write-SafeLog -Level Debug -Message "Skipping toast initialization in parallel mode (should be handled by progress worker)"
-                # Still mark as initialized to prevent further attempts
+        if (-not $Global:PersistentToastInitialized) {
+            # In parallel mode from a worker thread, skip initialization
+            # But allow main thread to initialize even in parallel mode
+            $isWorkerThread = $env:LOXONE_WORKER_NAME -or $env:LOXONE_IS_WORKER -eq "1"
+            
+            if ($env:LOXONE_PARALLEL_MODE -eq "1" -and $isWorkerThread) {
+                Write-SafeLog -Level Debug -Message "Skipping toast initialization in parallel worker thread (should be handled by progress worker or main thread)"
+                # Still mark as initialized to prevent further attempts in workers
                 $Global:PersistentToastInitialized = $true
             } else {
+                # Always initialize if not done yet - main thread or non-parallel mode
+                Write-SafeLog -Level Debug -Message "Initializing toast (PersistentToastInitialized was FALSE, ParallelMode=$($env:LOXONE_PARALLEL_MODE), IsWorker=$isWorkerThread)"
                 Initialize-Toast
+                $Global:PersistentToastInitialized = $true
             }
         }
         elseif ($Global:PersistentToastInitialized) {
             Update-Toast
         }
         else {
-            Write-SafeLog -Level Debug -Message "Toast update deferred (self-invoked context)"
+            Write-SafeLog -Level Debug -Message "Toast not initialized and conditions not met for initialization"
         }
     }
     catch {
@@ -892,6 +960,22 @@ function Initialize-Toast {
     Write-SafeLog -Level Info -Message "Creating initial toast notification with buttons"
     
     try {
+        # Reset any stale status from previous runs
+        if ($Global:PersistentToastData) {
+            $Global:PersistentToastData.ConfigStatus = "Waiting..."
+            $Global:PersistentToastData.ConfigDuration = $null
+            $Global:PersistentToastData.ConfigSymbol = $null
+            $Global:PersistentToastData.AppStatus = "Waiting..."
+            $Global:PersistentToastData.AppDuration = $null
+            $Global:PersistentToastData.AppSymbol = $null
+            $Global:PersistentToastData.AppTitle = "Loxone App"
+            $Global:PersistentToastData.ConfigTitle = "Loxone Config"
+            $Global:PersistentToastData.MiniserverStatus = "Waiting..."
+            $Global:PersistentToastData.MiniserverDuration = $null
+            $Global:PersistentToastData.MiniserverSymbol = $null
+            $Global:PersistentToastData.MiniserversTitle = "Miniservers"
+        }
+        
         # Create components based on parallel mode
         $components = @()
         
@@ -914,32 +998,21 @@ function Initialize-Toast {
         }
         
         Write-Log "Toast init - Parallel mode: $($env:LOXONE_PARALLEL_MODE), Components: $($parallelComponents | ConvertTo-Json -Compress)" -Level "DEBUG"
-        
-        # DEBUG: Force output to console
-        Write-Host "[TOAST DEBUG] env:LOXONE_PARALLEL_MODE = '$($env:LOXONE_PARALLEL_MODE)'" -ForegroundColor Magenta
-        Write-Host "[TOAST DEBUG] parallelComponents = $($parallelComponents | ConvertTo-Json -Compress)" -ForegroundColor Magenta
-        Write-Host "[TOAST DEBUG] Condition result: $(($env:LOXONE_PARALLEL_MODE -eq "1") -and $parallelComponents)" -ForegroundColor Magenta
-        
+
         if ($env:LOXONE_PARALLEL_MODE -eq "1" -and $parallelComponents) {
             Write-Log "Creating component-specific progress bars" -Level "INFO"
-            Write-Host "[TOAST DEBUG] CREATING COMPONENT BARS!" -ForegroundColor Green
             # Create progress bars based on what's actually being updated
             if ($parallelComponents.Config) {
-                Write-Host "[TOAST DEBUG] Adding Config progress bar" -ForegroundColor Yellow
                 $components += New-BTProgressBar -Status "ConfigStatus" -Value "ConfigProgress" -Title "ConfigTitle"
             }
             if ($parallelComponents.App) {
-                Write-Host "[TOAST DEBUG] Adding App progress bar" -ForegroundColor Yellow
                 $components += New-BTProgressBar -Status "AppStatus" -Value "AppProgress" -Title "AppTitle"
             }
             if ($parallelComponents.Miniservers -gt 0) {
-                Write-Host "[TOAST DEBUG] Adding Miniserver progress bar ($($parallelComponents.Miniservers) servers)" -ForegroundColor Yellow
                 $components += New-BTProgressBar -Status "MiniserverStatus" -Value "MiniserverProgress" -Title "MiniserversTitle"
             }
         } else {
             Write-Log "Using legacy 2 progress bars mode" -Level "INFO"
-            Write-Host "[TOAST DEBUG] USING LEGACY MODE!" -ForegroundColor Red
-            Write-Host "[TOAST DEBUG] Parallel mode check failed!" -ForegroundColor Red
             # Legacy mode with 2 progress bars
             $components += New-BTProgressBar -Status "ProgressBarStatus" -Value "ProgressBarValue" -Title "Task Progress"
             $components += New-BTProgressBar -Status "OverallProgressStatus" -Value "OverallProgressValue" -Title "Workflow Progress"
@@ -985,7 +1058,6 @@ function Initialize-Toast {
         }
         
         # Submit notification with scenario
-        Write-Host "[TOAST DEBUG] Submitting notification with $($components.Count) components" -ForegroundColor Cyan
         Submit-BTNotification @params
         $Global:PersistentToastInitialized = $true
         

@@ -159,6 +159,12 @@ function Initialize-ScriptWorkflow {
     Write-Host "INFO: ($FunctionName) ScriptSaveFolder set to: '$($scriptContext.ScriptSaveFolder)'" -ForegroundColor Cyan
 
     # --- Log Directory and File ---
+    # Normalize the ScriptSaveFolder path to get the correct case
+    if (Test-Path $scriptContext.ScriptSaveFolder) {
+        $scriptContext.ScriptSaveFolder = (Get-Item $scriptContext.ScriptSaveFolder).FullName
+        Write-Host "INFO: ($FunctionName) Normalized ScriptSaveFolder path to: '$($scriptContext.ScriptSaveFolder)'" -ForegroundColor Cyan
+    }
+    
     $scriptContext.LogDir = Join-Path -Path $scriptContext.ScriptSaveFolder -ChildPath "Logs"
     if (-not (Test-Path -Path $scriptContext.LogDir -PathType Container)) {
         Write-Host "INFO: ($FunctionName) Log directory '$($scriptContext.LogDir)' not found. Creating..." -ForegroundColor Cyan
@@ -575,6 +581,9 @@ $configChannelActual = if ($WorkflowContext.Params.ContainsKey('Channel')) {
         $result.ConfigZipUrl                  = $updateData.ConfigZipUrl
         $result.ConfigExpectedZipSize         = $updateData.ConfigExpectedZipSize
         $result.ConfigExpectedCRC             = $updateData.ConfigExpectedCRC
+        
+        # Debug logging
+        Write-Log -Message "($FunctionName) Setting ConfigZipUrl from updateData: '$($updateData.ConfigZipUrl)' -> result.ConfigZipUrl: '$($result.ConfigZipUrl)'" -Level DEBUG
         if ($updateData.ConfigInstallerFileName) { $result.ConfigInstallerFileName = $updateData.ConfigInstallerFileName } # Use from XML if provided
         if ($updateData.ConfigZipFileName) { $result.ConfigZipFileName = $updateData.ConfigZipFileName } # Use from XML if provided
 
@@ -584,6 +593,9 @@ $configChannelActual = if ($WorkflowContext.Params.ContainsKey('Channel')) {
         $result.AppInstallerUrl               = $updateData.AppInstallerUrl
         $result.AppExpectedSize               = $updateData.AppExpectedSize
         $result.AppExpectedCRC                = $updateData.AppExpectedCRC
+        
+        # Debug logging
+        Write-Log -Message "($FunctionName) Setting AppInstallerUrl from updateData: '$($updateData.AppInstallerUrl)' -> result.AppInstallerUrl: '$($result.AppInstallerUrl)'" -Level DEBUG
         $result.SelectedAppChannelName        = $updateData.SelectedAppChannelName
         if ($updateData.AppInstallerFileName) { 
             $result.AppInstallerFileName = $updateData.AppInstallerFileName 
@@ -627,16 +639,35 @@ $configChannelActual = if ($WorkflowContext.Params.ContainsKey('Channel')) {
         # Use $checkAppUpdateActual which correctly reflects the parameter's default value if not explicitly passed
         Write-Log -Message "($FunctionName) [AppBlockEntryCheck] Before App UpdateNeeded block. checkAppUpdateActual: '$checkAppUpdateActual'. Result.LatestAppVersion has value: $([bool]$result.LatestAppVersion). Raw LatestAppVersion: '$($result.LatestAppVersion)'" -Level INFO
         if ($checkAppUpdateActual -and $result.LatestAppVersion) {
-            $initialAppFileVersion = $WorkflowContext.InitialLoxoneAppDetails.FileVersion # Might be null if app not installed
-            if ([string]::IsNullOrWhiteSpace($initialAppFileVersion)) {
+            # Use ComparableVersion if available (new enhanced structure), otherwise fall back to FileVersion
+            $installedVersionToCompare = if ($WorkflowContext.InitialLoxoneAppDetails.ComparableVersion) {
+                $WorkflowContext.InitialLoxoneAppDetails.ComparableVersion
+            } else {
+                $WorkflowContext.InitialLoxoneAppDetails.FileVersion
+            }
+
+            # Get display version for logging
+            $installedDisplayVersion = if ($WorkflowContext.InitialLoxoneAppDetails.DisplayVersion) {
+                $WorkflowContext.InitialLoxoneAppDetails.DisplayVersion
+            } else {
+                $WorkflowContext.InitialLoxoneAppDetails.FileVersion
+            }
+
+            if ([string]::IsNullOrWhiteSpace($installedVersionToCompare)) {
                 $result.AppUpdateNeeded = $true # App desired, latest known, current not installed
                 Write-Log -Message "($FunctionName) [App] Update required. Latest '$($result.LatestAppVersion)' available, but Loxone App not currently installed or version unknown." -Level INFO
             } else {
                 $normalizedLatestApp = Convert-VersionString $result.LatestAppVersion
-                $normalizedInstalledApp = Convert-VersionString $initialAppFileVersion
+                $normalizedInstalledApp = if ($WorkflowContext.InitialLoxoneAppDetails.ComparableVersion) {
+                    # Already normalized
+                    $installedVersionToCompare
+                } else {
+                    # Need to normalize
+                    Convert-VersionString $installedVersionToCompare
+                }
                 
                 # Consolidated version comparison (was 5 verbose debug lines)
-                Write-Log -Message "($FunctionName) [App] Version check: Installed='$normalizedInstalledApp' vs Latest='$normalizedLatestApp'" -Level INFO
+                Write-Log -Message "($FunctionName) [App] Version check: Installed='$normalizedInstalledApp' ($installedDisplayVersion) vs Latest='$normalizedLatestApp'" -Level INFO
 
                 try {
                     $vNormalizedLatestApp = [Version]$normalizedLatestApp
@@ -1435,14 +1466,19 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
         $ScriptGlobalState.Value.currentStep++
         Write-Log -Message "($FunctionName) Incremented currentStep to $($ScriptGlobalState.Value.currentStep) for Install App phase." -Level DEBUG
 
-        # App-specific process check/close logic (from original script lines 618-629)
+        # App-specific process check/close logic - FORCEFULLY kill to avoid dialogs
         $appProcessName = $AppTargetInfo.OriginalDetails.ShortcutName # e.g., "Loxone"
         $wasAppRunning = $false
         if (-not [string]::IsNullOrWhiteSpace($appProcessName)) {
             Write-Log -Message "($FunctionName) Checking if Loxone App process '$appProcessName' is running..." -Level DEBUG
-            if (Get-ProcessStatus -ProcessName $appProcessName -StopProcess:$false -ErrorAction SilentlyContinue) {
+            
+            # Get all matching processes directly to force kill them
+            $appProcesses = Get-Process -Name $appProcessName -ErrorAction SilentlyContinue
+            if ($appProcesses) {
                 $wasAppRunning = $true
-                Write-Log -Message "($FunctionName) Loxone App process '$appProcessName' is running. Attempting to stop..." -Level INFO
+                Write-Log -Message "($FunctionName) Found $($appProcesses.Count) Loxone App process(es) running. Forcefully terminating..." -Level INFO
+                
+                # Update toast for stopping app
                 $toastParamsStopApp = @{ StepNumber = $ScriptGlobalState.Value.currentStep; TotalSteps = $ScriptGlobalState.Value.totalSteps; StepName = "Stopping Loxone App" }
                 Write-Log -Level DEBUG -Message "($FunctionName) Intent: Update toast for stopping Loxone App."
                 Write-Log -Level DEBUG -Message "($FunctionName) Attempting to update progress toast (Invoke-InstallLoxoneApp - Stop App). Initialized: $($Global:PersistentToastInitialized)"
@@ -1455,12 +1491,45 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
                 catch {
                     Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-InstallLoxoneApp (Stop App): $($_.Exception.ToString())"
                 }
-                if (Get-ProcessStatus -ProcessName $appProcessName -StopProcess:$true -ErrorAction SilentlyContinue) {
-                    Write-Log -Message "($FunctionName) Successfully requested termination for Loxone App process '$appProcessName'." -Level INFO
-                    Start-Sleep -Seconds 2 # Allow time to close
-                } else {
-                    Write-Log -Message "($FunctionName) Get-ProcessStatus -StopProcess returned false for '$appProcessName'. It might have failed or was already stopped." -Level WARN
+                
+                # Force kill all App processes to avoid any "do you want to quit" dialogs
+                foreach ($proc in $appProcesses) {
+                    try {
+                        $procId = $proc.Id
+                        $procName = $proc.ProcessName
+                        Write-Log -Message "($FunctionName) Force killing process '$procName' (PID: $procId)..." -Level DEBUG
+                        
+                        # Use Stop-Process with -Force to ensure immediate termination
+                        Stop-Process -Id $procId -Force -ErrorAction Stop
+                        Write-Log -Message "($FunctionName) Successfully killed process '$procName' (PID: $procId)" -Level INFO
+                    }
+                    catch {
+                        Write-Log -Message "($FunctionName) Error killing process (PID: $procId): $($_.Exception.Message)" -Level WARN
+                    }
                 }
+                
+                # Wait a moment for processes to fully terminate
+                Start-Sleep -Seconds 2
+                
+                # Double-check all processes are gone
+                $remainingProcesses = Get-Process -Name $appProcessName -ErrorAction SilentlyContinue
+                if ($remainingProcesses) {
+                    Write-Log -Message "($FunctionName) WARNING: $($remainingProcesses.Count) App process(es) still running after force kill attempt" -Level WARN
+                    # Try one more time with taskkill for stubborn processes
+                    foreach ($proc in $remainingProcesses) {
+                        try {
+                            Write-Log -Message "($FunctionName) Using taskkill /F on stubborn process (PID: $($proc.Id))..." -Level DEBUG
+                            $taskKillResult = & taskkill /F /PID $proc.Id 2>&1
+                            Write-Log -Message "($FunctionName) Taskkill result: $taskKillResult" -Level DEBUG
+                        }
+                        catch {
+                            Write-Log -Message "($FunctionName) Taskkill failed for PID $($proc.Id): $($_.Exception.Message)" -Level WARN
+                        }
+                    }
+                    Start-Sleep -Seconds 1
+                }
+                
+                Write-Log -Message "($FunctionName) Completed App process termination sequence" -Level INFO
             } else {
                 Write-Log -Message "($FunctionName) Loxone App process '$appProcessName' is not running." -Level INFO
             }
@@ -1501,9 +1570,60 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
     catch {
         Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-InstallLoxoneApp (Install): $($_.Exception.ToString())"
     }
+    # Kill any running Loxone app processes before installation
+    $maxAttempts = 5
+    $attempt = 0
+    while ($attempt -lt $maxAttempts) {
+        $loxoneProcesses = @(Get-Process -Name "Loxone" -ErrorAction SilentlyContinue)
+        if ($loxoneProcesses.Count -eq 0) {
+            if ($attempt -eq 0) {
+                Write-Log -Message "($FunctionName) No running Loxone processes found" -Level DEBUG
+            } else {
+                Write-Log -Message "($FunctionName) All Loxone processes successfully terminated after $attempt attempt(s)" -Level INFO
+            }
+            break
+        }
+        
+        $attempt++
+        Write-Log -Message "($FunctionName) Attempt $attempt of $maxAttempts - Found $($loxoneProcesses.Count) running Loxone process(es). Terminating..." -Level INFO
+        foreach ($proc in $loxoneProcesses) {
+            try {
+                $proc | Stop-Process -Force -ErrorAction Stop
+                Write-Log -Message "($FunctionName) Terminated Loxone process (PID: $($proc.Id))" -Level DEBUG
+            } catch {
+                Write-Log -Message "($FunctionName) Failed to terminate Loxone process (PID: $($proc.Id)): $_" -Level WARN
+            }
+        }
+        
+        if ($attempt -lt $maxAttempts) {
+            # Brief pause before rechecking (100ms)
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    
+    # Final check
+    $remainingProcesses = @(Get-Process -Name "Loxone" -ErrorAction SilentlyContinue)
+    if ($remainingProcesses.Count -gt 0) {
+        Write-Log -Message "($FunctionName) WARNING: $($remainingProcesses.Count) Loxone process(es) still running after $maxAttempts attempts" -Level WARN
+    }
+    
     $installArgs = "/$installMode" # Typical for InnoSetup installers like Loxone's
+    
+    # Ensure the installer path is properly quoted if it contains special characters
+    # Start-Process handles paths with spaces/special chars automatically, but let's verify the file exists
+    if (-not (Test-Path -LiteralPath $appInstallerPath)) {
+        throw "App installer file not found at path: $appInstallerPath"
+    }
+    
     Write-Log -Message "($FunctionName) Executing Loxone App installer: '$appInstallerPath' with arguments '$installArgs'" -Level DEBUG
+    try {
         $installProcess = Start-Process -FilePath $appInstallerPath -ArgumentList $installArgs -Wait -PassThru -ErrorAction Stop
+    } catch {
+        Write-Log -Message "($FunctionName) Failed to start App installer. Error: $($_.Exception.Message)" -Level ERROR
+        Write-Log -Message "($FunctionName) Installer path: '$appInstallerPath'" -Level ERROR
+        Write-Log -Message "($FunctionName) Path exists: $(Test-Path -LiteralPath $appInstallerPath)" -Level ERROR
+        throw
+    }
         Write-Log -Message "($FunctionName) Loxone App installer process exited with code: $($installProcess.ExitCode)" -Level INFO
 
         if ($installProcess.ExitCode -ne 0) {
@@ -1574,15 +1694,141 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
         $newAppDetails = Get-AppVersionFromRegistry -RegistryPath 'HKCU:\Software\3c55ef21-dcba-528f-8e08-1a92f8822a13' -AppNameValueName 'shortcutname' -InstallPathValueName 'InstallLocation' -ErrorAction SilentlyContinue
         
         if ($newAppDetails -and -not $newAppDetails.Error) {
-            $result.VersionAfterUpdate = $newAppDetails.FileVersion
-            $normalizedNewInstalledApp = Convert-VersionString $newAppDetails.FileVersion
+            # Store display version for UI, use ComparableVersion for comparison
+            $result.VersionAfterUpdate = if ($newAppDetails.DisplayVersion) { $newAppDetails.DisplayVersion } else { $newAppDetails.FileVersion }
+            $normalizedNewInstalledApp = if ($newAppDetails.ComparableVersion) {
+                $newAppDetails.ComparableVersion
+            } else {
+                Convert-VersionString $newAppDetails.FileVersion
+            }
             $normalizedTargetApp = Convert-VersionString $AppTargetInfo.TargetVersion
 
             if ($normalizedNewInstalledApp -eq $normalizedTargetApp) {
                 $result.Succeeded = $true
-                Write-Log -Message "($FunctionName) Successfully $($result.Action.ToLower())ed and verified Loxone App to FileVersion $($newAppDetails.FileVersion)." -Level INFO
+                Write-Log -Message "($FunctionName) Successfully $($result.Action.ToLower())ed and verified Loxone App to version $($result.VersionAfterUpdate)." -Level INFO
+                
+                # Fix the Start Menu shortcut icon after installation
+                Write-Log -Message "($FunctionName) Fixing Loxone shortcut icons after installation..." -Level INFO
+                Write-Log -Message "($FunctionName) newAppDetails properties: ShortcutName='$($newAppDetails.ShortcutName)', InstallLocation='$($newAppDetails.InstallLocation)', FileVersion='$($newAppDetails.FileVersion)'" -Level DEBUG
+                
+                try {
+                    # Get the executable path from the new app details
+                    $exePath = $newAppDetails.InstallLocation
+                    Write-Log -Message "($FunctionName) Executable path from newAppDetails: '$exePath'" -Level DEBUG
+                    
+                    if ($exePath -and (Test-Path $exePath)) {
+                        Write-Log -Message "($FunctionName) Executable exists at: '$exePath'" -Level DEBUG
+                        
+                        # Build shortcut paths dynamically - check multiple possible locations
+                        $userProfile = [Environment]::GetFolderPath("UserProfile")
+                        $possibleShortcutPaths = @(
+                            (Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone.lnk"),
+                            (Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone\Loxone.lnk"),
+                            "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Loxone.lnk",
+                            "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Loxone\Loxone.lnk"
+                        )
+                        
+                        $shortcutPath = $null
+                        foreach ($path in $possibleShortcutPaths) {
+                            Write-Log -Message "($FunctionName) Checking for shortcut at: '$path'" -Level DEBUG
+                            if (Test-Path $path) {
+                                $shortcutPath = $path
+                                Write-Log -Message "($FunctionName) Found Start Menu shortcut at: '$shortcutPath'" -Level INFO
+                                break
+                            }
+                        }
+                        
+                        if ($shortcutPath -and (Test-Path $shortcutPath)) {
+                            Write-Log -Message "($FunctionName) Processing Start Menu shortcut at: '$shortcutPath'" -Level DEBUG
+                            
+                            # Fix the Start Menu shortcut
+                            $shell = New-Object -ComObject WScript.Shell
+                            $shortcut = $shell.CreateShortcut($shortcutPath)
+                            
+                            # Log current shortcut properties before change
+                            Write-Log -Message "($FunctionName) Current shortcut TargetPath: '$($shortcut.TargetPath)'" -Level DEBUG
+                            Write-Log -Message "($FunctionName) Current shortcut IconLocation: '$($shortcut.IconLocation)'" -Level DEBUG
+                            
+                            # Update shortcut properties
+                            $shortcut.TargetPath = $exePath
+                            $shortcut.Arguments = "--disable-gpu --disable-software-rasterizer"
+                            $shortcut.WorkingDirectory = Split-Path $exePath -Parent
+                            $shortcut.IconLocation = "$exePath,0"
+                            $shortcut.Description = "Loxone Smart Home App"
+                            
+                            Write-Log -Message "($FunctionName) Setting new shortcut properties:" -Level DEBUG
+                            Write-Log -Message "($FunctionName)   TargetPath: '$exePath'" -Level DEBUG
+                            Write-Log -Message "($FunctionName)   WorkingDirectory: '$(Split-Path $exePath -Parent)'" -Level DEBUG
+                            Write-Log -Message "($FunctionName)   IconLocation: '$exePath,0'" -Level DEBUG
+                            
+                            $shortcut.Save()
+                            Write-Log -Message "($FunctionName) Shortcut saved successfully" -Level DEBUG
+                            
+                            # Verify the changes were applied
+                            $verifyShortcut = $shell.CreateShortcut($shortcutPath)
+                            Write-Log -Message "($FunctionName) Verified shortcut TargetPath: '$($verifyShortcut.TargetPath)'" -Level DEBUG
+                            Write-Log -Message "($FunctionName) Verified shortcut IconLocation: '$($verifyShortcut.IconLocation)'" -Level DEBUG
+                            
+                            # Release COM objects
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($verifyShortcut) | Out-Null
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) | Out-Null
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
+                            
+                            Write-Log -Message "($FunctionName) Successfully fixed Start Menu shortcut icon at: $shortcutPath" -Level INFO
+                            
+                            # Also fix desktop shortcut if it exists
+                            $desktopPath = [Environment]::GetFolderPath("Desktop")
+                            $desktopShortcut = Join-Path $desktopPath "Loxone.lnk"
+                            Write-Log -Message "($FunctionName) Looking for desktop shortcut at: '$desktopShortcut'" -Level DEBUG
+                            
+                            if (Test-Path $desktopShortcut) {
+                                Write-Log -Message "($FunctionName) Found desktop shortcut, attempting to fix..." -Level DEBUG
+                                
+                                $shell2 = New-Object -ComObject WScript.Shell
+                                $desktop = $shell2.CreateShortcut($desktopShortcut)
+                                
+                                # Log current desktop shortcut properties
+                                Write-Log -Message "($FunctionName) Current desktop TargetPath: '$($desktop.TargetPath)'" -Level DEBUG
+                                Write-Log -Message "($FunctionName) Current desktop IconLocation: '$($desktop.IconLocation)'" -Level DEBUG
+                                
+                                $desktop.TargetPath = $exePath
+                                $desktop.Arguments = "--disable-gpu --disable-software-rasterizer"
+                                $desktop.WorkingDirectory = Split-Path $exePath -Parent
+                                $desktop.IconLocation = "$exePath,0"
+                                $desktop.Description = "Loxone Smart Home App"
+                                
+                                Write-Log -Message "($FunctionName) Setting desktop shortcut to: TargetPath='$exePath', IconLocation='$exePath,0'" -Level DEBUG
+                                
+                                $desktop.Save()
+                                Write-Log -Message "($FunctionName) Desktop shortcut saved successfully" -Level DEBUG
+                                
+                                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($desktop) | Out-Null
+                                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell2) | Out-Null
+                                
+                                Write-Log -Message "($FunctionName) Successfully fixed desktop shortcut icon at: $desktopShortcut" -Level INFO
+                            } else {
+                                Write-Log -Message "($FunctionName) No desktop shortcut found at: $desktopShortcut" -Level DEBUG
+                            }
+                        } else {
+                            if ($shortcutPath) {
+                                Write-Log -Message "($FunctionName) Start Menu shortcut not found at: $shortcutPath" -Level WARN
+                            } else {
+                                Write-Log -Message "($FunctionName) No Start Menu shortcut found in any of the checked locations" -Level WARN
+                                Write-Log -Message "($FunctionName) Checked locations: $($possibleShortcutPaths -join ', ')" -Level DEBUG
+                            }
+                        }
+                    } else {
+                        Write-Log -Message "($FunctionName) Loxone executable not found at: $exePath" -Level WARN
+                    }
+                } catch {
+                    Write-Log -Message "($FunctionName) Error fixing shortcut icons: $($_.Exception.Message)" -Level WARN
+                    # Non-critical error, continue with the process
+                }
+                
                 $ScriptGlobalState.Value.CurrentWeight += Get-StepWeight -StepID 'VerifyApp' # Assuming a VerifyApp step weight
-                $toastParamsSuccess = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="APP v$($newAppDetails.FileVersion)"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
+                # Use DisplayVersion if available, otherwise FileVersion
+                $appDisplayVersion = if ($newAppDetails.DisplayVersion) { $newAppDetails.DisplayVersion } else { $newAppDetails.FileVersion }
+                $toastParamsSuccess = @{ StepNumber=$ScriptGlobalState.Value.currentStep; TotalSteps=$ScriptGlobalState.Value.totalSteps; StepName="APP v$appDisplayVersion"; CurrentWeight=$ScriptGlobalState.Value.CurrentWeight; TotalWeight=$ScriptGlobalState.Value.TotalWeight }
                 Write-Log -Level DEBUG -Message "($FunctionName) Intent: Update toast for successful Loxone App installation."
                 Write-Log -Level DEBUG -Message "($FunctionName) Attempting to update progress toast (Invoke-InstallLoxoneApp - Success). Initialized: $($Global:PersistentToastInitialized)"
                 Write-Log -Level DEBUG -Message ("($FunctionName) Params for Update-PersistentToast (Invoke-InstallLoxoneApp - Success): toastParamsSuccess='$($toastParamsSuccess | Out-String)', IsInteractive='$([bool]$WorkflowContext.IsInteractive)', ErrorOccurred='$([bool]$ScriptGlobalState.Value.ErrorOccurred)', AnyUpdatePerformed='$true'")
@@ -1594,99 +1840,10 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
                 catch {
                     Write-Log -Level ERROR -Message "($FunctionName) ERROR during Update-PersistentToast call in Invoke-InstallLoxoneApp (Success): $($_.Exception.ToString())"
                 }
-Write-Log -Message "($FunctionName) INVOKE-CHECKMINISERVERVERSIONS: Logging before Update-PersistentToast call (MS Check Loop)." -Level DEBUG
-        Write-Log -Message "($FunctionName)   Global:PersistentToastInitialized = $($Global:PersistentToastInitialized)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentStepNumber = $($ScriptGlobalState.Value.currentStep)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalStepsForUI = $($ScriptGlobalState.Value.totalSteps)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentWeight = $($ScriptGlobalState.Value.CurrentWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalWeight = $($ScriptGlobalState.Value.TotalWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParamsMSLoop.StepName = '$($toastParamsMSLoop.StepName)'" -Level DEBUG
-        # Note: DownloadFileName, DownloadNumber, TotalDownloads are not typically used in this specific toast
-        $statusTextForLogMSCheck = "Step $($ScriptGlobalState.Value.currentStep)/$($ScriptGlobalState.Value.totalSteps): $($toastParamsMSLoop.StepName)"
-        Write-Log -Message "($FunctionName)   Constructed StatusText (MS Check) = '$statusTextForLogMSCheck'" -Level DEBUG
-        $progressValueForLogMSCheck = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
-        Write-Log -Message "($FunctionName)   Calculated ProgressValue (MS Check percentage) = $progressValueForLogMSCheck %" -Level DEBUG
-                # Fix the Start Menu shortcut icon after installation
-                Write-Log -Message "($FunctionName) Fixing Loxone shortcut icon after installation..." -Level INFO
-                try {
-                    # Get the executable path from the new app details
-                    $exePath = $newAppDetails.InstallLocation
-                    if ($exePath -and (Test-Path $exePath)) {
-                        # Build shortcut paths dynamically
-                        $userProfile = [Environment]::GetFolderPath("UserProfile")
-                        $shortcutPath = Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone.lnk"
-                        
-                        if (Test-Path $shortcutPath) {
-                            # Fix the Start Menu shortcut
-                            $shell = New-Object -ComObject WScript.Shell
-                            $shortcut = $shell.CreateShortcut($shortcutPath)
-                            
-                            # Update shortcut properties
-                            $shortcut.TargetPath = $exePath
-                            $shortcut.WorkingDirectory = Split-Path $exePath -Parent
-                            $shortcut.IconLocation = "$exePath,0"
-                            $shortcut.Description = "Loxone Smart Home App"
-                            $shortcut.Save()
-                            
-                            # Release COM object
-                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) | Out-Null
-                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
-                            
-                            Write-Log -Message "($FunctionName) Successfully fixed Start Menu shortcut icon." -Level INFO
-                            
-                            # Also fix desktop shortcut if it exists
-                            $desktopPath = [Environment]::GetFolderPath("Desktop")
-                            $desktopShortcut = Join-Path $desktopPath "Loxone.lnk"
-                            
-                            if (Test-Path $desktopShortcut) {
-                                $shell2 = New-Object -ComObject WScript.Shell
-                                $desktop = $shell2.CreateShortcut($desktopShortcut)
-                                
-                                $desktop.TargetPath = $exePath
-                                $desktop.WorkingDirectory = Split-Path $exePath -Parent
-                                $desktop.IconLocation = "$exePath,0"
-                                $desktop.Description = "Loxone Smart Home App"
-                                $desktop.Save()
-                                
-                                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($desktop) | Out-Null
-                                [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell2) | Out-Null
-                                
-                                Write-Log -Message "($FunctionName) Also fixed desktop shortcut icon." -Level INFO
-                            }
-                        } else {
-                            Write-Log -Message "($FunctionName) Start Menu shortcut not found at: $shortcutPath" -Level WARN
-                        }
-                    } else {
-                        Write-Log -Message "($FunctionName) Loxone executable not found for icon fix." -Level WARN
-                    }
-                } catch {
-                    Write-Log -Message "($FunctionName) Error fixing shortcut icon: $($_.Exception.Message)" -Level WARN
-                    # Non-critical error, continue with the process
-                }
                 
-                # Restart app if it was running (original script lines 695-709)
-                if ($wasAppRunning -and -not [string]::IsNullOrWhiteSpace($newAppDetails.InstallLocation)) {
-                    Write-Log -Message  "($FunctionName) Loxone App was running before update. Attempting restart of '$($newAppDetails.InstallLocation)'..." -Level INFO
-                    # This restart logic might also need to consider SYSTEM vs User context if the main script isn't always user.
-                    # For simplicity, using Start-Process. Invoke-AsCurrentUser might be needed if script runs as SYSTEM.
-                    try {
-                        Start-Process -FilePath $newAppDetails.InstallLocation -WindowStyle Minimized -ErrorAction Stop
-                        Write-Log -Message "($FunctionName) Loxone App restart command issued." -Level INFO
-                    } catch {
-                         Write-Log -Message "($FunctionName) Failed to restart Loxone App: $($_.Exception.Message)" -Level ERROR
-Write-Log -Message "($FunctionName) INVOKE-CHECKMINISERVERVERSIONS: Logging before Update-PersistentToast call (MS Check Loop)." -Level DEBUG
-        Write-Log -Message "($FunctionName)   Global:PersistentToastInitialized = $($Global:PersistentToastInitialized)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentStepNumber = $($ScriptGlobalState.Value.currentStep)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalStepsForUI = $($ScriptGlobalState.Value.totalSteps)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.CurrentWeight = $($ScriptGlobalState.Value.CurrentWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   scriptGlobalState.TotalWeight = $($ScriptGlobalState.Value.TotalWeight)" -Level DEBUG
-        Write-Log -Message "($FunctionName)   toastParamsMSLoop.StepName = '$($toastParamsMSLoop.StepName)'" -Level DEBUG
-        # Note: DownloadFileName, DownloadNumber, TotalDownloads are not typically used in this specific toast
-        $statusTextForLogMSCheck = "Step $($ScriptGlobalState.Value.currentStep)/$($ScriptGlobalState.Value.totalSteps): $($toastParamsMSLoop.StepName)"
-        Write-Log -Message "($FunctionName)   Constructed StatusText (MS Check) = '$statusTextForLogMSCheck'" -Level DEBUG
-        $progressValueForLogMSCheck = if ($ScriptGlobalState.Value.TotalWeight -gt 0) { [Math]::Round(($ScriptGlobalState.Value.CurrentWeight / $ScriptGlobalState.Value.TotalWeight) * 100) } else { 0 }
-        Write-Log -Message "($FunctionName)   Calculated ProgressValue (MS Check percentage) = $progressValueForLogMSCheck %" -Level DEBUG
-                    }
+                # Optionally restart app if needed
+                if (-not [string]::IsNullOrWhiteSpace($newAppDetails.InstallLocation)) {
+                    Write-Log -Message "($FunctionName) App installation complete. Shortcuts should be fixed." -Level INFO
                 }
 
             } else {
@@ -1859,6 +2016,30 @@ Write-Log -Message "($FunctionName) INVOKE-UPDATEMINISERVERSINBULK: Logging befo
         # Skip certificate check by default unless EnforceSSLCertificate is specified
         $skipCert = -not $WorkflowContext.Params.EnforceSSLCertificate
         
+        # Extract IP from the MS entry for connectivity check
+        $msIP = $null
+        if ($msPlaceholderTarget.OriginalEntry -match '://([^:/@]+)') {
+            $msIP = $matches[1]
+        }
+        
+        # Check network connectivity first (handles VPN/routing delays)
+        if ($msIP) {
+            Write-Log -Message "($FunctionName) Checking network connectivity to $msIP before attempting connection..." -Level DEBUG
+            $isReachable = Test-MiniserverConnectivity -IPAddress $msIP -MaxWaitSeconds 60
+            if (-not $isReachable) {
+                Write-Log -Level WARN -Message "($FunctionName) Cannot reach Miniserver at $msIP - network path not available"
+                $msPlaceholderTarget.InitialVersion = "NetworkUnreachable"
+                $msPlaceholderTarget.Status = "NetworkUnreachable"
+                $msPlaceholderTarget.UpdateNeeded = $false  # Can't update if not reachable
+                $overallResult.ErrorCount++
+                # Set error flag when connectivity fails
+                if ($ScriptGlobalState) {
+                    $ScriptGlobalState.Value.ErrorOccurred = $true
+                }
+                continue
+            }
+        }
+        
         # First try original method
         $msVersionInfo = Get-MiniserverVersion -MSEntry $msPlaceholderTarget.OriginalEntry -SkipCertificateCheck:$skipCert -TimeoutSec 5 -ErrorAction SilentlyContinue
         
@@ -2007,7 +2188,18 @@ function Invoke-UpdateMiniserversInBulk {
     }
     Write-Log -Message "($FunctionName) Starting bulk Miniserver update process." -Level INFO
 
-    $miniserversThatNeedUpdate = $UpdateTargetsToUpdate | Where-Object {$_.Type -eq "Miniserver" -and $_.UpdateNeeded -eq $true -and $_.Status -ne "ErrorConnecting" -and $_.Status -ne "ErrorProcessingEntry"}
+    # Filter miniservers that need update, but log skipped ones
+    # Note: In parallel mode, MS PreCheck jobs were already collected in UpdateLoxone.ps1
+    $allMiniserversNeedingUpdate = $UpdateTargetsToUpdate | Where-Object {$_.Type -eq "Miniserver" -and $_.UpdateNeeded -eq $true}
+    $skippedMiniservers = $allMiniserversNeedingUpdate | Where-Object {$_.Status -eq "ErrorConnecting" -or $_.Status -eq "ErrorProcessingEntry"}
+
+    # Log all skipped miniservers with clear WARNING
+    foreach ($skippedMS in $skippedMiniservers) {
+        Write-Log -Message "⚠ MINISERVER ÜBERSPRUNGEN: $($skippedMS.Name) - Status: $($skippedMS.Status) - Grund: Netzwerk-Timeout/VPN nicht verfügbar" -Level WARN
+        Write-Log -Message "  → Miniserver $($skippedMS.Name) wird in diesem Lauf NICHT aktualisiert" -Level WARN
+    }
+
+    $miniserversThatNeedUpdate = $allMiniserversNeedingUpdate | Where-Object {$_.Status -ne "ErrorConnecting" -and $_.Status -ne "ErrorProcessingEntry"}
     $overallResult.TotalConsidered = $miniserversThatNeedUpdate.Count
 
     if ($miniserversThatNeedUpdate.Count -eq 0) {
@@ -2156,6 +2348,8 @@ function Initialize-UpdatePipelineData {
         TotalSteps        = 0
         TotalDownloads    = 0
         InitialCheckWeight = 0
+        MSPreCheckJobs    = @()
+        MSPreCheckJobsStarted = $false
     }
 
     try { # Main try for the entire function
@@ -2181,6 +2375,77 @@ function Initialize-UpdatePipelineData {
         }
         $pipelineData.UpdateTargetsInfo.Add($configTargetEntry) | Out-Null
         Write-Log -Message "($FunctionName) [UpdateTargets] Added Loxone Config: Name='$($configTargetEntry.Name)', Initial='$($configTargetEntry.InitialVersion)', Target='$($configTargetEntry.TargetVersion)', UpdateNeeded='$($configTargetEntry.UpdateNeeded)', Status='$($configTargetEntry.Status)'" -Level DEBUG
+
+        # Pre-flight validation: Check if Config URL filename version matches XML version
+        # This prevents triggering MS updates when XML is updated but URL still points to old file
+        # This is instant (no network request) and doesn't delay parallel MS updates
+        $skipAllUpdates = $false
+
+        if ($configTargetEntry.UpdateNeeded -and $configTargetEntry.DownloadUrl -and $configTargetEntry.TargetVersion) {
+            Write-Log -Message "($FunctionName) [Pre-Flight] Config update needed - validating URL filename version..." -Level INFO
+
+            try {
+                # Extract version from URL filename (e.g., LoxoneConfigSetup_16011022.zip -> 16.1.10.22)
+                $urlString = $configTargetEntry.DownloadUrl.ToString()
+                $filenameVersionMatch = $null
+
+                # Pattern: LoxoneConfigSetup_VVVVVVVV.zip where VVVVVVVV is version without dots/leading zeros
+                if ($urlString -match 'LoxoneConfigSetup_(\d+)\.zip') {
+                    $versionDigits = $matches[1]
+                    Write-Log -Message "($FunctionName) [Pre-Flight] Extracted version digits from filename: $versionDigits" -Level DEBUG
+
+                    # Parse version: 16011022 -> 16.1.10.22 (or 16.01.10.22, normalize by removing leading zeros)
+                    # Format: MMNNPPBB where MM=major, NN=minor, PP=patch, BB=build
+                    if ($versionDigits.Length -ge 8) {
+                        $major = [int]$versionDigits.Substring(0, 2)
+                        $minor = [int]$versionDigits.Substring(2, 2)
+                        $patch = [int]$versionDigits.Substring(4, 2)
+                        $build = [int]$versionDigits.Substring(6, 2)
+                        $filenameVersion = "$major.$minor.$patch.$build"
+                        Write-Log -Message "($FunctionName) [Pre-Flight] Parsed filename version: $filenameVersion" -Level DEBUG
+                    } else {
+                        Write-Log -Message "($FunctionName) [Pre-Flight] Version digits too short ($($versionDigits.Length)): $versionDigits" -Level WARN
+                    }
+                } else {
+                    Write-Log -Message "($FunctionName) [Pre-Flight] Could not extract version from URL: $urlString" -Level WARN
+                }
+
+                # Compare filename version with XML version
+                if ($filenameVersion) {
+                    $targetVersionStr = $configTargetEntry.TargetVersion.ToString()
+                    Write-Log -Message "($FunctionName) [Pre-Flight] Comparing versions - Filename: '$filenameVersion', XML: '$targetVersionStr'" -Level INFO
+
+                    if ($filenameVersion -ne $targetVersionStr) {
+                        Write-Log -Message "($FunctionName) [Pre-Flight] VERSION MISMATCH DETECTED!" -Level WARN
+                        Write-Log -Message "($FunctionName) [Pre-Flight] XML advertises version $targetVersionStr but URL filename is for version $filenameVersion" -Level WARN
+                        Write-Log -Message "($FunctionName) [Pre-Flight] This indicates XML was updated but URL still points to old file" -Level WARN
+                        Write-Log -Message "($FunctionName) [Pre-Flight] SKIPPING ALL UPDATES (Config and Miniserver) to prevent partial updates" -Level WARN
+
+                        # Mark Config as not needing update
+                        $configTargetEntry.UpdateNeeded = $false
+                        $configTargetEntry.Status = "VersionMismatch"
+
+                        # Set flag to skip MS updates too
+                        $skipAllUpdates = $true
+
+                        # Store validation details for reporting
+                        $pipelineData | Add-Member -NotePropertyName 'ValidationFailed' -NotePropertyValue $true -Force
+                        $pipelineData | Add-Member -NotePropertyName 'ValidationFailureReason' -NotePropertyValue "Config URL filename version ($filenameVersion) doesn't match XML version ($targetVersionStr)" -Force
+                        $pipelineData | Add-Member -NotePropertyName 'ValidationFilenameVersion' -NotePropertyValue $filenameVersion -Force
+                        $pipelineData | Add-Member -NotePropertyName 'ValidationXMLVersion' -NotePropertyValue $targetVersionStr -Force
+                    } else {
+                        Write-Log -Message "($FunctionName) [Pre-Flight] Version validation PASSED - filename version matches XML ($filenameVersion)" -Level INFO
+                    }
+                } else {
+                    Write-Log -Message "($FunctionName) [Pre-Flight] Could not parse filename version - proceeding without validation" -Level WARN
+                }
+            } catch {
+                Write-Log -Message "($FunctionName) [Pre-Flight] Error during filename validation: $($_.Exception.Message)" -Level ERROR
+                Write-Log -Message "($FunctionName) [Pre-Flight] Proceeding with caution - validation check failed but will attempt download" -Level WARN
+            }
+        } else {
+            Write-Log -Message "($FunctionName) [Pre-Flight] Skipping filename validation (UpdateNeeded: $($configTargetEntry.UpdateNeeded), HasUrl: $($null -ne $configTargetEntry.DownloadUrl))" -Level DEBUG
+        }
 
         # App Target
         Write-Log -Message "($FunctionName) [AppTargetCheck_DEBUG] BEFORE if condition for App Target." -Level DEBUG
@@ -2228,16 +2493,261 @@ function Initialize-UpdatePipelineData {
         # Miniserver Targets (with immediate version check)
         Write-Log -Message "($FunctionName) [MSPreCheck_DEBUG_ENTRY] Entering Miniserver Targets section." -Level DEBUG
         Write-Log -Message "($FunctionName) [MS PreCheck] Initializing and checking Miniserver targets..." -Level INFO
-        if (Test-Path $WorkflowContext.MSListPath) {
+
+        # Check if we should skip MS updates due to Config validation failure
+        if ($skipAllUpdates) {
+            Write-Log -Message "($FunctionName) [MS PreCheck] SKIPPING Miniserver updates due to Config file validation failure" -Level WARN
+            Write-Log -Message "($FunctionName) [MS PreCheck] Reason: Config file at URL does not match expected size from XML" -Level WARN
+            Write-Log -Message "($FunctionName) [MS PreCheck] This prevents partial updates where MS firmware updates but Config cannot install" -Level WARN
+            # Don't add any MS targets - just skip the entire section
+        }
+        elseif (Test-Path $WorkflowContext.MSListPath) {
             try { # Inner try for reading MS list and processing each MS
                 $MSEntriesPreCheck = Get-Content $WorkflowContext.MSListPath -ErrorAction Stop | Where-Object { $_ -match '\S' -and $_.TrimStart()[0] -ne '#' }
+
+                # Check if we should run MS PreChecks in parallel (when Parallel mode is enabled)
+                $runMSPreCheckParallel = $WorkflowContext.Params.Parallel -eq $true
+
+                if ($runMSPreCheckParallel) {
+                    Write-Log -Message "($FunctionName) [MS PreCheck] Running MS PreChecks in PARALLEL mode (non-blocking)" -Level INFO
+                    Write-Log -Message "($FunctionName) [MS PreCheck] Config/App downloads will start immediately while MS checks continue in background" -Level INFO
+
+                    # Start MS PreChecks as ThreadJobs (parallel execution)
+                    $msPreCheckJobs = @()
+
+                    foreach ($msEntry in $MSEntriesPreCheck) {
+                        $tempIP = ($msEntry -split '@')[-1] -split ':' | Select-Object -First 1
+                        $msIP = ($tempIP -split ',')[0]
+
+                        # Parse entry to get cached version
+                        $msInfo = ConvertFrom-MiniserverListEntry -Line $msEntry
+                        $cachedVersion = $msInfo.CachedVersion
+                        $targetVersion = $Prerequisites.LatestConfigVersionNormalized
+
+                        # Check if we can skip PreCheck based on cache
+                        if ($cachedVersion -and $cachedVersion -eq $targetVersion) {
+                            Write-Log -Message "($FunctionName) [MS PreCheck] SKIP PreCheck for $msIP - Cached version $cachedVersion matches target $targetVersion" -Level INFO
+
+                            # Add MS immediately to UpdateTargetsInfo with "UpToDate" status (no job needed)
+                            $msTargetEntry = [PSCustomObject]@{
+                                Name                = "MS $msIP"
+                                Type                = "Miniserver"
+                                InitialVersion      = $cachedVersion
+                                TargetVersion       = $targetVersion
+                                UpdateNeeded        = $false  # Cache confirms no update needed
+                                Status              = "UpToDate"
+                                UpdatePerformed     = $false
+                                VersionAfterUpdate  = $null
+                                OriginalEntry       = $msEntry
+                                Channel             = $WorkflowContext.Params.Channel
+                                Error               = $null
+                                PreCheckJobId       = $null  # No job needed
+                            }
+                            $pipelineData.UpdateTargetsInfo.Add($msTargetEntry) | Out-Null
+                            Write-Log -Message "($FunctionName) [MS PreCheck] Added MS '$msIP' with cached version $cachedVersion (UpToDate, no PreCheck needed)" -Level INFO
+                            continue  # Skip job creation for this MS
+                        }
+
+                        Write-Log -Message "($FunctionName) [MS PreCheck] Starting background job for MS: $msIP (cached: $cachedVersion, target: $targetVersion)" -Level DEBUG
+
+                        # Create scriptblock for the job (will run in parallel)
+                        $msPreCheckScript = {
+                            param($MSEntry, $SkipCert, $LogFile)
+
+                            # Import required modules in job context
+                            $moduleBase = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+                            Import-Module (Join-Path $moduleBase "LoxoneUtils\LoxoneUtils.psd1") -Force -ErrorAction SilentlyContinue
+
+                            $Global:LogFile = $LogFile
+
+                            try {
+                                # Parse entry
+                                $msInfo = ConvertFrom-MiniserverListEntry -Line $MSEntry
+                                $msIP = $msInfo.Host
+
+                                # Check connectivity (60s timeout for VPN)
+                                $isReachable = Test-MiniserverConnectivity -IPAddress $msIP -MaxWaitSeconds 60
+
+                                if (-not $isReachable) {
+                                    return @{
+                                        IP = $msIP
+                                        Version = $null
+                                        Error = "NetworkUnreachable"
+                                        Success = $false
+                                    }
+                                }
+
+                                # Get version
+                                $versionInfo = Get-MiniserverVersion -MSEntry $MSEntry -SkipCertificateCheck:$SkipCert -TimeoutSec 10 -ErrorAction SilentlyContinue
+
+                                return @{
+                                    IP = $msIP
+                                    Version = $versionInfo.Version
+                                    Generation = $versionInfo.Generation
+                                    Error = $versionInfo.Error
+                                    Success = (-not $versionInfo.Error)
+                                    OriginalEntry = $MSEntry
+                                }
+                            }
+                            catch {
+                                return @{
+                                    IP = $msIP
+                                    Version = $null
+                                    Error = "Exception: $($_.Exception.Message)"
+                                    Success = $false
+                                }
+                            }
+                        }
+
+                        # Start the job
+                        $job = Start-ThreadJob -ScriptBlock $msPreCheckScript -ArgumentList $msEntry, (-not $WorkflowContext.Params.EnforceSSLCertificate), $Global:LogFile -Name "MSPreCheck_$msIP"
+                        $msPreCheckJobs += $job
+
+                        # Add MS immediately to UpdateTargetsInfo with "PreCheck" status (will be shown in progress bar)
+                        $msTargetEntry = [PSCustomObject]@{
+                            Name                = "MS $msIP"
+                            Type                = "Miniserver"
+                            InitialVersion      = "Checking..."
+                            TargetVersion       = $Prerequisites.LatestConfigVersionNormalized
+                            UpdateNeeded        = $true  # Assume true for now, will be updated after PreCheck
+                            Status              = "PreCheck"
+                            UpdatePerformed     = $false
+                            VersionAfterUpdate  = $null
+                            OriginalEntry       = $msEntry
+                            Channel             = $WorkflowContext.Params.Channel
+                            Error               = $null
+                            PreCheckJobId       = $job.Id  # Store job ID for later matching
+                        }
+                        $pipelineData.UpdateTargetsInfo.Add($msTargetEntry) | Out-Null
+                        Write-Log -Message "($FunctionName) [MS PreCheck] Added MS '$msIP' to progress bar with 'PreCheck' status (Job ID: $($job.Id))" -Level INFO
+                    }
+
+                    # Store jobs for later collection
+                    $pipelineData.MSPreCheckJobs = $msPreCheckJobs
+                    $pipelineData.MSPreCheckJobsStarted = $true
+
+                    Write-Log -Message "($FunctionName) [MS PreCheck] Started $($msPreCheckJobs.Count) parallel MS PreCheck job(s)" -Level INFO
+                    Write-Log -Message "($FunctionName) [MS PreCheck] Function will return immediately - jobs run in background" -Level INFO
+                }
+                else {
+                    Write-Log -Message "($FunctionName) [MS PreCheck] Running MS PreChecks SEQUENTIALLY (blocking mode)" -Level DEBUG
+                }
+
+                # Only run sequential loop if NOT in parallel mode
+                if (-not $runMSPreCheckParallel) {
                 foreach ($msEntryPreCheck in $MSEntriesPreCheck) {
-                    $msIPForName = ($msEntryPreCheck -split '@')[-1] -split ':' | Select-Object -First 1
+                    # Extract IP from entry, excluding port and cached data (comma-separated values)
+                    $tempIP = ($msEntryPreCheck -split '@')[-1] -split ':' | Select-Object -First 1
+                    $msIPForName = ($tempIP -split ',')[0]  # Remove cached data if present
                     Write-Log -Level DEBUG -Message ("($FunctionName) [MS PreCheck] Processing MS Entry: {0}" -f ($msEntryPreCheck -replace "([Pp]assword=)[^;]+", '$1********'))
                     
-                    # Skip certificate check by default unless EnforceSSLCertificate is specified
-                    $skipCert = -not $WorkflowContext.Params.EnforceSSLCertificate
-                    $msVersionInfo = Get-MiniserverVersion -MSEntry $msEntryPreCheck -SkipCertificateCheck:$skipCert -TimeoutSec 10 -ErrorAction SilentlyContinue
+                    # Parse the entry to check for cached data
+                    $msEntry = ConvertFrom-MiniserverListEntry -Line $msEntryPreCheck
+                    $useCachedVersion = $false
+                    $cachedVersion = $null
+                    
+                    # Get target MS version from Prerequisites (already normalized and validated)
+                    $targetMSVersion = $Prerequisites.LatestConfigVersionNormalized
+                    if ($targetMSVersion) {
+                        Write-Log -Message "($FunctionName) [MS PreCheck] Target MS version from Prerequisites: $targetMSVersion" -Level DEBUG
+                    } else {
+                        # Fallback: try to get from Config target if Prerequisites doesn't have it
+                        $configTarget = $UpdateTargetsToUpdate | Where-Object {$_.Type -eq "Config"} | Select-Object -First 1
+                        if ($configTarget -and $configTarget.TargetVersion) {
+                            $targetMSVersion = $configTarget.TargetVersion
+                            Write-Log -Message "($FunctionName) [MS PreCheck] Target MS version from Config target: $targetMSVersion" -Level DEBUG
+                        } else {
+                            Write-Log -Message "($FunctionName) [MS PreCheck] Could not determine target MS version" -Level WARN
+                        }
+                    }
+                    
+                    # Check if we have valid cache
+                    if ($msEntry -and $msEntry.HasCache) {
+                        Write-Log -Message "($FunctionName) [MS PreCheck] Found cached data for $msIPForName - Version: $($msEntry.CachedVersion), Gen: $($msEntry.Generation)" -Level DEBUG
+                        
+                        # If we have a target version and cached version doesn't match, force refresh
+                        # This handles interrupted updates where MS was triggered but cache wasn't updated
+                        # ALWAYS verify actual MS version if cached version is older than target
+                        # This ensures we don't try to update an already-updated MS based on stale cache
+                        if ($targetMSVersion -and $msEntry.CachedVersion) {
+                            $cachedVer = [version]$msEntry.CachedVersion
+                            $targetVer = [version]$targetMSVersion
+                            
+                            if ($cachedVer -lt $targetVer) {
+                                Write-Log -Message "($FunctionName) [MS PreCheck] Cached version ($($msEntry.CachedVersion)) is older than target ($targetMSVersion). MUST verify actual MS version." -Level INFO
+                                $useCachedVersion = $false
+                            }
+                            elseif ($cachedVer -eq $targetVer) {
+                                # Cache matches target - MS is already updated, trust cache
+                                Write-Log -Message "($FunctionName) [MS PreCheck] Cached version ($($msEntry.CachedVersion)) matches target ($targetMSVersion). Using cache." -Level INFO
+                                $useCachedVersion = $true
+                                $cachedVersion = $msEntry.CachedVersion
+                            }
+                            else {
+                                # Cached version is newer than target (shouldn't happen normally)
+                                Write-Log -Message "($FunctionName) [MS PreCheck] Cached version ($($msEntry.CachedVersion)) is newer than target ($targetMSVersion). Using cache." -Level INFO
+                                $useCachedVersion = $true
+                                $cachedVersion = $msEntry.CachedVersion
+                            }
+                        }
+                        # If no target version, validate cache age (7 day default)
+                        elseif (Test-MiniserverCacheValid -MSEntry $msEntry -TargetVersion "" -MaxCacheAgeHours 168) {
+                            Write-Log -Message "($FunctionName) [MS PreCheck] Using CACHED version for $msIPForName`: $($msEntry.CachedVersion) (cache valid, no target version)" -Level INFO
+                            $useCachedVersion = $true
+                            $cachedVersion = $msEntry.CachedVersion
+                        } else {
+                            Write-Log -Message "($FunctionName) [MS PreCheck] Cache expired for $msIPForName, will check actual version" -Level DEBUG
+                        }
+                    } else {
+                        Write-Log -Message "($FunctionName) [MS PreCheck] No cache data for $msIPForName, will check actual version" -Level DEBUG
+                    }
+                    
+                    # Only do network check if cache is invalid/missing
+                    $msVersionInfo = $null
+                    if (-not $useCachedVersion) {
+                        # Check network connectivity first
+                        $msIPOnly = $msIPForName
+                        Write-Log -Message "($FunctionName) [MS PreCheck] Testing connectivity to $msIPOnly..." -Level DEBUG
+                        $isReachable = Test-MiniserverConnectivity -IPAddress $msIPOnly -MaxWaitSeconds 60
+                        
+                        if (-not $isReachable) {
+                            Write-Log -Level WARN -Message "($FunctionName) [MS PreCheck] Cannot reach Miniserver at $msIPOnly - network path not available (VPN/routing issue?)"
+                            # Set error flag when connectivity fails
+                            $script:ErrorOccurred = $true
+                            continue  # Skip this miniserver
+                        }
+                        
+                        # Skip certificate check by default unless EnforceSSLCertificate is specified
+                        $skipCert = -not $WorkflowContext.Params.EnforceSSLCertificate
+                        
+                        # First test connectivity with pings (60 second timeout with 1 ping per second for VPN scenarios)
+                        Write-Log -Message "($FunctionName) [MS PreCheck] Testing connectivity to '$msIPForName' with ping retry (60s timeout for VPN)..." -Level INFO
+                        $pingConnected = $false
+                        if (Get-Command Test-MiniserverConnectivityWithRetry -ErrorAction SilentlyContinue) {
+                            $pingConnected = Test-MiniserverConnectivityWithRetry -InputAddress $msIPForName -RetryCount 60
+                        } else {
+                            # Fallback to simple ping test
+                            $pingConnected = Test-Connection -ComputerName $msIPForName -Count 1 -Quiet -ErrorAction SilentlyContinue
+                        }
+                        
+                        if (-not $pingConnected) {
+                            Write-Log -Message "($FunctionName) [MS PreCheck] Miniserver '$msIPForName' is not responding to pings after 60 seconds (VPN timeout). Marking as unreachable." -Level WARN
+                            $msVersionInfo = @{
+                                Version = $null
+                                Error = "NetworkUnreachable: Miniserver did not respond to pings after 60 second timeout (VPN/routing)"
+                            }
+                        } else {
+                            Write-Log -Message "($FunctionName) [MS PreCheck] Miniserver '$msIPForName' is reachable via ping. Checking version..." -Level INFO
+                            $msVersionInfo = Get-MiniserverVersion -MSEntry $msEntryPreCheck -SkipCertificateCheck:$skipCert -TimeoutSec 10 -ErrorAction SilentlyContinue
+                        }
+                    } else {
+                        # Use cached version - create a fake response object
+                        $msVersionInfo = @{
+                            Version = $cachedVersion
+                            Generation = $msEntry.Generation
+                            Error = $null
+                        }
+                    }
                     
                     # Log the error but do NOT fall back to HTTP for security reasons
                     if ($msVersionInfo.Error -and $msEntryPreCheck -match '^https://') {
@@ -2268,6 +2778,13 @@ function Initialize-UpdatePipelineData {
                             
                             $normalizedCurrentMSVersion = Convert-VersionString $currentMSVersion
                             Write-Log -Message "($FunctionName) [MS PreCheck] MS '$msIPForName' current version: $currentMSVersion (Normalized: $normalizedCurrentMSVersion)" -Level INFO
+                            
+                            # Update cache with the current version if we fetched it from network
+                            if (-not $useCachedVersion) {
+                                $generation = if ($msVersionInfo.Generation) { $msVersionInfo.Generation } else { $null }
+                                Update-MiniserverListCache -FilePath $WorkflowContext.MSListPath -IP $msIPForName -Version $currentMSVersion -Generation $generation
+                                Write-Log -Message "($FunctionName) [MS PreCheck] Updated cache for $msIPForName`: Version=$currentMSVersion, Gen=$generation" -Level DEBUG
+                            }
 
                             if ($Prerequisites.LatestConfigVersionNormalized) {
                                 if ($normalizedCurrentMSVersion -ne $Prerequisites.LatestConfigVersionNormalized) {
@@ -2337,7 +2854,10 @@ function Initialize-UpdatePipelineData {
                        Write-Log -Message "($FunctionName) [MS PreCheck] msTargetEntry was null for '$msIPForName', skipping Add to UpdateTargetsInfo." -Level WARN
                    }
                } # End foreach $msEntryPreCheck
+                } # End if (-not $runMSPreCheckParallel) - close sequential mode block
            } catch { # Catch for reading MS list and processing each MS
+                Write-Log -Message "($FunctionName) [MS PreCheck] EXCEPTION while processing MS list: $($_.Exception.Message)" -Level ERROR
+                Write-Log -Message "($FunctionName) [MS PreCheck] Stack trace: $($_.ScriptStackTrace)" -Level ERROR
             }
         } else {
             Write-Log -Message "($FunctionName) [UpdateTargets] MS list '$($WorkflowContext.MSListPath)' not found. No Miniserver targets added." -Level INFO

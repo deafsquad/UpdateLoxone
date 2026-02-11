@@ -13,6 +13,7 @@
 !manifests/d/deafsquad/UpdateLoxone/ # Be very specific
 # !UpdateLoxone-v*.zip # No longer needed as ZIPs are in releases_archive and not committed
 releases_archive/
+LoxoneUtils/archived_modules/
 
 # Keep README.md and CHANGELOG.md but ignore all other .md files
 !README.md

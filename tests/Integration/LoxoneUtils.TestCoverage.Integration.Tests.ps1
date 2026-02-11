@@ -18,8 +18,8 @@ Describe "Get-TestCoverage Integration Tests" -Tag 'Integration', 'TestCoverage'
     
     It "Analyzes functions and calculates coverage for real module" {
         # Run actual test coverage analysis on a subset of modules
-        $coverage = Get-TestCoverage -TestResultsPath $script:TestResultsPath
-        
+        $coverage = Get-TestCoverage -TestResultsPath $script:TestResultsPath 6>$null 3>$null
+
         # Verify we got a coverage result
         $coverage | Should -Not -BeNullOrEmpty
         $coverage | Should -BeOfType [hashtable]
@@ -39,7 +39,7 @@ Describe "Get-TestCoverage Integration Tests" -Tag 'Integration', 'TestCoverage'
     It "Provides verbose output when enabled" {
         # Capture verbose output
         $verboseOutput = @()
-        $allOutput = Get-TestCoverage -Verbose -TestResultsPath $script:TestResultsPath -ErrorAction SilentlyContinue 4>&1
+        $allOutput = Get-TestCoverage -Verbose -TestResultsPath $script:TestResultsPath -ErrorAction SilentlyContinue 4>&1 6>$null 3>$null
         
         # Separate verbose output from regular output
         $coverage = $null
@@ -58,23 +58,23 @@ Describe "Get-TestCoverage Integration Tests" -Tag 'Integration', 'TestCoverage'
         $verboseOutput -join "`n" | Should -Match "Analyzing module"
     }
     
-    It "Generates coverage report when requested" {
-        # Set up output directory - must include the filename since OutputPath expects a full path
+    It "Generates coverage report via New-TestCoverageReport" {
+        # Set up output directory
         $outputDir = Join-Path $TestDrive "CoverageReports"
         New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-        $outputPath = Join-Path $outputDir "coverage.md"
-        
-        # Generate coverage with report
-        $coverage = Get-TestCoverage -GenerateReport -OutputPath $outputPath -TestResultsPath $script:TestResultsPath
-        
-        # Check that report file was created
-        Test-Path $outputPath | Should -Be $true
-        
+
+        # Generate coverage report (suppress console output to avoid duplicate coverage logging in test runs)
+        & { New-TestCoverageReport -OutputDirectory $outputDir -TestResultsPath $script:TestResultsPath } *>$null
+
+        # Check that a report file was created in the coverage subdirectory
+        $coverageDir = Join-Path $outputDir "coverage"
+        $reportFiles = Get-ChildItem -Path $coverageDir -Filter "coverage_*.md" -ErrorAction SilentlyContinue
+        $reportFiles | Should -Not -BeNullOrEmpty
+
         # Verify report content
-        $reportContent = Get-Content -Path $outputPath -Raw
-        $reportContent | Should -Match "Test Coverage Report"
-        $reportContent | Should -Match "Total Functions"
+        $reportContent = Get-Content -Path $reportFiles[0].FullName -Raw
         $reportContent | Should -Match "Coverage"
+        $reportContent | Should -Match "Function"
     }
 }
 

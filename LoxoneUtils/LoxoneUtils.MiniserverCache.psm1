@@ -24,6 +24,8 @@ function ConvertFrom-MiniserverListEntry {
         LastChecked = $null
         HasCache = $false
         IP = $null
+        Generation = $null
+        GenerationLastChecked = $null
     }
     
     # Extract IP from URL
@@ -59,6 +61,32 @@ function ConvertFrom-MiniserverListEntry {
         }
     }
     
+    # Parse optional generation info (format: generation,genTimestamp)
+    if ($parts.Length -ge 4 -and -not [string]::IsNullOrWhiteSpace($parts[3])) {
+        $result.Generation = $parts[3].Trim()
+    }
+    
+    # Parse optional generation check timestamp
+    if ($parts.Length -ge 5 -and -not [string]::IsNullOrWhiteSpace($parts[4])) {
+        $genTimestampStr = $parts[4].Trim()
+        try {
+            if ($genTimestampStr -match '^(\d{8})_(\d{6})$') {
+                $dateStr = $matches[1]
+                $timeStr = $matches[2]
+                $year = [int]$dateStr.Substring(0, 4)
+                $month = [int]$dateStr.Substring(4, 2)
+                $day = [int]$dateStr.Substring(6, 2)
+                $hour = [int]$timeStr.Substring(0, 2)
+                $minute = [int]$timeStr.Substring(2, 2)
+                $second = [int]$timeStr.Substring(4, 2)
+                
+                $result.GenerationLastChecked = Get-Date -Year $year -Month $month -Day $day -Hour $hour -Minute $minute -Second $second
+            }
+        } catch {
+            Write-Warning "Failed to parse generation timestamp '$genTimestampStr' for MS $($result.IP): $($_.Exception.Message)"
+        }
+    }
+    
     return $result
 }
 
@@ -68,26 +96,24 @@ function Test-MiniserverCacheValid {
         [Parameter(Mandatory=$true)]
         $MSEntry,
         
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory=$false)]
         [AllowEmptyString()]
-        [string]$TargetVersion,
+        [string]$TargetVersion = "",
         
         [Parameter(Mandatory=$false)]
         [int]$MaxCacheAgeHours = 24
     )
     
-    # No target version provided
-    if ([string]::IsNullOrWhiteSpace($TargetVersion)) {
-        return $false
-    }
+    # If no target version provided, we're just checking cache age, not version match
+    $checkVersionMatch = -not [string]::IsNullOrWhiteSpace($TargetVersion)
     
     # No cache available
     if (-not $MSEntry.HasCache -or -not $MSEntry.CachedVersion) {
         return $false
     }
     
-    # Version mismatch
-    if ($MSEntry.CachedVersion -ne $TargetVersion) {
+    # Check version match only if target version was provided
+    if ($checkVersionMatch -and $MSEntry.CachedVersion -ne $TargetVersion) {
         return $false
     }
     
@@ -135,6 +161,9 @@ function Update-MiniserverListCache {
         [string]$Version,
         
         [Parameter(Mandatory=$false)]
+        [string]$Generation = $null,
+        
+        [Parameter(Mandatory=$false)]
         [datetime]$Timestamp = (Get-Date)
     )
     
@@ -161,8 +190,21 @@ function Update-MiniserverListCache {
                 $parts = $line.Split(',')
                 $url = $parts[0].Trim()
                 
-                # Update with new version and timestamp
-                $lines[$i] = "$url,$Version,$timestampStr"
+                # Use provided Generation or preserve existing
+                $existingGeneration = if ($parts.Length -gt 3) { $parts[3] } else { $null }
+                $generationToUse = if ($Generation) { $Generation } elseif ($existingGeneration) { $existingGeneration } else { $null }
+                
+                # Build updated line with all fields
+                if ($generationToUse) {
+                    # Include generation field (URL, Version, Timestamp, Generation)
+                    $lines[$i] = "$url,$Version,$timestampStr,$generationToUse"
+                    Write-Log -Message "[CACHE] Updated MS $IP`: Version=$Version, Gen=$generationToUse, Time=$timestampStr" -Level DEBUG
+                } else {
+                    # No generation field (URL, Version, Timestamp)
+                    $lines[$i] = "$url,$Version,$timestampStr"
+                    Write-Log -Message "[CACHE] Updated MS $IP`: Version=$Version, Time=$timestampStr (no generation)" -Level DEBUG
+                }
+                
                 $updated = $true
                 Write-Log -Message "Updated cache for MS $IP`: $Version ($timestampStr)" -Level DEBUG
                 break
@@ -192,15 +234,26 @@ function Get-MiniserverListWithCache {
         return @()
     }
     
+    Write-Log -Message "[CACHE] Reading miniserver list with cache from: $FilePath" -Level DEBUG
+    
     $entries = @()
     $lines = Get-Content $FilePath
+    $cacheHits = 0
+    $totalEntries = 0
     
     foreach ($line in $lines) {
         $entry = ConvertFrom-MiniserverListEntry -Line $line
         if ($entry) {
+            $totalEntries++
+            if ($entry.CachedVersion -and $entry.CacheTimestamp) {
+                $cacheHits++
+                Write-Log -Message "[CACHE] Found cached entry for $($entry.IP): Version=$($entry.CachedVersion), Gen=$($entry.Generation), Timestamp=$($entry.CacheTimestamp)" -Level DEBUG
+            }
             $entries += $entry
         }
     }
+    
+    Write-Log -Message "[CACHE] Loaded $totalEntries entries, $cacheHits with cache data" -Level INFO
     
     return $entries
 }

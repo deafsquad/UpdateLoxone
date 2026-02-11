@@ -39,6 +39,7 @@ function Get-LoxoneUpdateData {
         ConfigExpectedCRC       = $null
         AppLatestVersionRaw     = $null
         AppLatestVersion        = $null
+        AppLatestVersionWithBuild = $null  # For display with build number
         AppInstallerUrl         = $null
         AppExpectedCRC          = $null
         AppExpectedSize         = 0L
@@ -113,23 +114,41 @@ function Get-LoxoneUpdateData {
                     $allChannelNodes = $loxWindowsBaseNode.SelectNodes("*") # Select Test, Beta, Release, Internal, InternalV2 etc.
                     $latestNode = $null
                     $latestParsedVersion = [Version]"0.0.0.0"
+                    $latestBuildNumber = 0
 
                     foreach ($channelNode in $allChannelNodes) {
                         $channelName = $channelNode.LocalName # Test, Beta, Release...
                         $rawVersion = $channelNode.Version
                         $parsedVersion = $null
                         $versionToConvert = $null
-                        if ($rawVersion -match '\(([\d.]+)\)') { $versionToConvert = $matches[1] }
+                        $currentBuildNumber = 0
+                        # Always extract the main version BEFORE the parentheses
+                        # Pattern 1: Version with build number in parentheses (e.g., "16.3.0 (14988)")
+                        if ($rawVersion -match '^([\d.]+)\s*\((\d+)\)$') {
+                            $versionToConvert = $matches[1]
+                            $currentBuildNumber = [int]$matches[2]
+                        }
+                        # Pattern 2: Version with date in parentheses (e.g., "11.2.3 (2020.12.22)")
+                        elseif ($rawVersion -match '^([\d.]+)\s*\([^)]+\)') {
+                            $versionToConvert = $matches[1]
+                        }
+                        # Pattern 3: Simple version without parentheses
+                        elseif ($rawVersion -match '^([\d.]+)$') {
+                            $versionToConvert = $matches[1]
+                        }
 
                         if ($versionToConvert) {
                             try {
                                 $parsedVersion = Convert-VersionString $versionToConvert
-                                Write-Log -Message "[App] Parsed version '$parsedVersion' from channel '$channelName' (Raw: '$rawVersion')." -Level DEBUG
-                                if ([Version]$parsedVersion -gt $latestParsedVersion) {
+                                Write-Log -Message "[App] Parsed version '$parsedVersion' (Build: $currentBuildNumber) from channel '$channelName' (Raw: '$rawVersion')." -Level DEBUG
+                                $isNewer = ([Version]$parsedVersion -gt $latestParsedVersion) -or
+                                           (([Version]$parsedVersion -eq $latestParsedVersion) -and ($currentBuildNumber -gt $latestBuildNumber))
+                                if ($isNewer) {
                                     $latestParsedVersion = [Version]$parsedVersion
+                                    $latestBuildNumber = $currentBuildNumber
                                     $latestNode = $channelNode
-                                    $result.SelectedAppChannelName = $channelName # Update selected channel name to the actual latest
-                                    Write-Log -Message "[App] Found newer latest version: '$parsedVersion' in channel '$channelName'." -Level DEBUG
+                                    $result.SelectedAppChannelName = $channelName
+                                    Write-Log -Message "[App] Found newer latest version: '$parsedVersion' (Build: $currentBuildNumber) in channel '$channelName'." -Level DEBUG
                                 }
                             } catch {
                                 Write-Log -Message "[App] Error converting version '$versionToConvert' from channel '$channelName': $($_.Exception.Message). Skipping channel." -Level WARN
@@ -182,9 +201,36 @@ function Get-LoxoneUpdateData {
                     } else {
                         $versionToConvert = $null
                         Write-Log -Message "[App] Raw version string from XML (Channel: $($result.SelectedAppChannelName)): '$($result.AppLatestVersionRaw)'" -Level DEBUG
-                        if ($result.AppLatestVersionRaw -match '\(([\d.]+)\)') {
+
+                        # Match either build number format or date format
+                        # Both formats have the main version BEFORE the parentheses
+
+                        # Pattern 1: Version with build number in parentheses (e.g., "16.1.3 (14422)")
+                        if ($result.AppLatestVersionRaw -match '^([\d.]+)\s*\((\d+)\)$') {
+                            # Build number format - use build number for comparison
+                            $mainVersion = $matches[1]       # Main version (16.1.3)
+                            $buildNumber = $matches[2]       # Build number (14422)
+                            # Use build number as version (1.0.0.buildnumber format for comparison)
+                            $versionToConvert = "1.0.0.$buildNumber"
+                            Write-Log -Message "[App] Build number format - Main: '$mainVersion', Build: '$buildNumber', Compare as: '$versionToConvert' (Channel: $($result.SelectedAppChannelName))" -Level DEBUG
+                            # Store display version with build number
+                            $result.AppLatestVersionWithBuild = "$mainVersion (Build $buildNumber)"
+                        }
+                        # Pattern 2: Version with date in parentheses (e.g., "16.1.2 (2025.11.09)")
+                        elseif ($result.AppLatestVersionRaw -match '^([\d.]+)\s*\((\d{4}\.[\d.]+)\)') {
+                            # Date format - can't use build comparison, use main version
+                            $versionToConvert = $matches[1]  # Main version (16.1.2)
+                            $buildDate = $matches[2]         # Build date (2025.11.09)
+                            Write-Log -Message "[App] Date format - Version: '$versionToConvert', Date: '$buildDate' (Channel: $($result.SelectedAppChannelName))" -Level DEBUG
+                            # Store display version with date
+                            $result.AppLatestVersionWithBuild = "$versionToConvert ($buildDate)"
+                            # Note: Date-based channels will use main version comparison, not build numbers
+                        }
+                        # Pattern 3: Simple version without parentheses
+                        elseif ($result.AppLatestVersionRaw -match '^([\d.]+)$') {
                             $versionToConvert = $matches[1]
-                            Write-Log -Message "[App] Extracted date-based version from XML (Channel: $($result.SelectedAppChannelName)): '$versionToConvert'" -Level DEBUG
+                            Write-Log -Message "[App] Simple version format: '$versionToConvert' (Channel: $($result.SelectedAppChannelName))" -Level DEBUG
+                            $result.AppLatestVersionWithBuild = $versionToConvert
                         } else {
                             Write-Log -Message "[App] Could not extract numerical version pattern from raw string '$($result.AppLatestVersionRaw)' (Channel: $($result.SelectedAppChannelName)). Cannot determine latest app version." -Level WARN
                             $result.AppLatestVersionRaw = $null
@@ -271,7 +317,9 @@ function Test-UpdateNeeded {
         [Parameter(Mandatory = $false)]
         [switch]$DebugMode
     )
-    Write-Log -Message "[DEPRECATED] Test-UpdateNeeded - Logic moved to UpdateLoxone.ps1. Returning empty list." -Level WARN
+    if (-not $env:PESTER_TEST_RUN -and -not $env:LOXONE_TEST_MODE) {
+        Write-Log -Message "[DEPRECATED] Test-UpdateNeeded - Logic moved to UpdateLoxone.ps1. Returning empty list." -Level WARN
+    }
     return [System.Collections.Generic.List[PSCustomObject]]::new()
 }
 
@@ -287,7 +335,9 @@ function Test-LoxoneConfigComponent {
         [Parameter(Mandatory = $false)]
         [switch]$DebugMode
     )
-    Write-Log -Message "[DEPRECATED] Test-LoxoneConfigComponent - Logic moved to Initialize-UpdatePipelineData. Returning null." -Level WARN
+    if (-not $env:PESTER_TEST_RUN -and -not $env:LOXONE_TEST_MODE) {
+        Write-Log -Message "[DEPRECATED] Test-LoxoneConfigComponent - Logic moved to Initialize-UpdatePipelineData. Returning null." -Level WARN
+    }
     return $null
 }
 
@@ -307,7 +357,9 @@ function Test-LoxoneAppComponent {
         [Parameter(Mandatory = $false)]
         [switch]$DebugMode
     )
-    Write-Log -Message "[DEPRECATED] Test-LoxoneAppComponent - Logic moved to Initialize-UpdatePipelineData. Returning null." -Level WARN
+    if (-not $env:PESTER_TEST_RUN -and -not $env:LOXONE_TEST_MODE) {
+        Write-Log -Message "[DEPRECATED] Test-LoxoneAppComponent - Logic moved to Initialize-UpdatePipelineData. Returning null." -Level WARN
+    }
     return $null
 }
 
@@ -335,7 +387,9 @@ function New-LoxoneComponentStatusObject {
         [Parameter(Mandatory = $false)]
         [PSCustomObject]$AppData = $null
     )
-    Write-Log -Message "[DEPRECATED] New-LoxoneComponentStatusObject - Logic moved to Initialize-UpdatePipelineData. This function now returns objects for compatibility." -Level WARN
+    if (-not $env:PESTER_TEST_RUN -and -not $env:LOXONE_TEST_MODE) {
+        Write-Log -Message "[DEPRECATED] New-LoxoneComponentStatusObject - Logic moved to Initialize-UpdatePipelineData. This function now returns objects for compatibility." -Level WARN
+    }
     # Original function creates object but was missing return statement
     # Fixed to return the object for backward compatibility
     $statusObject = [PSCustomObject]@{
@@ -371,7 +425,9 @@ function Get-UpdateStatusFromComparison {
         [Parameter(Mandatory = $false)]
         $TargetVersionString
     )
-    Write-Log -Message "[DEPRECATED] Get-UpdateStatusFromComparison - Helper function no longer used." -Level DEBUG
+    if (-not $env:PESTER_TEST_RUN -and -not $env:LOXONE_TEST_MODE) {
+        Write-Log -Message "[DEPRECATED] Get-UpdateStatusFromComparison - Helper function no longer used." -Level DEBUG
+    }
     return [PSCustomObject]@{
         Status       = "Unknown"
         UpdateNeeded = $false

@@ -1,9 +1,52 @@
-# Example Miniserver List for UpdateLoxone.ps1
+# UpdateLoxoneMSList.txt - Miniserver Update Configuration
 #
-# Add one Miniserver connection URL per line.
-# The format should be: http://username:password@ip-address-or-hostname
-# or https://username:password@ip-address-or-hostname
+# Format: URL[,last_known_version,last_checked_timestamp,enable_monitor]
 #
-# Example:
-# http://admin:password123@192.168.1.77
-# https://user:securepass@miniserver.local
+# Fields:
+#   1. URL (Required): Connection string with credentials
+#      - Format: http://username:password@ip-address
+#      - Format: https://username:password@ip-address
+#
+#   2. last_known_version (Optional): Cached Miniserver version
+#      - Format: 16.1.7.31
+#      - Auto-updated by script
+#
+#   3. last_checked_timestamp (Optional): Last successful version check
+#      - Format: YYYYMMDD_HHMMSS (e.g., 20251024_143022)
+#      - Auto-updated by script
+#
+#   4. enable_monitor (Optional): Enable Monitor-Logging during updates
+#      - Values: 'true' or 'false' (default: false)
+#      - Activates loxonemonitor.exe to capture debug logs from Miniserver
+#
+# Monitor-Logging Details:
+# - Starts loxonemonitor.exe locally on update PC
+# - Activates Miniserver logging via API: /dev/sps/log/<pc-ip>
+# - Miniserver sends UDP debug logs to monitor.exe
+# - Logs saved as .lxmon format (proprietary, only readable with loxonemonitor.exe)
+# - Log location: $ScriptSaveFolder\MonitorLogs\{miniserver-name}\
+# - After update: Logging stopped via API: /dev/sps/log
+# - Grace period: Max 5 minutes to receive final log blocks
+#
+# Security Note:
+# - Create dedicated Miniserver user with minimal permissions (only "System Update")
+# - Credentials are stored in plain text, so protect this file accordingly
+#
+# Examples:
+#
+# Basic (no cached data, no monitor):
+# https://admin:password123@192.168.1.77
+#
+# With cached version and timestamp:
+# http://user:securepass@192.168.1.78,16.1.7.31,20251024_120000
+#
+# With monitor enabled:
+# https://admin:pass@192.168.1.79,,,true
+#
+# Full configuration:
+# https://admin:pass@192.168.1.80,16.2.0.5,20251024_143022,true
+#
+# Multiple Miniserver example:
+# https://admin:pass@192.168.1.77,,,true     # Living Room - Monitor enabled
+# https://admin:pass@192.168.1.78,,,false    # Basement - Monitor disabled
+# http://admin:pass@192.168.1.79             # Garage - Default (no monitor)

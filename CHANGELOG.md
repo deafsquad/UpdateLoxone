@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.6.9] - 2026-02-11 14:01:13
+### Added
+- **Miniserver generation detection**: New modules `LoxoneUtils.MiniserverGeneration.psm1` and `LoxoneUtils.MiniserverHardware.psm1` for detecting Gen1-Grey, Gen1-Green, and Gen2 Miniservers via UPNP/version endpoints and MAC prefix analysis
+- **Network core module**: New `LoxoneUtils.NetworkCore.psm1` with singleton HttpClient, double-checked locking, and automatic test-mode detection via environment variables for fast network operations
+- **Certificate helper module**: New `LoxoneUtils.CertificateHelper.psm1` with compiled C# delegates for thread-safe TLS certificate bypass in parallel/threaded contexts
+- **Miniserver monitoring**: New `LoxoneUtils.Monitor.psm1` for managing `loxonemonitor.exe` during updates for debug logging
+- **Real-time miniserver status updates**: `Send-MSStatusUpdate` function provides live progress through `ConcurrentQueue` for parallel update monitoring with state tracking (Updating, Installing, Rebooting, Verifying, Completed, Failed)
+- **Miniserver update stage tracking**: Detailed stage transitions with millisecond-precision timing (Downloading → Installing → Rebooting → Verifying → Completed) logged with `[STAGE_TRANSITION]` markers
+- **503 status code parsing**: Miniserver update polling now parses HTTP 503 response bodies to extract detailed status codes (530-534) for granular update progress
+- **Timing-based state estimation**: When Miniservers return 503 without error detail codes, elapsed time is used to estimate the current update phase
+- **Downloads folder cleanup**: New `Invoke-DownloadsFolderCleanup` function with configurable age and count retention policies
+- **Update trigger retry logic**: Miniserver update trigger now retries up to 3 times with progressive delays (2s, 4s, 6s) before failing
+- **Poll attempt retry logic**: Each polling iteration retries up to 3 times with 2-second delays for transient network errors
+- **Loxone App process termination before install**: `Start-LoxoneForWindowsInstaller` now kills running Loxone processes (up to 5 attempts) before starting installation
+- **In-memory logging for parallel mode**: `ConcurrentBag`-based in-memory log collection when `LOXONE_PARALLEL_MODE` is set, avoiding file I/O serialization bottlenecks
+- **Single test runner**: New `tests/run-single-test.ps1` for running individual test files
+- **Archived modules directory**: Added `LoxoneUtils/archived_modules/` to `.gitignore`
+
+### Changed
+- **Parallel workflow engine rewrite**: `LoxoneUtils.ParallelWorkflow.psm1` significantly expanded (~2200 lines added) with `ConcurrentBag`/`ConcurrentDictionary` for thread-safe state management, direct ThreadJob execution, and real-time progress queue processing
+- **Miniserver communication modernized**: `Invoke-MiniserverWebRequest` now routes through NetworkCore for fast operations in test mode, with proper HttpClient integration and enhanced error detail capture including inner exception chains
+- **HTTPS certificate handling unified**: Replaced inline `ServerCertificateValidationCallback = { $true }` with `Set-CertificateValidationBypass` / `Clear-CertificateValidationBypass` from CertificateHelper across all Miniserver functions for thread safety
+- **Gen2 Miniserver security**: HTTPS failures on Gen2 Miniservers no longer fall back to HTTP; only Gen1 Miniservers attempt HTTP fallback
+- **Invoke-MSUpdate signature simplified**: Removed UI-coupled parameters (`StepNumber`, `TotalSteps`, `IsInteractive`, `ErrorOccurred`, `AnyUpdatePerformed`, `MSCounter`, `TotalMS`); added `ProgressQueue` parameter for decoupled real-time status reporting
+- **Password handling flexibility**: `Invoke-MSUpdate` now accepts both `SecureString` and plain text passwords, enabling simpler credential passing in parallel/serialized contexts
+- **Miniserver cache enhanced**: `LoxoneUtils.MiniserverCache.psm1` updated with generation info storage (4th field in cached entries)
+- **Connectivity check improvements**: Quick connectivity checks now use NetworkCore when available, with increased HTTPS timeout (3s vs 1s) and downgraded false-negative logging from WARN to DEBUG
+- **UpdateLoxone.ps1 main script expanded**: Major expansion (~900 lines added) with parallel execution orchestration, enhanced progress reporting, and improved workflow step coordination
+- **Workflow steps expanded**: `LoxoneUtils.WorkflowSteps.psm1` significantly extended (~680 lines added) for parallel-aware execution
+- **Test runner enhancements**: `run-tests.ps1` expanded with improved test-level parallelism, better filtering, and additional output modes
+- **Module manifest updated**: `LoxoneUtils.psd1` updated with new nested modules (NetworkCore, CertificateHelper, MiniserverGeneration, MiniserverHardware, Monitor)
+- **Logging mutex creation**: Removed `Write-Debug`/`Write-Warning` during mutex initialization to prevent recursive logging loops
+- **`TimeoutSec` parameter type**: Changed from `[int]` to `[decimal]` in `Invoke-MSUpdate` to support fractional seconds for faster test timeouts
+- **Publish release script enhanced**: `publish_new_release.ps1` expanded (~310 lines) with improved release workflow
+- **UpdateLoxoneMSList.txt.example expanded**: Additional documentation and examples for Miniserver list configuration
+- **SSL error diagnostics**: Full inner exception chain traversal (up to 10 levels) logged with `[SSL/TLS Error Chain]` markers and root cause identification
+- **Test coverage module**: `LoxoneUtils.TestCoverage.psm1` updated with expanded analysis capabilities
+- **Installer version detection**: `Test-ExistingInstaller` now handles installers without `FileVersion` metadata by falling back to file size validation for App installers (>10MB)
+
+### Fixed
+- **Parallel mode file logging contention**: Logging in parallel mode now skips mutex acquisition and file I/O entirely, using thread-safe `ConcurrentBag` instead, eliminating deadlocks and serialization bottlenecks
+- **Credential null checks**: Added defensive null checks for `$Credential` object before accessing `.UserName` and `.GetNetworkCredential()` across trigger, polling, and verification code paths, with clear error messages
+- **HTTPS polling with certificate bypass**: Added `SkipCertificateCheck` to verification polling parameters for PS7 HTTPS connections
+- **Parallel context `$MyInvocation` errors**: `Invoke-MSUpdate` now skips `Enter-Function` in parallel mode to avoid `$MyInvocation` serialization failures in ThreadJob contexts
+- **Null `MSUri` guard**: Early return with error result when `MSUri` is null, preventing null reference exceptions in parallel workers
+- **Shortcut icon fix removed**: Commented out Loxone App shortcut icon fix code as Loxone fixed the installer bug (2024-11), with documentation for re-enabling if needed
+- **Network module improvements**: `LoxoneUtils.Network.psm1` enhanced with retry logic and CRC verification improvements
+- **Thread safety improvements**: `LoxoneUtils.ThreadSafe.psm1` updated for more robust cross-thread state management with named mutex
+- **Toast notification reliability**: `LoxoneUtils.Toast.psm1` improved with better error handling and `Submit-BTNotification` with Reminder scenario
+- **Test compatibility fixes**: Multiple test files updated for compatibility with new module structure and parallel testing patterns
+
 ## [0.6.8] - 2025-08-09 01:07:48
 ### Changed
 - Modified installer behavior to provide real-time progress updates during Loxone Config and App installations

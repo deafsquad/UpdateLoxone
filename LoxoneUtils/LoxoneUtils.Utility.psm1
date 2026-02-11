@@ -219,7 +219,7 @@ function ConvertTo-Expression {
 #region Version Helpers
 function Convert-VersionString {
     param(
-        # The version string to normalize (e.g., "14.0.3.28").
+        # The version string to normalize (e.g., "14.0.3.28" or "16.1.3 (14422)").
         [string]$VersionString
     )
     Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber # Corrected function call
@@ -228,9 +228,16 @@ function Convert-VersionString {
         Write-Log -Message "Convert-VersionString: Input is null or empty, returning empty." -Level DEBUG
         return ""
     }
+
+    # First strip off any build number in parentheses (e.g., "(14422)" or "(Build 14422)")
+    $cleanVersion = $VersionString
+    if ($VersionString -match '^([^\(]+)(?:\s*\([^\)]+\))?') {
+        $cleanVersion = $matches[1].Trim()
+    }
+
     # Regex to extract up to 4 numeric parts, allowing for leading zeros but treating them as decimal.
     # It also handles cases where versions might have fewer than 4 parts.
-    if ($VersionString -match '^(\d{1,4})(?:\.(\d{1,4}))?(?:\.(\d{1,4}))?(?:\.(\d{1,4}))?.*$') {
+    if ($cleanVersion -match '^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?.*$') {
         $major = if ($matches[1]) { [int]$matches[1] } else { 0 }
         $minor = if ($matches[2]) { [int]$matches[2] } else { 0 }
         $build = if ($matches[3]) { [int]$matches[3] } else { 0 }
@@ -240,10 +247,10 @@ function Convert-VersionString {
         # If a part was not present in the original string, it defaults to 0 here.
         # This creates a System.Version compatible string if all parts are present.
         $normalizedString = "$major.$minor.$build.$revision"
-        Write-Log -Message ("Convert-VersionString: Input '{0}' normalized to '{1}'" -f $VersionString, $normalizedString) -Level DEBUG
+        Write-Log -Message ("Convert-VersionString: Input '{0}' (cleaned: '{1}') normalized to '{2}'" -f $VersionString, $cleanVersion, $normalizedString) -Level DEBUG
         return $normalizedString
     }
-    Write-Log -Message "Convert-VersionString: Input '{0}' did not match expected version pattern. Returning original." -Level WARN
+    Write-Log -Message "Convert-VersionString: Input '{0}' (cleaned: '{1}') did not match expected version pattern. Returning original." -f $VersionString, $cleanVersion -Level WARN
     return $VersionString # Return original if no match
     } finally {
         Exit-Function # Corrected function call
@@ -252,6 +259,121 @@ function Convert-VersionString {
 #endregion Version Helpers
 
 #region Application Info Helpers
+
+# Helper function to extract version information from VersionInfo object
+function Get-ProcessedVersionInfo {
+    param(
+        [Parameter(Mandatory=$true)]
+        $VersionInfo
+    )
+
+    $result = @{
+        FileVersion       = $null
+        ProductVersion    = $null
+        ComparableVersion = $null
+        DisplayVersion    = $null
+        VersionFormat     = "Unknown"
+        BuildNumber       = $null
+        BuildDate         = $null
+    }
+
+    try {
+        # Get raw versions
+        $result.FileVersion = $VersionInfo.FileVersion
+        $result.ProductVersion = $VersionInfo.ProductVersion
+
+        Write-Verbose "Raw FileVersion: $($result.FileVersion)"
+        Write-Verbose "Raw ProductVersion: $($result.ProductVersion)"
+
+        # Detect version format and extract comparable version
+        if ($result.FileVersion) {
+            # Pattern 1: Date in FileVersion (e.g., "2025.11.09" from Release/Beta channels)
+            if ($result.FileVersion -match '^(\d{4})\.(\d{1,2})\.(\d{1,2})$') {
+                $result.VersionFormat = "DateBased"
+                $result.BuildDate = $result.FileVersion
+
+                # For date-based versions, extract build number from ProductVersion
+                if ($result.ProductVersion) {
+                    # Extract build number (last component) from ProductVersion (e.g., "16.12.534.14387" -> "14387")
+                    if ($result.ProductVersion -match '\.(\d+)$') {
+                        $buildFromProduct = $matches[1]
+                        $result.BuildNumber = $buildFromProduct
+                        # Use build number as comparable version (pad to ensure proper comparison)
+                        $result.ComparableVersion = "1.0.0.$buildFromProduct"
+                        $result.DisplayVersion = "$($result.ProductVersion) ($($result.BuildDate))"
+                        Write-Verbose "Date-based format detected. Using build number for comparison: $buildFromProduct"
+                    } else {
+                        # Fallback to full ProductVersion
+                        $result.ComparableVersion = Convert-VersionString $result.ProductVersion
+                        $result.DisplayVersion = "$($result.ProductVersion) ($($result.BuildDate))"
+                        Write-Verbose "Date-based format detected. Using full ProductVersion for comparison: $($result.ComparableVersion)"
+                    }
+                } else {
+                    # Fallback: use date as version (not ideal but better than nothing)
+                    $result.ComparableVersion = Convert-VersionString $result.FileVersion
+                    $result.DisplayVersion = $result.FileVersion
+                    Write-Verbose "Date-based format but no ProductVersion. Using date as version: $($result.ComparableVersion)"
+                }
+            }
+            # Pattern 2: Version with build number in parentheses (e.g., "16.1.3 (14422)" from InternalV2)
+            elseif ($result.FileVersion -match '^([\d.]+)\s*\((\d+)\)$') {
+                $result.VersionFormat = "BuildNumber"
+                $mainVersion = $matches[1]
+                $result.BuildNumber = $matches[2]
+                # Use build number for comparison (same format as date-based)
+                $result.ComparableVersion = "1.0.0.$($result.BuildNumber)"
+                $result.DisplayVersion = "$mainVersion (Build $($result.BuildNumber))"
+                Write-Verbose "Build number format detected. Using build for comparison: $($result.BuildNumber)"
+            }
+            # Pattern 3: Pure build number (e.g., "14458")
+            elseif ($result.FileVersion -match '^(\d+)$') {
+                # Single number - treat as build number
+                $result.VersionFormat = "BuildNumberOnly"
+                $result.BuildNumber = $result.FileVersion
+                $result.ComparableVersion = "1.0.0.$($result.FileVersion)"
+                $result.DisplayVersion = "Build $($result.FileVersion)"
+                Write-Verbose "Pure build number detected: $($result.FileVersion) -> $($result.ComparableVersion)"
+            }
+            # Pattern 4: Standard version format (e.g., "16.1.3.0")
+            elseif ($result.FileVersion -match '^([\d.]+)$') {
+                $result.VersionFormat = "Standard"
+                $result.ComparableVersion = Convert-VersionString $result.FileVersion
+                $result.DisplayVersion = $result.FileVersion
+                Write-Verbose "Standard version format detected: $($result.ComparableVersion)"
+            }
+            # Fallback: Unable to parse FileVersion, try ProductVersion
+            else {
+                Write-Verbose "Unable to parse FileVersion format: $($result.FileVersion)"
+                if ($result.ProductVersion -and $result.ProductVersion -match '^([\d.]+)') {
+                    $result.VersionFormat = "Fallback"
+                    $result.ComparableVersion = Convert-VersionString $matches[1]
+                    $result.DisplayVersion = $result.ProductVersion
+                    Write-Verbose "Using ProductVersion as fallback: $($result.ComparableVersion)"
+                } else {
+                    # Last resort: use raw FileVersion
+                    $result.ComparableVersion = Convert-VersionString $result.FileVersion
+                    $result.DisplayVersion = $result.FileVersion
+                    Write-Verbose "Using raw FileVersion as last resort: $($result.ComparableVersion)"
+                }
+            }
+        } elseif ($result.ProductVersion) {
+            # No FileVersion but have ProductVersion
+            Write-Verbose "No FileVersion available, using ProductVersion"
+            if ($result.ProductVersion -match '^([\d.]+)') {
+                $result.VersionFormat = "ProductOnly"
+                $result.ComparableVersion = Convert-VersionString $matches[1]
+                $result.DisplayVersion = $result.ProductVersion
+                Write-Verbose "Using ProductVersion only: $($result.ComparableVersion)"
+            }
+        }
+
+    } catch {
+        Write-Warning "Error processing version info: $($_.Exception.Message)"
+    }
+
+    return $result
+}
+
 function Get-AppVersionFromRegistry {
     [CmdletBinding()]
     param(
@@ -264,10 +386,16 @@ function Get-AppVersionFromRegistry {
 
     $ErrorActionPreference = 'Stop' # Ensure errors are caught by try/catch
     $output = @{
-        ShortcutName    = $null
-        InstallLocation = $null
-        FileVersion     = $null # Revert: Only need FileVersion
-        Error           = $null
+        ShortcutName      = $null
+        InstallLocation   = $null
+        FileVersion       = $null        # Raw FileVersion from file
+        ProductVersion    = $null        # Raw ProductVersion from file
+        ComparableVersion = $null        # Normalized version for comparison
+        DisplayVersion    = $null        # Formatted version for UI display
+        VersionFormat     = $null        # "DateBased", "BuildNumber", or "Standard"
+        BuildNumber       = $null        # Build number if available
+        BuildDate         = $null        # Build date if available
+        Error             = $null
     }
 
     try {
@@ -323,19 +451,24 @@ function Get-AppVersionFromRegistry {
                             $fileItem = Get-Item -Path $output.InstallLocation -ErrorAction Stop # Re-add ErrorAction Stop
                             Start-Sleep -Millis 100 # Small delay before accessing properties
                             if ($null -ne $fileItem -and $null -ne $fileItem.VersionInfo) {
-                                if (-not ([string]::IsNullOrWhiteSpace($fileItem.VersionInfo.FileVersion))) {
-                                     $output.FileVersion = $fileItem.VersionInfo.FileVersion
-                                     # Add build date from file's LastWriteTime
-                                     if ($fileItem.LastWriteTime) {
-                                         $buildDate = $fileItem.LastWriteTime.ToString("yyyy-MM-dd")
-                                         $output.FileVersion = "$($output.FileVersion) (Build $buildDate)"
-                                     }
-                                     Write-Verbose "Found FileVersion: $($output.FileVersion)"
+                                # Use the new helper function to process version info
+                                $versionData = Get-ProcessedVersionInfo -VersionInfo $fileItem.VersionInfo
+
+                                # Copy processed data to output
+                                $output.FileVersion = $versionData.FileVersion
+                                $output.ProductVersion = $versionData.ProductVersion
+                                $output.ComparableVersion = $versionData.ComparableVersion
+                                $output.DisplayVersion = $versionData.DisplayVersion
+                                $output.VersionFormat = $versionData.VersionFormat
+                                $output.BuildNumber = $versionData.BuildNumber
+                                $output.BuildDate = $versionData.BuildDate
+
+                                if ([string]::IsNullOrWhiteSpace($output.ComparableVersion)) {
+                                    $output.Error = "Could not extract comparable version from '$($output.InstallLocation)'."
+                                    Write-Warning $output.Error
+                                    Write-Log -Level WARN -Message "[App Version Check Debug] VersionInfo: FileVersion='$($output.FileVersion)', ProductVersion='$($output.ProductVersion)'"
                                 } else {
-                                     $output.Error = "FileVersion property is null or empty for '$($output.InstallLocation)'."
-                                     Write-Warning $output.Error
-                                     # Log available VersionInfo properties for debugging
-                                     Write-Log -Level WARN -Message "[App Version Check Debug] FileVersion null/empty. Available VersionInfo properties: $($fileItem.VersionInfo | Out-String)"
+                                    Write-Verbose "Processed version - Comparable: $($output.ComparableVersion), Display: $($output.DisplayVersion), Format: $($output.VersionFormat)"
                                 }
                             } else {
                                 $output.Error = "Could not retrieve valid FileItem or VersionInfo property from '$($output.InstallLocation)'."
@@ -363,19 +496,24 @@ function Get-AppVersionFromRegistry {
                     $fileItem = Get-Item -Path $output.InstallLocation -ErrorAction Stop # Re-add ErrorAction Stop
                     Start-Sleep -Millis 100 # Small delay before accessing properties
                     if ($null -ne $fileItem -and $null -ne $fileItem.VersionInfo) {
-                        if (-not ([string]::IsNullOrWhiteSpace($fileItem.VersionInfo.FileVersion))) {
-                             $output.FileVersion = $fileItem.VersionInfo.FileVersion
-                             # Add build date from file's LastWriteTime
-                             if ($fileItem.LastWriteTime) {
-                                 $buildDate = $fileItem.LastWriteTime.ToString("yyyy-MM-dd")
-                                 $output.FileVersion = "$($output.FileVersion) (Build $buildDate)"
-                             }
-                             Write-Verbose "Found FileVersion: $($output.FileVersion)"
+                        # Use the new helper function to process version info
+                        $versionData = Get-ProcessedVersionInfo -VersionInfo $fileItem.VersionInfo
+
+                        # Copy processed data to output
+                        $output.FileVersion = $versionData.FileVersion
+                        $output.ProductVersion = $versionData.ProductVersion
+                        $output.ComparableVersion = $versionData.ComparableVersion
+                        $output.DisplayVersion = $versionData.DisplayVersion
+                        $output.VersionFormat = $versionData.VersionFormat
+                        $output.BuildNumber = $versionData.BuildNumber
+                        $output.BuildDate = $versionData.BuildDate
+
+                        if ([string]::IsNullOrWhiteSpace($output.ComparableVersion)) {
+                            $output.Error = "Could not extract comparable version from '$($output.InstallLocation)'."
+                            Write-Warning $output.Error
+                            Write-Log -Level WARN -Message "[App Version Check Debug] VersionInfo: FileVersion='$($output.FileVersion)', ProductVersion='$($output.ProductVersion)'"
                         } else {
-                             $output.Error = "FileVersion property is null or empty for '$($output.InstallLocation)'."
-                             Write-Warning $output.Error
-                             # Log available VersionInfo properties for debugging
-                             Write-Log -Level WARN -Message "[App Version Check Debug] FileVersion null/empty. Available VersionInfo properties: $($fileItem.VersionInfo | Out-String)"
+                            Write-Verbose "Processed version - Comparable: $($output.ComparableVersion), Display: $($output.DisplayVersion), Format: $($output.VersionFormat)"
                         }
                     } else {
                         $output.Error = "Could not retrieve valid FileItem or VersionInfo property from '$($output.InstallLocation)'."

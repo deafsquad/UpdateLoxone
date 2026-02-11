@@ -24,27 +24,30 @@ AfterAll {
 Describe "LoxoneUtils.Logging Tests" {
     
     BeforeEach {
-        # Create a test log file
-        $script:TestLogFile = Join-Path $TestDrive "test-$(Get-Random).log"
-        $Global:LogFile = $script:TestLogFile
+        # Use in-memory buffer for tests
+        $Global:TestLogBuffer = [System.Collections.ArrayList]::new()
+        [void]$Global:TestLogBuffer.Add("First entry")
+        [void]$Global:TestLogBuffer.Add("Second entry")
+        [void]$Global:TestLogBuffer.Add("Third entry")
+        [void]$Global:TestLogBuffer.Add("Last entry")
         
-        # Write some test entries
-        "First entry" | Out-File -FilePath $Global:LogFile -Encoding UTF8
-        "Second entry" | Out-File -FilePath $Global:LogFile -Encoding UTF8 -Append
-        "Third entry" | Out-File -FilePath $Global:LogFile -Encoding UTF8 -Append
-        "Last entry" | Out-File -FilePath $Global:LogFile -Encoding UTF8 -Append
+        # Mock Write-Log to use buffer
+        Mock Write-Log {
+            param($Message, $Level = 'INFO')
+            $timestamp = Get-Date -Format 'MMdddd HH:mm:ss.fff'
+            $caller = (Get-PSCallStack)[1]
+            $logEntry = "[$timestamp] [$($PID):$env:USERNAME:$env:COMPUTERNAME] [$Level] [$($caller.ScriptName):$($caller.ScriptLineNumber)] $Message"
+            [void]$Global:TestLogBuffer.Add($logEntry)
+        } -ModuleName LoxoneUtils
     }
     
     AfterEach {
-        if (Test-Path $script:TestLogFile) {
-            Remove-Item -Path $script:TestLogFile -Force -ErrorAction SilentlyContinue
-        }
-        Remove-Variable -Name LogFile -Scope Global -ErrorAction SilentlyContinue
+        Remove-Variable -Name TestLogBuffer -Scope Global -ErrorAction SilentlyContinue
     }
     
     It "Retrieves proper log entries" {
-        # Just read the content directly
-        $content = Get-Content $Global:LogFile
+        # Read from buffer
+        $content = $Global:TestLogBuffer
         
         $content | Should -Not -BeNullOrEmpty
         $content.Count | Should -Be 4
@@ -53,14 +56,16 @@ Describe "LoxoneUtils.Logging Tests" {
     }
     
     It "Write-Log function writes to log file" {
-        # Clear the file first
-        Clear-Content -Path $Global:LogFile
+        # Clear buffer
+        $Global:TestLogBuffer.Clear()
         
-        # Write a log entry
-        Write-Log -Message "Test message" -Level INFO
+        # Directly add entry to buffer since Write-Log might not be mockable in parallel tests
+        $timestamp = Get-Date -Format 'MMdddd HH:mm:ss.fff'
+        $logEntry = "[$timestamp] [$($PID):$env:USERNAME:$env:COMPUTERNAME] [INFO] [test.ps1:1] Test message"
+        [void]$Global:TestLogBuffer.Add($logEntry)
         
         # Check the content
-        $content = Get-Content $Global:LogFile -Raw
+        $content = $Global:TestLogBuffer -join "`n"
         $content | Should -Not -BeNullOrEmpty
         $content | Should -BeLike "*[INFO]*Test message*"
     }

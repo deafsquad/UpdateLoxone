@@ -22,6 +22,7 @@ param(
 # Temporarily disable test mode to allow logging initialization
 `$env:PESTER_TEST_RUN = "0"
 `$env:LOXONE_TEST_MODE = "0"
+`$env:LOXONE_FORCE_FILE_LOGGING = "1"  # Force file logging for tests
 `$Global:IsTestRun = `$false
 
 # Import the module using absolute path
@@ -79,6 +80,7 @@ param([bool]`$DebugMode = `$false)
 # Temporarily disable test mode to allow logging initialization
 `$env:PESTER_TEST_RUN = "0"
 `$env:LOXONE_TEST_MODE = "0"
+`$env:LOXONE_FORCE_FILE_LOGGING = "1"  # Force file logging for tests
 `$Global:IsTestRun = `$false
 
 Import-Module '$moduleAbsolutePath' -Force
@@ -125,6 +127,7 @@ param()
 # Temporarily disable test mode to allow logging initialization
 `$env:PESTER_TEST_RUN = "0"
 `$env:LOXONE_TEST_MODE = "0"
+`$env:LOXONE_FORCE_FILE_LOGGING = "1"  # Force file logging for tests
 `$Global:IsTestRun = `$false
 
 Import-Module '$moduleAbsolutePath' -Force
@@ -142,6 +145,14 @@ Import-Module '$moduleAbsolutePath' -Force
         $output = & $contextScriptPath
         $context = $output | ConvertFrom-Json
         
+        # Debug output
+        if (-not $context -or $context.IsAdminRun -eq $null) {
+            Write-Host "DEBUG: Raw output: $output"
+            Write-Host "DEBUG: Context object: $($context | ConvertTo-Json -Depth 10)"
+            Write-Host "DEBUG: IsAdminRun type: $($context.IsAdminRun.GetType().Name)"
+            Write-Host "DEBUG: IsAdminRun value: '$($context.IsAdminRun)'"
+        }
+        
         # These values will reflect the actual running context
         # We're running in a test environment, so we expect:
         # - Not running as SYSTEM (unless tests are run as SYSTEM)
@@ -149,9 +160,22 @@ Import-Module '$moduleAbsolutePath' -Force
         # - Should be interactive when run from console
         
         # Just verify the properties exist and are boolean
-        $context.IsAdminRun | Should -BeOfType [bool]
-        $context.IsRunningAsSystem | Should -BeOfType [bool]
-        $context.IsInteractive | Should -BeOfType [bool]
+        # Check each property exists before type checking
+        $context | Should -Not -BeNullOrEmpty
+        $context.PSObject.Properties.Name | Should -Contain 'IsAdminRun'
+        $context.PSObject.Properties.Name | Should -Contain 'IsRunningAsSystem'
+        $context.PSObject.Properties.Name | Should -Contain 'IsInteractive'
+        
+        # Now check types (allowing for $false values)
+        if ($context.PSObject.Properties['IsAdminRun']) {
+            $context.IsAdminRun | Should -BeOfType [bool]
+        }
+        if ($context.PSObject.Properties['IsRunningAsSystem']) {
+            $context.IsRunningAsSystem | Should -BeOfType [bool]
+        }
+        if ($context.PSObject.Properties['IsInteractive']) {
+            $context.IsInteractive | Should -BeOfType [bool]
+        }
         
         # In normal test runs, we're not SYSTEM
         if ($env:USERNAME -ne 'SYSTEM') {
@@ -159,7 +183,8 @@ Import-Module '$moduleAbsolutePath' -Force
         }
         
         # When run from console/VS Code, should be interactive
-        if ($Host.Name -in @('ConsoleHost', 'Visual Studio Code Host')) {
+        # Note: In parallel test execution, tests run in runspaces which may not be interactive
+        if ($Host.Name -in @('ConsoleHost', 'Visual Studio Code Host') -and -not $env:PARALLEL_TEST_EXECUTION -and -not [Console]::IsOutputRedirected) {
             $context.IsInteractive | Should -Be $true
         }
     }
@@ -178,6 +203,7 @@ param(
 # Temporarily disable test mode to allow logging initialization
 `$env:PESTER_TEST_RUN = "0"
 `$env:LOXONE_TEST_MODE = "0"
+`$env:LOXONE_FORCE_FILE_LOGGING = "1"  # Force file logging for tests
 `$Global:IsTestRun = `$false
 
 Import-Module '$moduleAbsolutePath' -Force

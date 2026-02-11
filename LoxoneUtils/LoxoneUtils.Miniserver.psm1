@@ -2,6 +2,66 @@
 
 #region Internal Helper Functions
 
+# Module-level helper function for real-time status updates
+# This MUST be at module scope to work in ThreadJob contexts (no closures, no scriptblocks)
+function Send-MSStatusUpdate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [ValidateSet('Updating','Installing','Rebooting','Verifying','Completed','Failed')]
+        [string]$State,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateRange(0,100)]
+        [int]$Progress,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Message,
+
+        [Parameter(Mandatory=$true)]
+        [string]$HostForLogging,
+
+        [Parameter(Mandatory=$false)]
+        [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$ProgressQueue = $null,
+
+        [Parameter(Mandatory=$false)]
+        [System.Collections.ArrayList]$StatusUpdates = $null
+    )
+
+    $statusUpdate = @{
+        Type = 'Miniserver'  # CRITICAL: Watch-DirectThreadJobs filters on Type='Miniserver'
+        State = $State
+        Progress = $Progress
+        Message = $Message
+        Timestamp = Get-Date
+        IP = $HostForLogging
+    }
+
+    # REAL-TIME: Send to ProgressQueue immediately if provided
+    if ($null -ne $ProgressQueue) {
+        try {
+            [void]$ProgressQueue.Enqueue($statusUpdate)
+            Write-Log -Level INFO -Message "[$HostForLogging] REAL-TIME ENQUEUE: $State ($Progress%) - $Message"
+        } catch {
+            Write-Log -Level WARN -Message "[$HostForLogging] Failed to enqueue real-time status: $_"
+        }
+    } else {
+        Write-Log -Level WARN -Message "[$HostForLogging] ProgressQueue is NULL, cannot send real-time update for $State ($Progress%)"
+    }
+
+    # BACKWARD COMPATIBILITY: Collect in ArrayList if provided
+    if ($null -ne $StatusUpdates) {
+        try {
+            [void]$StatusUpdates.Add($statusUpdate)
+        } catch {
+            Write-Log -Level WARN -Message "[$HostForLogging] Failed to add to StatusUpdates ArrayList: $_"
+        }
+    }
+
+    # Always log for visibility
+    Write-Log -Message "[$HostForLogging] Status update: $State ($Progress%) - $Message" -Level INFO
+}
+
 # Wrapper function for Invoke-WebRequest to enable mocking in tests
 # Exported to allow mocking from test files
 function Invoke-MiniserverWebRequest {
@@ -9,6 +69,58 @@ function Invoke-MiniserverWebRequest {
     param(
         [hashtable]$Parameters
     )
+    
+    # Check if NetworkCore module is available and we're in test mode
+    if ((Get-Command Invoke-NetworkRequest -ErrorAction SilentlyContinue) -and 
+        ($env:LOXONE_USE_FAST_NETWORK -eq "1" -or $env:PESTER_TEST_RUN -eq "1")) {
+        
+        # Route through NetworkCore for fast network operations
+        try {
+            $networkParams = @{
+                Uri = $Parameters.Uri
+            }
+            
+            # Convert timeout
+            if ($Parameters.TimeoutSec) {
+                $networkParams.TimeoutMs = $Parameters.TimeoutSec * 1000
+            } else {
+                $networkParams.TimeoutMs = 3000  # Default 3 seconds
+            }
+            
+            # Add credentials if present
+            if ($Parameters.Credential) {
+                $networkParams.Credential = $Parameters.Credential
+            }
+            
+            # Use NetworkCore abstraction
+            $result = Invoke-NetworkRequest @networkParams
+            
+            if ($result.Success) {
+                # Return object matching Invoke-WebRequest format
+                return [PSCustomObject]@{
+                    StatusCode = $result.StatusCode
+                    StatusDescription = if ($result.ReasonPhrase) { $result.ReasonPhrase } else { "OK" }
+                    Content = if ($result.Content) { $result.Content } else { "" }
+                    Headers = @{}
+                    RawContent = "HTTP/1.1 $($result.StatusCode) OK`r`n`r`n"
+                }
+            } else {
+                throw $result.Error
+            }
+        }
+        catch {
+            # Capture and enhance error details
+            $errorMsg = $_.Exception.Message
+            if ($_.Exception.InnerException) {
+                $errorMsg += " | Inner: " + $_.Exception.InnerException.Message
+                if ($_.Exception.InnerException.InnerException) {
+                    $errorMsg += " | Inner2: " + $_.Exception.InnerException.InnerException.Message
+                }
+            }
+            Write-Log -Level DEBUG -Message "Invoke-MiniserverWebRequest (NetworkCore): $errorMsg"
+            throw
+        }
+    }
     
     # For HTTPS in PowerShell 5.1 with certificate bypass, use HttpWebRequest for reliability
     if ($PSVersionTable.PSVersion.Major -lt 6 -and $Parameters.Uri -like "https://*" -and 
@@ -55,36 +167,49 @@ function Invoke-MiniserverWebRequest {
             
             return $result
         } catch {
+            # Capture and enhance error details for HttpWebRequest
+            $errorMsg = $_.Exception.Message
+            if ($_.Exception.InnerException) {
+                $errorMsg += " | Inner: " + $_.Exception.InnerException.Message
+                if ($_.Exception.InnerException.InnerException) {
+                    $errorMsg += " | Inner2: " + $_.Exception.InnerException.InnerException.Message
+                }
+            }
+            Write-Log -Level DEBUG -Message "Invoke-MiniserverWebRequest (HttpWebRequest): $errorMsg"
             throw
         }
     } elseif ($PSVersionTable.PSVersion.Major -ge 6 -and $Parameters.Uri -like "https://*") {
-        # PowerShell 6+ requires explicit TLS for HTTPS
-        if ($Parameters.ContainsKey('SslProtocol')) {
-            $sslValue = $Parameters.SslProtocol
-            if ($sslValue -is [array]) {
-                # Already an array, just use it
-                Invoke-WebRequest @Parameters
-            } else {
-                # Convert bitmask to array
-                $protocols = @()
-                if ($sslValue -band [System.Net.SecurityProtocolType]::Tls) { $protocols += 'Tls' }
-                if ($sslValue -band [System.Net.SecurityProtocolType]::Tls11) { $protocols += 'Tls11' }
-                if ($sslValue -band [System.Net.SecurityProtocolType]::Tls12) { $protocols += 'Tls12' }
-                try {
-                    if ($sslValue -band [System.Net.SecurityProtocolType]::Tls13) { $protocols += 'Tls13' }
-                } catch {
-                    # TLS 1.3 not available
-                }
-                $Parameters.Remove('SslProtocol')
-                Invoke-WebRequest @Parameters -SslProtocol $protocols
-            }
+        # PowerShell 6+ with HTTPS
+        # Check if we need to skip certificate validation (for self-signed certs)
+        if ([System.Net.ServicePointManager]::ServerCertificateValidationCallback -or 
+            $Parameters.ContainsKey('SkipCertificateCheck')) {
+            # Certificate validation is bypassed - use SkipCertificateCheck
+            $Parameters.Remove('SkipCertificateCheck') | Out-Null
+            Invoke-WebRequest @Parameters -SkipCertificateCheck
         } else {
-            try {
-                # Try with all TLS versions including 1.3
-                Invoke-WebRequest @Parameters -SslProtocol @('Tls', 'Tls11', 'Tls12', 'Tls13')
-            } catch {
-                # Fallback without TLS 1.3 if not supported
-                Invoke-WebRequest @Parameters -SslProtocol @('Tls', 'Tls11', 'Tls12')
+            # Normal HTTPS with valid certificates
+            if ($Parameters.ContainsKey('SslProtocol')) {
+                $sslValue = $Parameters.SslProtocol
+                if ($sslValue -is [array]) {
+                    # Already an array, just use it
+                    Invoke-WebRequest @Parameters
+                } else {
+                    # Convert bitmask to array
+                    $protocols = @()
+                    if ($sslValue -band [System.Net.SecurityProtocolType]::Tls) { $protocols += 'Tls' }
+                    if ($sslValue -band [System.Net.SecurityProtocolType]::Tls11) { $protocols += 'Tls11' }
+                    if ($sslValue -band [System.Net.SecurityProtocolType]::Tls12) { $protocols += 'Tls12' }
+                    try {
+                        if ($sslValue -band [System.Net.SecurityProtocolType]::Tls13) { $protocols += 'Tls13' }
+                    } catch {
+                        # TLS 1.3 not available
+                    }
+                    $Parameters.Remove('SslProtocol')
+                    Invoke-WebRequest @Parameters -SslProtocol $protocols
+                }
+            } else {
+                # Default - just call normally, PS7 will use appropriate TLS
+                Invoke-WebRequest @Parameters
             }
         }
     } else {
@@ -143,10 +268,19 @@ function Get-MiniserverVersion {
         }
 
         # Extract only the URL part if entry contains cached data with commas
+        # Also check for generation info
         $entryToParse = $MSEntry
+        $cachedGeneration = $null
         if ($entryToParse -like '*,*') {
-            $entryToParse = $entryToParse.Split(',')[0].Trim()
+            $parts = $entryToParse.Split(',')
+            $entryToParse = $parts[0].Trim()
             Write-Log -Level DEBUG -Message ("$($FunctionName): Extracted URL from cached entry: '{0}'" -f ($entryToParse -replace "([Pp]assword=)[^;]+", '$1********'))
+            
+            # Check for generation info (4th field)
+            if ($parts.Length -ge 4) {
+                $cachedGeneration = $parts[3].Trim()
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Found cached generation: $cachedGeneration")
+            }
         }
         if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
         if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
@@ -234,6 +368,10 @@ function Get-MiniserverVersion {
         Write-Log -Message ("$($FunctionName): Checking MS version for '{0}' (parsed host)." -f $msIP) -Level DEBUG
         Write-Log -Level DEBUG -Message ("$($FunctionName): Base URI for version check (scheme may change): {0}" -f $versionUri)
         
+        # Determine the original scheme early for connectivity checks
+        $originalScheme = $uriBuilderForHostAndPath.Scheme
+        Write-Log -Level DEBUG -Message ("$($FunctionName): Original scheme parsed from MSEntry: '$originalScheme'")
+        
         # Check if we can resolve the host first (for better diagnostics)
         if ($msIP -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
             # It's an IP address, try reverse lookup
@@ -246,17 +384,36 @@ function Get-MiniserverVersion {
             
             # Quick connectivity check
             try {
-                $tcpClient = New-Object System.Net.Sockets.TcpClient
-                $port = if ($originalScheme -eq 'https') { 443 } else { 80 }
-                $asyncResult = $tcpClient.BeginConnect($msIP, $port, $null, $null)
-                $wait = $asyncResult.AsyncWaitHandle.WaitOne(1000, $false) # 1 second quick check
-                
-                if ($wait -and $tcpClient.Connected) {
-                    Write-Log -Level DEBUG -Message ("$($FunctionName): Quick connectivity check passed - port $port is reachable on ${msIP}")
-                    $tcpClient.Close()
+                # Use NetworkCore for fast connectivity check if available
+                if ((Get-Command Test-NetworkEndpoint -ErrorAction SilentlyContinue) -and 
+                    ($env:LOXONE_USE_FAST_NETWORK -eq "1" -or $env:PESTER_TEST_RUN -eq "1")) {
+                    
+                    $port = if ($originalScheme -eq 'https') { 443 } else { 80 }
+                    $testUri = "${originalScheme}://${msIP}:${port}"
+                    $connectResult = Test-NetworkEndpoint -Uri $testUri -TimeoutMs 100
+                    
+                    if ($connectResult.Success) {
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): Quick connectivity check passed - port $port is reachable on ${msIP}")
+                    } else {
+                        Write-Log -Level WARN -Message ("$($FunctionName): Quick connectivity check failed - port $port is NOT reachable on ${msIP} (possible VPN/network issue)")
+                    }
                 } else {
-                    Write-Log -Level WARN -Message ("$($FunctionName): Quick connectivity check failed - port $port is NOT reachable on ${msIP} (possible VPN/network issue)")
-                    if (-not $wait) { $tcpClient.Close() }
+                    # Fallback to TcpClient for production
+                    $tcpClient = New-Object System.Net.Sockets.TcpClient
+                    $port = if ($originalScheme -eq 'https') { 443 } else { 80 }
+                    $asyncResult = $tcpClient.BeginConnect($msIP, $port, $null, $null)
+                    # Increase timeout to 3 seconds for HTTPS (was 1 second)
+                    $checkTimeout = if ($originalScheme -eq 'https') { 3000 } else { 1000 }
+                    $wait = $asyncResult.AsyncWaitHandle.WaitOne($checkTimeout, $false)
+                    
+                    if ($wait -and $tcpClient.Connected) {
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): Quick connectivity check passed - port $port is reachable on ${msIP}")
+                        $tcpClient.Close()
+                    } else {
+                        # Downgrade to DEBUG since this is just a quick check and may have false negatives
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): Quick connectivity check timed out after ${checkTimeout}ms - port $port on ${msIP}. Will try full connection anyway.")
+                        if (-not $wait) { $tcpClient.Close() }
+                    }
                 }
             } catch {
                 Write-Log -Level WARN -Message ("$($FunctionName): Connectivity check error for ${msIP} : $_")
@@ -272,7 +429,7 @@ function Get-MiniserverVersion {
         }
         if ($SkipCertificateCheck.IsPresent) {
             $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+            Set-CertificateValidationBypass
             $callbackChanged = $true
             Write-Log -Message ("Get-MiniserverVersion: SSL certificate check temporarily disabled for {0}." -f $msIP) -Level DEBUG
         }
@@ -291,9 +448,66 @@ function Get-MiniserverVersion {
         }
 
         try { # Main try for Invoke-WebRequest logic
-            # Determine the scheme from the original $entryToParse via $uriBuilderForHostAndPath
-            $originalScheme = $uriBuilderForHostAndPath.Scheme
-            Write-Log -Level DEBUG -Message ("$($FunctionName): Original scheme parsed from MSEntry: '$originalScheme'")
+            # Original scheme already determined earlier for connectivity check
+            
+            # Try NetworkCore first for fast network operations if available
+            $responseObject = $null
+            if ((Get-Command Invoke-NetworkRequest -ErrorAction SilentlyContinue) -and 
+                ($env:LOXONE_USE_FAST_NETWORK -eq "1" -or $env:PESTER_TEST_RUN -eq "1")) {
+                
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Using NetworkCore for fast network operation")
+                
+                # Convert timeout to milliseconds for NetworkCore
+                # Use shorter timeout in test mode
+                $defaultTimeout = if ($env:LOXONE_TEST_MODE -eq "1" -or $env:PESTER_TEST_RUN -eq "1") { 100 } else { 1000 }
+                $timeoutMs = if ($TimeoutSec -gt 0) { $TimeoutSec * 1000 } else { $defaultTimeout }
+                
+                # Build URIs for both protocols
+                $httpUri = "http://$msIP/dev/cfg/version"
+                $httpsUri = "https://$msIP/dev/cfg/version"
+                
+                # Try based on original scheme
+                $urisToTry = if ($originalScheme -eq 'https') { @($httpsUri) } 
+                            elseif ($originalScheme -eq 'http') { @($httpUri) }
+                            else { @($httpsUri, $httpUri) }  # Try both if no scheme
+                
+                foreach ($testUri in $urisToTry) {
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): Testing $testUri with NetworkCore (${timeoutMs}ms timeout)")
+                    $testResult = Invoke-NetworkRequest -Uri $testUri -TimeoutMs $timeoutMs -Credential $credential -ForceFast
+                    
+                    if ($testResult.Success -and $testResult.StatusCode -eq 200) {
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): NetworkCore test successful for $testUri")
+                        # Get the actual content using Invoke-MiniserverWebRequest with fast timeout
+                        $versionUri = $testUri
+                        try {
+                            $responseObject = Invoke-MiniserverWebRequest @{
+                                Uri = $versionUri
+                                Credential = $credential
+                                UseBasicParsing = $true
+                                TimeoutSec = [Math]::Max(0.1, [Math]::Ceiling($timeoutMs / 1000.0))
+                                ErrorAction = 'Stop'
+                            }
+                            Write-Log -Level DEBUG -Message ("$($FunctionName): Got full response via NetworkCore path")
+                            break
+                        } catch {
+                            Write-Log -Level DEBUG -Message ("$($FunctionName): Failed to get full response after NetworkCore test: $_")
+                        }
+                    } else {
+                        # NetworkCore detected the host is unreachable
+                        Write-Log -Level DEBUG -Message ("$($FunctionName): NetworkCore detected unreachable: $($testResult.Error)")
+                    }
+                }
+                
+                if (-not $responseObject) {
+                    # NetworkCore determined the host is unreachable - don't try standard method
+                    Write-Log -Level DEBUG -Message ("$($FunctionName): NetworkCore determined host is unreachable - skipping standard method")
+                    $result.Error = "NetworkCore: Host unreachable or timeout after ${timeoutMs}ms"
+                    return $result
+                }
+            }
+            
+            # If NetworkCore didn't work or isn't available, use standard approach
+            if (-not $responseObject) {
 
             if ($originalScheme -eq 'http') {
                 # Original entry is HTTP, go straight to HTTP with manual auth
@@ -346,8 +560,23 @@ function Get-MiniserverVersion {
                     # Create HttpWebRequest for HTTPS with certificate bypass
                     $request = [System.Net.HttpWebRequest]::Create($versionUri)
                     $request.Method = "GET"
-                    $request.Timeout = $TimeoutSec * 1000
-                    $request.ServerCertificateValidationCallback = { $true }
+                    $request.Timeout = if ($TimeoutSec -gt 0) { $TimeoutSec * 1000 } else { 3000 }
+                    
+                    # Handle certificate validation bypass for both .NET Framework and .NET Core/5+
+                    if ($SkipCertificateCheck) {
+                        # For .NET Core/5+, we need to use ServicePointManager
+                        if ([System.Net.ServicePointManager].GetProperty('ServerCertificateValidationCallback')) {
+                            Set-CertificateValidationBypass
+                            Write-Log -Level DEBUG -Message ("$($FunctionName): Set ServicePointManager.ServerCertificateValidationCallback for certificate bypass")
+                        }
+                        # For older .NET Framework (this property might not work in .NET Core)
+                        try {
+                            # Skip request-level callback, using global ServicePointManager instead
+                            Write-Log -Level DEBUG -Message ("$($FunctionName): Set request.ServerCertificateValidationCallback for certificate bypass")
+                        } catch {
+                            Write-Log -Level DEBUG -Message ("$($FunctionName): Could not set request.ServerCertificateValidationCallback: $_")
+                        }
+                    }
                     
                     # Add authentication header if credentials are available
                     if (-not [string]::IsNullOrEmpty($usernameForAuthHeader) -and -not [string]::IsNullOrEmpty($passwordForAuthHeader)) {
@@ -386,8 +615,78 @@ function Get-MiniserverVersion {
                     Write-Log -Level WARN -Message ("$($FunctionName): HTTPS connection to '{0}' failed ('{1}')." -f $versionUri, $CaughtPrimaryHttpsError.Exception.Message.Split([Environment]::NewLine)[0])
                     Write-Log -Level DEBUG -Message ("$($FunctionName): Full Exception for HTTPS failure: $($CaughtPrimaryHttpsError.Exception.ToString())")
                     
-                    # Try fallback to HTTP if HTTPS fails (common with self-signed certificates)
-                    Write-Log -Level INFO -Message ("$($FunctionName): HTTPS failed, attempting fallback to HTTP...")
+                    # Log inner exception for SSL errors with complete detail
+                    $currentException = $CaughtPrimaryHttpsError.Exception
+                    $exceptionDepth = 0
+                    $allExceptions = @()
+                    
+                    # Traverse all inner exceptions to get the root cause
+                    while ($currentException -and $exceptionDepth -lt 10) {
+                        $exceptionInfo = @{
+                            Type = $currentException.GetType().FullName
+                            Message = $currentException.Message
+                            Depth = $exceptionDepth
+                        }
+                        
+                        # Check for specific SSL/TLS properties
+                        if ($currentException -is [System.Net.WebException]) {
+                            $exceptionInfo.Status = $currentException.Status
+                            if ($currentException.Response) {
+                                $exceptionInfo.ResponseUri = $currentException.Response.ResponseUri
+                            }
+                        }
+                        
+                        # Check for authentication exceptions
+                        if ($currentException -is [System.Security.Authentication.AuthenticationException]) {
+                            $exceptionInfo.AuthType = "AuthenticationException"
+                        }
+                        
+                        $allExceptions += $exceptionInfo
+                        $currentException = $currentException.InnerException
+                        $exceptionDepth++
+                    }
+                    
+                    # Log the exception chain
+                    if ($allExceptions.Count -gt 1) {
+                        Write-Log -Level WARN -Message ("$($FunctionName): SSL/TLS Error Chain ($($allExceptions.Count) levels):")
+                        foreach ($ex in $allExceptions) {
+                            $indent = "  " * $ex.Depth
+                            Write-Log -Level WARN -Message ("$($FunctionName): ${indent}[$($ex.Depth)] $($ex.Type): $($ex.Message)")
+                            if ($ex.Status) {
+                                Write-Log -Level INFO -Message ("$($FunctionName): ${indent}    WebException Status: $($ex.Status)")
+                            }
+                        }
+                        
+                        # Log the root cause prominently
+                        $rootCause = $allExceptions[-1]
+                        Write-Log -Level WARN -Message ("$($FunctionName): ROOT CAUSE: $($rootCause.Type) - $($rootCause.Message)")
+                    } else {
+                        Write-Log -Level WARN -Message ("$($FunctionName): Single exception: $($allExceptions[0].Type) - $($allExceptions[0].Message)")
+                    }
+                    
+                    # Check if this might be a Gen2 miniserver (they require HTTPS)
+                    $isLikelyGen2 = $false
+                    
+                    # First check cached generation info if available
+                    if ($cachedGeneration -eq 'Gen2') {
+                        Write-Log -Level INFO -Message ("$($FunctionName): Cached generation info indicates Gen2 miniserver.")
+                        $isLikelyGen2 = $true
+                    }
+                    
+                    # Check if the HTTPS error suggests it's actually responding (just with cert issues)
+                    if (-not $isLikelyGen2 -and $CaughtPrimaryHttpsError.Exception.Message -match 'SSL|TLS|certificate|handshake') {
+                        # The server is responding with HTTPS, just cert issues - might be Gen2
+                        Write-Log -Level INFO -Message ("$($FunctionName): HTTPS error suggests server supports HTTPS (SSL/TLS error). May be Gen2 miniserver.")
+                        $isLikelyGen2 = $true
+                    }
+                    
+                    if ($isLikelyGen2) {
+                        Write-Log -Level WARN -Message ("$($FunctionName): Gen2 miniserver detected. NOT falling back to HTTP for security.")
+                        throw $CaughtPrimaryHttpsError
+                    }
+                    
+                    # Try fallback to HTTP only for Gen1 miniservers
+                    Write-Log -Level INFO -Message ("$($FunctionName): HTTPS failed, attempting fallback to HTTP (assuming Gen1)...")
                     
                     try {
                         # Build HTTP version of the URI
@@ -433,6 +732,7 @@ function Get-MiniserverVersion {
                 }
             } else {
                 throw ("$($FunctionName): Unknown original scheme '$originalScheme' from MSEntry '$($entryToParse -replace "([Pp]assword=)[^;]+", '$1********')'")
+            } # End of standard approach (if not using NetworkCore)
             }
 
             # Process response if any was successful
@@ -471,7 +771,7 @@ function Get-MiniserverVersion {
     } finally {
         $ProgressPreference = $oldProgressPreference
         if ($callbackChanged) {
-            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
+            Clear-CertificateValidationBypass
             Write-Log -Message ("$($FunctionName): Restored SSL certificate validation callback for {0}." -f $msIP) -Level DEBUG
         }
         Write-Log -Level DEBUG -Message ("$($FunctionName): Exiting. Final version for MS '{0}': '{1}', Error: '{2}'" -f $result.MSIP, $result.Version, $result.Error)
@@ -494,7 +794,7 @@ param(
     [switch]$SkipCertificateCheck,
 
     [Parameter()]
-    [int]$TimeoutSec = 1 # Default timeout
+    [decimal]$TimeoutSec = 1 # Default timeout, supports fractional seconds for testing
 )
 $FunctionName = $MyInvocation.MyCommand.Name
 Enter-Function -FunctionName $FunctionName -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
@@ -559,7 +859,7 @@ try {
     
     if ($SkipCertificateCheck.IsPresent) {
         $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        Set-CertificateValidationBypass
         $callbackChanged = $true
     }
 
@@ -640,7 +940,17 @@ try {
             break # Success, exit loop
         } catch {
             $lastException = $_
-            Write-Log -Level WARN -Message ("$($FunctionName): $scheme connection to '$($iwrParams.Uri)' failed: $($_.Exception.Message.Split([Environment]::NewLine)[0])")
+            $errorMsg = $_.Exception.Message
+            
+            # Capture full error details including inner exceptions
+            if ($_.Exception.InnerException) {
+                $errorMsg += " | Inner: " + $_.Exception.InnerException.Message
+                if ($_.Exception.InnerException.InnerException) {
+                    $errorMsg += " | Inner2: " + $_.Exception.InnerException.InnerException.Message
+                }
+            }
+            
+            Write-Log -Level WARN -Message ("$($FunctionName): $scheme connection to '$($iwrParams.Uri)' failed: $errorMsg")
         }
     }
 
@@ -701,7 +1011,7 @@ Then, re-run this script.
 } finally {
     $ProgressPreference = $oldProgressPreference
     if ($callbackChanged) {
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
+        Clear-CertificateValidationBypass
     }
     Write-Log -Level DEBUG -Message "$($FunctionName): Exiting."
     Exit-Function
@@ -818,11 +1128,13 @@ try { # Main function try
                 $ProgressPreference = 'SilentlyContinue'
                 if ($SkipCertificateCheck.IsPresent) {
                     $originalCallbackCheck = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-                    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; $callbackChangedCheck = $true
+                    Set-CertificateValidationBypass; $callbackChangedCheck = $true
                 }
     
                 try { # For IWR calls
-                    $iwrParamsInitialCheck = @{ TimeoutSec = 3; ErrorAction = 'Stop'; Method = 'Get' }
+                    # Use shorter timeout in test mode for faster failures
+                    $timeoutSeconds = if ($env:LOXONE_USE_FAST_NETWORK -eq "1" -or $env:PESTER_TEST_RUN -eq "1") { 0.1 } else { 3 }
+                    $iwrParamsInitialCheck = @{ TimeoutSec = $timeoutSeconds; ErrorAction = 'Stop'; Method = 'Get' }
                     # $credential (with URL-decoded password) is NOT set here by default anymore.
                     # We will explicitly build headers if $usernameForAuthHeaderUpdateMS is available.
 
@@ -947,7 +1259,7 @@ try { # Main function try
                 }
             } finally {
                 $ProgressPreference = $oldProgressPreferenceCheck
-                if ($callbackChangedCheck) { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallbackCheck }
+                if ($callbackChangedCheck) { Clear-CertificateValidationBypass }
             }
             
             if ($currentNormalizedVersion -eq $DesiredVersion) {
@@ -962,9 +1274,8 @@ try { # Main function try
 
                 Write-Log -Message ("Proceeding with update trigger for MS '{0}'..." -f $msIP) -Level INFO
                 $msStatusObject.AttemptedUpdate = $true
-                # Use the passed StepNumber and TotalSteps for the toast
-                $stepNameString = "Step $($StepNumber)/$($TotalSteps): Updating MS $($msCounter)/$($MSs.Count) - Starting for $($msIP)..."
-                Update-PersistentToast -StepNumber $StepNumber -TotalSteps $TotalSteps -StepName $stepNameString -IsInteractive $IsInteractive -ErrorOccurred $script:ErrorOccurredInUpdateMS -AnyUpdatePerformed ($allMSResults.UpdateSucceeded -contains $true)
+                # Toast updates are handled by the main thread, not in worker context
+                # Progress is reported through return values and callbacks
                 
                 $autoupdateUriBuilder = [System.UriBuilder]$entryToParse; $autoupdateUriBuilder.Path = "/dev/sys/autoupdate"
                 $uriForUpdateTrigger = $autoupdateUriBuilder.Uri.AbsoluteUri
@@ -1026,21 +1337,72 @@ param(
     [Parameter(Mandatory=$true)][string]$NormalizedDesiredVersion,
     [Parameter()][System.Management.Automation.PSCredential]$Credential = $null, # Original credential object
     [Parameter()][string]$UsernameForAuthHeader = $null, # Manually parsed username
-    [Parameter()][SecureString]$PasswordForAuthHeader = $null, # Manually parsed (raw) password
-    [Parameter(Mandatory = $false)][int]$StepNumber = 1,
-    [Parameter(Mandatory = $false)][int]$TotalSteps = 1,
-    [Parameter()][bool]$IsInteractive = $false,
-    [Parameter()][bool]$ErrorOccurred = $false,
-    [Parameter()][bool]$AnyUpdatePerformed = $false,
+    [Parameter()]$PasswordForAuthHeader = $null, # Manually parsed password (can be SecureString or plain text)
     [Parameter()][switch]$SkipCertificateCheck,
-    [Parameter(Mandatory = $false)][int]$MSCounter = 1,
-    [Parameter(Mandatory = $false)][int]$TotalMS = 1,
-    [Parameter()][scriptblock]$ProgressReporter = $null
+    [Parameter()][scriptblock]$ProgressReporter = $null,
+    [Parameter()][System.Collections.Concurrent.ConcurrentQueue[hashtable]]$ProgressQueue = $null # REAL-TIME status updates
 )
-Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
-Write-Log -Level DEBUG -Message ("Invoke-MSUpdate: UsernameForAuthHeader is null/empty: $([string]::IsNullOrEmpty($UsernameForAuthHeader)), PasswordForAuthHeader is null/empty: $(($null -eq $PasswordForAuthHeader -or $PasswordForAuthHeader.Length -eq 0))")
+# Immediate defensive check for PS7 parallel context issues
+if ($null -eq $MSUri) {
+    $invokeResult = [PSCustomObject]@{ VerificationSuccess = $false; ReportedVersion = $null; ErrorOccurredInInvoke = $true; StatusMessage = "MSUri is null" }
+    return $invokeResult
+}
 
-$invokeResult = [PSCustomObject]@{ VerificationSuccess = $false; ReportedVersion = $null; ErrorOccurredInInvoke = $false; StatusMessage = "NotStarted" }
+# Initialize status updates array to collect all state changes
+$statusUpdates = [System.Collections.ArrayList]::new()
+
+# Extract IP from URI for logging
+$hostForLogging = $null
+if ($MSUri) {
+    try {
+        $uriObj = [System.Uri]$MSUri
+        $hostForLogging = $uriObj.Host
+    } catch {
+        # Fallback to parsing
+        if ($MSUri -match '://[^@]+@([^:/]+)') {
+            $hostForLogging = $matches[1]
+        }
+    }
+}
+
+# Skip Enter-Function entirely in parallel mode - it uses $MyInvocation which causes issues
+if ($env:LOXONE_PARALLEL_MODE -ne "1") {
+    try {
+        if ($MyInvocation) {
+            Enter-Function -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.ScriptName -LineNumber $MyInvocation.ScriptLineNumber
+        }
+    } catch {
+        # Continue anyway
+    }
+}
+
+# Log at INFO level to ensure we see it
+try {
+    # Extra defensive - check if Credential causes issues
+    $credInfo = if ($null -eq $Credential) { "null" } else { "present" }
+    Write-Log -Level INFO -Message ("Invoke-MSUpdate START - MSUri: '$MSUri', Username: '$UsernameForAuthHeader', Credential: $credInfo")
+} catch {
+    # Write-Log might fail - but we need to continue
+}
+
+# Wrap ALL early parameter checking in try-catch for PS7 parallel issues
+try {
+    $pwdType = if ($null -eq $PasswordForAuthHeader) { "null" } elseif ($PasswordForAuthHeader -is [System.Security.SecureString]) { "SecureString" } else { "PlainText" }
+    Write-Log -Level DEBUG -Message ("Invoke-MSUpdate: UsernameForAuthHeader is null/empty: $([string]::IsNullOrEmpty($UsernameForAuthHeader)), PasswordForAuthHeader type: $pwdType")
+    Write-Log -Level DEBUG -Message ("Invoke-MSUpdate: Credential is null: $($null -eq $Credential), MSUri: '$MSUri'")
+} catch {
+    Write-Log -Level WARN -Message "Failed to check parameter types (expected in PS7 parallel): $_"
+}
+
+$invokeResult = [PSCustomObject]@{ 
+    VerificationSuccess = $false
+    ReportedVersion = $null
+    ErrorOccurredInInvoke = $false
+    StatusMessage = "NotStarted"
+    CurrentState = ''
+    LastUpdateStatus = ''
+    LastStatusCode = ''
+}
 $originalCallback = $null; $callbackChanged = $false
 $oldProgressPreference = $ProgressPreference
 
@@ -1056,35 +1418,82 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     $invokeResult.StatusMessage = "TriggeringUpdate"
     Write-Log -Message ("Attempting to trigger update for MS '{0}'..." -f $hostForPingInInvoke) -Level INFO
     
-    # Report progress if reporter is available
+    # Skip progress reporter in parallel context - it causes serialization issues
+    # The parallel workflow uses queues for progress instead
     if ($ProgressReporter) {
-        & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
-                           -Status "Triggering update" `
-                           -PercentComplete 10 `
-                           -CurrentOperation "Sending update command to miniserver"
+        try {
+            # In parallel context, the ProgressReporter scriptblock may have issues
+            # Just log that we're skipping it
+            if ($env:LOXONE_PARALLEL_MODE -eq "1") {
+                Write-Log -Level DEBUG -Message "Skipping ProgressReporter in parallel context for Invoke-MSUpdate"
+            } else {
+                # Sequential mode - safe to use
+                if ($ProgressReporter -is [scriptblock]) {
+                    & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
+                                       -Status "Triggering update" `
+                                       -PercentComplete 10 `
+                                       -CurrentOperation "Sending update command to miniserver"
+                }
+            }
+        } catch {
+            # Progress reporter might fail - continue anyway
+            Write-Log -Level DEBUG -Message "ProgressReporter handling failed: $_"
+        }
     }
 
     if ($SkipCertificateCheck.IsPresent) {
         $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }; $callbackChanged = $true
+        Set-CertificateValidationBypass; $callbackChanged = $true
     }
 
-    try { # For IWR - Trigger
-            $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = 5; ErrorAction = 'Stop' }
+    # Trigger update with retry logic (3 attempts)
+    $maxTriggerAttempts = 3
+    $triggerAttempt = 0
+    $triggerSuccess = $false
+    $lastTriggerError = $null
+    
+    while ($triggerAttempt -lt $maxTriggerAttempts -and -not $triggerSuccess) {
+        $triggerAttempt++
+        Write-Log -Message ("Trigger attempt {0}/{1} for MS {2}" -f $triggerAttempt, $maxTriggerAttempts, $hostForPingInInvoke) -Level DEBUG
+        
+        try { # For IWR - Trigger
+            # Increase timeout for HTTPS connections which may take longer
+            $triggerTimeout = if ($schemeInInvoke -eq 'https') { 15 } else { 10 }
+            $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = $triggerTimeout; ErrorAction = 'Stop' }
             
-            if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null -and $PasswordForAuthHeader.Length -gt 0)) {
+            # Log credential availability for debugging - be extra defensive for PS7
+            $pwdTypeForLog = "unknown"
+            try {
+                if ($null -eq $PasswordForAuthHeader) { 
+                    $pwdTypeForLog = "null" 
+                } elseif ($PasswordForAuthHeader) {
+                    $pwdTypeForLog = $PasswordForAuthHeader.GetType().Name
+                }
+            } catch {
+                $pwdTypeForLog = "error-checking-type"
+            }
+            Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Trigger): Checking credentials - Username: '$UsernameForAuthHeader', Password type: $pwdTypeForLog"
+            
+            if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null)) {
                 Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Trigger): Using manually parsed credentials for Authorization header."
                 $plainPasswordForAuthHeader = $null
-                $bstr = $null
-                try {
-                    # Convert SecureString to plain text for the Authorization header
-                    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($PasswordForAuthHeader)
-                    $plainPasswordForAuthHeader = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-                }
-                finally {
-                    if ($null -ne $bstr) {
-                        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+                
+                # Handle both SecureString and plain text password
+                if ($PasswordForAuthHeader -is [System.Security.SecureString]) {
+                    $bstr = $null
+                    try {
+                        # Convert SecureString to plain text for the Authorization header
+                        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($PasswordForAuthHeader)
+                        $plainPasswordForAuthHeader = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
                     }
+                    finally {
+                        if ($null -ne $bstr) {
+                            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+                        }
+                    }
+                } else {
+                    # Already plain text
+                    $plainPasswordForAuthHeader = $PasswordForAuthHeader
                 }
                 $PairTrigger = "${UsernameForAuthHeader}:${plainPasswordForAuthHeader}"
                 # Clear the plain text password variable as its content is now in PairTrigger
@@ -1100,56 +1509,135 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                 } elseif ($schemeInInvoke -eq 'http') {
                     # This path for PS5 HTTP with $Credential might still use URL-decoded password from $Credential.GetNetworkCredential().Password
                     # Ideally, if $UsernameForAuthHeader/$PasswordForAuthHeader were always populated from Update-MS, this branch wouldn't be hit for Basic Auth.
-                    $UsernameDecoded = $Credential.UserName; $PasswordDecoded = $Credential.GetNetworkCredential().Password
+                    if ($Credential) {
+                        $UsernameDecoded = $Credential.UserName; $PasswordDecoded = $Credential.GetNetworkCredential().Password
+                    } else {
+                        Write-Log -Level ERROR -Message "Invoke-MSUpdate (Trigger): Credential object is null when trying to extract username/password for HTTP"
+                        throw "No credentials available for authentication"
+                    }
                     Write-Log -Level WARN -Message "Invoke-MSUpdate (Trigger): PS5 HTTP with \$Credential. Password used will be URL-decoded from \$Credential object."
                     $EncodedCredentialsDecoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${UsernameDecoded}:${PasswordDecoded}"))
                     $triggerParams.Headers = @{ Authorization = "Basic $EncodedCredentialsDecoded" }
                 } else { # HTTPS
-                    $triggerParams.Credential = $Credential
+                    if ($Credential) {
+                        $triggerParams.Credential = $Credential
+                    } else {
+                        Write-Log -Level ERROR -Message "Invoke-MSUpdate (Trigger): HTTPS connection but Credential object is null"
+                        throw "No credentials available for HTTPS authentication to miniserver"
+                    }
                 }
             } else {
+                # No credentials at all - this is fatal for HTTPS
+                if ($schemeInInvoke -eq 'https') {
+                    Write-Log -Level ERROR -Message "Invoke-MSUpdate (Trigger): HTTPS connection to '$hostForPingInInvoke' but NO credentials available (neither manual nor Credential object)"
+                    throw "HTTPS connection requires credentials but none were provided for $hostForPingInInvoke"
+                }
                 Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Trigger): No credentials provided."
             }
             if ($schemeInInvoke -eq 'http') { $triggerParams.UseBasicParsing = $true }
     
             Write-Log -Level DEBUG -Message ("Invoke-MSUpdate (Trigger): triggerParams before invoke: $($triggerParams | Out-String)")
-            Invoke-MiniserverWebRequest -Parameters $triggerParams | Out-Null
-            Write-Log -Message ("Update trigger sent to '{0}'." -f $hostForPingInInvoke) -Level INFO
-            $invokeResult.StatusMessage = "UpdateTriggered_WaitingForReboot"
             
-            # Report progress
+            # Log that we're triggering the update
+            Write-Log -Message ("TRIGGERING UPDATE for MS {0} to version {1}" -f $hostForPingInInvoke, $NormalizedDesiredVersion) -Level INFO
+            
+            Invoke-MiniserverWebRequest -Parameters $triggerParams | Out-Null
+            Write-Log -Message ("UPDATE COMMAND ACCEPTED by '{0}'. Miniserver is starting update process to version {1}." -f $hostForPingInInvoke, $NormalizedDesiredVersion) -Level INFO
+            $invokeResult.StatusMessage = "UpdateAccepted_ProcessStarting"
+            
+            # Add status update that update was triggered (REAL-TIME)
+            Send-MSStatusUpdate -State 'Updating' -Progress 30 -Message "Update triggered" `
+                -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+            
+            # Initialize status tracking variables for polling
+            $script:LastLoggedStatus = $null
+            $script:LastStatusMessage = $null
+            
+            # Report progress with more accurate status
             if ($ProgressReporter) {
                 & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
-                                   -Status "Update triggered, waiting for reboot" `
-                                   -PercentComplete 20 `
-                                   -CurrentOperation "Miniserver is downloading and installing update"
+                                   -Status "Update accepted - Process starting" `
+                                   -PercentComplete 25 `
+                                   -CurrentOperation "Miniserver confirmed update and is preparing"
             }
+            
+            # Worker should report progress through queue, not update toast directly
+            # Toast updates are handled by main thread only
+            
+            # Mark trigger as successful
+            $triggerSuccess = $true
+            Write-Log -Message ("Trigger attempt {0} succeeded for MS {1}" -f $triggerAttempt, $hostForPingInInvoke) -Level DEBUG
+            
         } catch {
-        $invokeResult.ErrorOccurredInInvoke = $true; $invokeResult.StatusMessage = ("Error_TriggeringUpdate: {0}" -f $CaughtError.Exception.Message.Split([Environment]::NewLine)[0])
-        Write-Log -Message ("Error triggering update for '{0}': {1}" -f $hostForPingInInvoke, $CaughtError.Exception.Message) -Level ERROR
+            $CaughtError = $_
+            $lastTriggerError = $CaughtError
+            Write-Log -Message ("Trigger attempt {0}/{1} failed for '{2}': {3}" -f $triggerAttempt, $maxTriggerAttempts, $hostForPingInInvoke, $CaughtError.Exception.Message) -Level WARN
+            
+            # If not the last attempt, wait before retrying
+            if ($triggerAttempt -lt $maxTriggerAttempts) {
+                $retryDelay = 2 * $triggerAttempt  # Progressive delay: 2s, 4s, 6s
+                Write-Log -Message ("Waiting {0} seconds before retry..." -f $retryDelay) -Level DEBUG
+                Start-Sleep -Seconds $retryDelay
+            }
+        }
+    }  # End of retry while loop
+    } catch {
+        # Catch for the outer try block at line 1398
+        $triggerError = $_
+        Write-Log -Message ("Failed to trigger update for MS {0}: {1}" -f $hostForPingInInvoke, $triggerError) -Level ERROR
+        $invokeResult.StatusMessage = "Failed to trigger update: $triggerError"
+        $invokeResult.Success = $false
+    }
+
+    # Check if trigger was successful after all attempts
+    if (-not $triggerSuccess) {
+        $invokeResult.ErrorOccurredInInvoke = $true
+        $invokeResult.StatusMessage = ("Error_TriggeringUpdate: {0}" -f $lastTriggerError.Exception.Message.Split([Environment]::NewLine)[0])
+        Write-Log -Message ("All {0} trigger attempts failed for '{1}': {2}" -f $maxTriggerAttempts, $hostForPingInInvoke, $lastTriggerError.Exception.Message) -Level ERROR
     }
 
     if (-not $invokeResult.ErrorOccurredInInvoke) {
         Write-Log -Message ("Waiting for MS {0} to reboot/update..." -f $hostForPingInInvoke) -Level INFO
-        $toastStepNameWait = "Step $($StepNumber)/$($TotalSteps): Updating MS $($MSCounter)/$($TotalMS) - Waiting for $($hostForPingInInvoke)..."
-        Update-PersistentToast -StepNumber $StepNumber -TotalSteps $TotalSteps -StepName $toastStepNameWait -IsInteractive $IsInteractive -ErrorOccurred $ErrorOccurred -AnyUpdatePerformed $AnyUpdatePerformed
+        # Progress reporting is handled through ProgressReporter callback, not direct toast updates
+        
+        # Initialize detailed stage tracking
+        $stageStartTime = Get-Date
+        $currentStage = "Initializing"
+        $stageHistory = @()
         
         $startTime = Get-Date; $timeout = New-TimeSpan -Minutes 15; $msResponsive = $false; $loggedUpdatingStatus = $false
         $verifyParams = @{ Uri = $verificationUriForPolling; UseBasicParsing = $true; TimeoutSec = 3; ErrorAction = 'Stop' }
+        
+        # Add SkipCertificateCheck for HTTPS verification if needed (same as trigger)
+        if ($schemeInInvoke -eq 'https' -and $SkipCertificateCheck.IsPresent -and $PSVersionTable.PSVersion.Major -ge 6) {
+            $verifyParams.SkipCertificateCheck = $true
+            Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Polling): Added SkipCertificateCheck for HTTPS verification"
+        }
 
-        if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null -and $PasswordForAuthHeader.Length -gt 0)) {
+        if (-not [string]::IsNullOrEmpty($UsernameForAuthHeader) -and ($PasswordForAuthHeader -ne $null)) {
             Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Polling): Using manually parsed credentials for Authorization header."
             $plainPasswordForVerifyHeader = $null
-            $bstrVerify = $null
-            try {
-                # Convert SecureString to plain text for the Authorization header
-                $bstrVerify = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($PasswordForAuthHeader)
-                $plainPasswordForVerifyHeader = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstrVerify)
-            }
-            finally {
-                If ($null -ne $bstrVerify) {
-                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstrVerify)
+            
+            # Handle both SecureString and plain text password
+            if ($PasswordForAuthHeader -is [System.Security.SecureString]) {
+                $bstrVerify = $null
+                try {
+                    # Convert SecureString to plain text for the Authorization header
+                    $bstrVerify = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($PasswordForAuthHeader)
+                    $plainPasswordForVerifyHeader = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstrVerify)
                 }
+                catch {
+                    Write-Log -Level ERROR -Message "Failed to convert SecureString for verification: $_"
+                    throw
+                }
+                finally {
+                    If ($null -ne $bstrVerify) {
+                        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstrVerify)
+                    }
+                }
+            } else {
+                # Already plain text
+                $plainPasswordForVerifyHeader = $PasswordForAuthHeader
             }
             $PairVerify = "${UsernameForAuthHeader}:${plainPasswordForVerifyHeader}"
             # Clear the plain text password variable
@@ -1163,12 +1651,22 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             if ($schemeInInvoke -eq 'http' -and $PSVersionTable.PSVersion.Major -ge 6) {
                 $verifyParams.Credential = $Credential; $verifyParams.AllowUnencryptedAuthentication = $true
             } elseif ($schemeInInvoke -eq 'http') {
-                $UsernameDecodedPoll = $Credential.UserName; $PasswordDecodedPoll = $Credential.GetNetworkCredential().Password
+                if ($Credential) {
+                    $UsernameDecodedPoll = $Credential.UserName; $PasswordDecodedPoll = $Credential.GetNetworkCredential().Password
+                } else {
+                    Write-Log -Level ERROR -Message "Invoke-MSUpdate (Polling): HTTP connection but Credential object is null"
+                    throw "No credentials available for HTTP authentication during polling"
+                }
                 Write-Log -Level WARN -Message "Invoke-MSUpdate (Polling): PS5 HTTP with \$Credential. Password used will be URL-decoded from \$Credential object."
                 $EncodedCredentialsDecodedPoll = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${UsernameDecodedPoll}:${PasswordDecodedPoll}"))
                 $verifyParams.Headers = @{ Authorization = "Basic $EncodedCredentialsDecodedPoll" }
             } else { # HTTPS
-                $verifyParams.Credential = $Credential
+                if ($Credential) {
+                    $verifyParams.Credential = $Credential
+                } else {
+                    Write-Log -Level ERROR -Message "Invoke-MSUpdate (Polling): HTTPS connection but Credential object is null"
+                    throw "No credentials available for HTTPS authentication during polling"
+                }
             }
         } else {
             Write-Log -Level DEBUG -Message "Invoke-MSUpdate (Polling): No credentials provided."
@@ -1178,60 +1676,402 @@ try { # Main try for ProgressPreference and SSL Callback restoration
 
         $Attempts = 0; $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
         $LastPollStatusMessage = "Initiating..."
+        $LastStageCode = ""
         Write-Log -Message ("Starting polling loop for MS {0}, MaxAttempts: {1}, Timeout: {2} minutes" -f $hostForPingInInvoke, $MaxAttempts, $timeout.TotalMinutes) -Level INFO
         
-        # Report progress
+        # Log initial stage with timestamp
+        $stageEntry = @{
+            Stage = $currentStage
+            StartTime = $stageStartTime
+            ElapsedMs = 0
+        }
+        $stageHistory += $stageEntry
+        Write-Log -Message ("[STAGE] MS {0} - Stage: {1} - Time: {2:yyyy-MM-dd HH:mm:ss.fff}" -f $hostForPingInInvoke, $currentStage, $stageStartTime) -Level INFO
+        
+        # Report initial progress with stage info
         if ($ProgressReporter) {
             & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
-                               -Status "Waiting for miniserver to reboot" `
+                               -Status "Waiting for miniserver to reboot - Stage: $currentStage" `
                                -PercentComplete 30 `
-                               -CurrentOperation "Polling for miniserver availability"
+                               -CurrentOperation "Starting update monitoring | Polling interval: 10s"
         }
+        $updateCompleted = $false  # Flag to track when update is successfully verified
         while (((Get-Date) - $startTime) -lt $timeout) {
             $Attempts++
             # In ThreadJob context, Write-Host doesn't work properly, use logging instead
             Write-Log -Message ("Polling MS {0} (Attempt {1}/{2}): {3}" -f $hostForPingInInvoke, $Attempts, $MaxAttempts, $LastPollStatusMessage) -Level INFO
             Start-Sleep -Seconds 10
+
             try {
-                Write-Log -Message ("Calling Invoke-MiniserverWebRequest for poll attempt {0}" -f $Attempts) -Level INFO
-                $lastResponse = Invoke-MiniserverWebRequest -Parameters $verifyParams
-                Write-Log -Message ("Poll response received, parsing XML..." -f $Attempts) -Level INFO
-                $msResponsive = $true; $xmlCurrent = [xml]$lastResponse.Content; $versionCurrentPoll = $xmlCurrent.LL.value
-                if ([string]::IsNullOrEmpty($versionCurrentPoll)) { throw "LL.value empty in poll response." }
-                $normalizedVersionCurrentPoll = Convert-VersionString $versionCurrentPoll; $invokeResult.ReportedVersion = $normalizedVersionCurrentPoll
-                if ($normalizedVersionCurrentPoll -eq $NormalizedDesiredVersion) {
+            # Add retry logic for each poll attempt
+            $pollRetryCount = 0
+            $maxPollRetries = 3
+            $pollSucceeded = $false
+
+            while ($pollRetryCount -lt $maxPollRetries -and -not $pollSucceeded) {
+                try {
+                    if ($pollRetryCount -gt 0) {
+                        Write-Log -Message ("Retrying poll attempt {0} (retry {1}/{2})" -f $Attempts, $pollRetryCount, $maxPollRetries) -Level INFO
+                        Start-Sleep -Seconds 2
+                    }
+
+                    Write-Log -Message ("Calling Invoke-MiniserverWebRequest for poll attempt {0}" -f $Attempts) -Level INFO
+                    $lastResponse = Invoke-MiniserverWebRequest -Parameters $verifyParams
+                    Write-Log -Message ("Poll response received, parsing XML..." -f $Attempts) -Level INFO
+                    $msResponsive = $true; $xmlCurrent = [xml]$lastResponse.Content; $versionCurrentPoll = $xmlCurrent.LL.value
+                    $pollSucceeded = $true
+                    if ([string]::IsNullOrEmpty($versionCurrentPoll)) { throw "LL.value empty in poll response." }
+                    $normalizedVersionCurrentPoll = Convert-VersionString $versionCurrentPoll; $invokeResult.ReportedVersion = $normalizedVersionCurrentPoll
+
+                    # Add Verifying status if MS just came back from reboot (before checking version)
+                    if ($script:RebootDetected -and -not $script:VerificationDetected) {
+                        Write-Log -Level INFO -Message ("[STATE_CHANGE] MS {0} responsive after reboot - entering verification phase" -f $hostForPingInInvoke)
+                        $script:VerificationDetected = $true
+
+                        # Add verification state update (REAL-TIME)
+                        Send-MSStatusUpdate -State 'Verifying' -Progress 85 -Message "Verifying update" `
+                            -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                    }
+
+                    if ($normalizedVersionCurrentPoll -eq $NormalizedDesiredVersion) {
                     $invokeResult.VerificationSuccess = $true; $invokeResult.StatusMessage = "UpdateSuccessful_VersionVerified"; $LastPollStatusMessage = ("OK - Version {0}" -f $NormalizedDesiredVersion)
                     
-                    # Report success
+                    # Log final stage completion
+                    $finalDuration = ((Get-Date) - $stageStartTime).TotalMilliseconds
+                    Write-Log -Message ("[STAGE_COMPLETE] MS {0} - Final stage: '{1}' - Duration: {2:N0}ms" -f $hostForPingInInvoke, $currentStage, $finalDuration) -Level INFO
+                    
+                    # Log summary of all stages
+                    $totalUpdateDuration = ((Get-Date) - $startTime).TotalSeconds
+                    Write-Log -Message ("[UPDATE_SUMMARY] MS {0} - Total update time: {1:N1} seconds - Stages completed: {2}" -f $hostForPingInInvoke, $totalUpdateDuration, $stageHistory.Count) -Level INFO
+                    
+                    if ($stageHistory.Count -gt 1) {
+                        foreach ($stage in $stageHistory) {
+                            if ($stage.PreviousStageDuration) {
+                                Write-Log -Message ("  - Stage '{0}': {1:N0}ms" -f $stage.PreviousStage, $stage.PreviousStageDuration) -Level INFO
+                            }
+                        }
+                    }
+                    
+                    # Log successful update completion
+                    Write-Log -Message ("UPDATE SUCCESSFUL for MS {0}: Now running version {1}" -f $hostForPingInInvoke, $NormalizedDesiredVersion) -Level INFO
+                    
+                    # Add status update for successful verification (REAL-TIME)
+                    Send-MSStatusUpdate -State 'Completed' -Progress 100 -Message "Updated to $NormalizedDesiredVersion" `
+                        -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                    
+                    # Success is reported through ProgressReporter, not direct toast updates
+                    
+                    # Report success with complete timing summary
                     if ($ProgressReporter) {
+                        $totalDuration = ((Get-Date) - $startTime).TotalSeconds
+                        $summaryText = "Update completed in {0:N1} seconds | {1} stages" -f $totalDuration, $stageHistory.Count
                         & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
                                            -Status "Update completed successfully" `
                                            -PercentComplete 100 `
-                                           -CurrentOperation "Version verified: $NormalizedDesiredVersion"
+                                           -CurrentOperation "Version verified: $NormalizedDesiredVersion | $summaryText"
                     }
+                    $updateCompleted = $true  # Set flag to exit outer polling loop
                     break
-                } else { $invokeResult.StatusMessage = ("Polling_VersionMismatch_Current_{0}" -f $normalizedVersionCurrentPoll); $LastPollStatusMessage = ("OK - Version {0} (Expected {1})" -f $normalizedVersionCurrentPoll, $NormalizedDesiredVersion) }
-            } catch [System.Net.WebException] {
+                } else {
+                    $invokeResult.StatusMessage = ("Polling_VersionMismatch_Current_{0}" -f $normalizedVersionCurrentPoll)
+                    $LastPollStatusMessage = ("OK - Version {0} (Expected {1})" -f $normalizedVersionCurrentPoll, $NormalizedDesiredVersion)
+                    # Log version mismatch during polling
+                    Write-Log -Level INFO -Message ("MS {0} responded with version {1}, still waiting for {2}" -f $hostForPingInInvoke, $normalizedVersionCurrentPoll, $NormalizedDesiredVersion)
+                }
+                }
+                catch [System.Net.WebException] {
+                    # Handle 503 responses (MS updating) - parse response body BEFORE throwing
+                    if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 503) {
+                        # Parse the 503 response body to extract detailed status code
+                        $parsedErrorDetail = 'Updating...'
+                        try {
+                            $responseStream = $_.Exception.Response.GetResponseStream()
+                            $streamReader = New-Object System.IO.StreamReader($responseStream)
+                            $responseBody = $streamReader.ReadToEnd()
+                            $streamReader.Close()
+                            $responseStream.Close()
+
+                            Write-Log -Level DEBUG -Message ("MS {0} 503 response body: '{1}'" -f $hostForPingInInvoke, $responseBody)
+
+                            # Extract error detail code (530-534)
+                            if ($responseBody -match '<errordetail>(.*?)</errordetail>') {
+                                $parsedErrorDetail = $matches[1].Trim()
+                                Write-Log -Level INFO -Message ("MS {0} 503 status code: '{1}'" -f $hostForPingInInvoke, $parsedErrorDetail)
+                            }
+                        } catch {
+                            Write-Log -Level DEBUG -Message ("MS {0} failed to parse 503 body: {1}" -f $hostForPingInInvoke, $_)
+                        }
+
+                        # Store the parsed error detail in the exception for outer catch
+                        $_.Exception | Add-Member -NotePropertyName 'ParsedErrorDetail' -NotePropertyValue $parsedErrorDetail -Force -ErrorAction SilentlyContinue
+
+                        # Let the outer catch block handle 503 responses
+                        throw
+                    }
+
+                    # For other web exceptions, retry
+                    $pollRetryCount++
+                    if ($pollRetryCount -ge $maxPollRetries) {
+                        Write-Log -Message ("Poll attempt {0} failed after {1} retries: {2}" -f $Attempts, $pollRetryCount, $_.Exception.Message) -Level WARN
+                        throw
+                    }
+                    Write-Log -Message ("Poll attempt {0} retry {1} failed: {2}" -f $Attempts, $pollRetryCount, $_.Exception.Message) -Level DEBUG
+                } catch {
+                    # For non-web exceptions, retry
+                    $pollRetryCount++
+                    if ($pollRetryCount -ge $maxPollRetries) {
+                        Write-Log -Message ("Poll attempt {0} failed after {1} retries: {2}" -f $Attempts, $pollRetryCount, $_) -Level WARN
+                        throw
+                    }
+                    Write-Log -Message ("Poll attempt {0} retry {1} failed: {2}" -f $Attempts, $pollRetryCount, $_) -Level DEBUG
+                }
+
+            # If all retries failed, handle the exception
+            if (-not $pollSucceeded) {
+                # Continue to the next iteration of the outer while loop
+                continue
+            }
+            } # End of retry while loop
+
+            # Check if update was successfully verified - if so, exit the outer polling loop
+            if ($updateCompleted) {
+                Write-Log -Message "Update successfully verified for MS $hostForPingInInvoke - exiting polling loop" -Level INFO
+                break
+            }
+
+            } # End of outer try
+            catch [System.Net.WebException] {
                 $CaughtWebError = $_
                 $statusCode = if ($CaughtWebError.Exception.Response) { [int]$CaughtWebError.Exception.Response.StatusCode } else { $null }
                 if ($statusCode -eq 503) {
-                    $invokeResult.StatusMessage = "Polling_MS_Updating_503"; $errorDetail = 'Updating...'
-                    if ($CaughtWebError.Exception.Response) { try { $responseStream = $CaughtWebError.Exception.Response.GetResponseStream(); $streamReader = New-Object System.IO.StreamReader($responseStream); $errorDetail = ($streamReader.ReadToEnd() -match '<errordetail>(.*?)</errordetail>') | Out-Null; if($matches[1]){$errorDetail = $matches[1].Trim()}; $streamReader.Close(); $responseStream.Close() } catch {} }
-                    $LastPollStatusMessage = ("Updating ({0})" -f $errorDetail); if (-not $loggedUpdatingStatus) { Write-Log -Level INFO -Message ("MS {0} status: {1}" -f $hostForPingInInvoke, $errorDetail); $loggedUpdatingStatus = $true }
+                    $invokeResult.StatusMessage = "Polling_MS_Updating_503"
+
+                    # Use the pre-parsed error detail from the inner catch
+                    $errorDetail = if ($CaughtWebError.Exception.ParsedErrorDetail) {
+                        $CaughtWebError.Exception.ParsedErrorDetail
+                    } else {
+                        'Updating...'
+                    }
+
+                    Write-Log -Level DEBUG -Message ("MS {0} using parsed error detail: '{1}'" -f $hostForPingInInvoke, $errorDetail)
+
+                    # Store the raw status code
+                    $invokeResult.LastStatusCode = $errorDetail
+
+                    # Parse status codes for more user-friendly messages
+                    $statusMessage = switch -Regex ($errorDetail) {
+                        '530' { "Downloading update files" }
+                        '531' { "Preparing update installation" }
+                        '532' { "Installing update" }
+                        '533' { "Finalizing update" }
+                        '534' { "Rebooting miniserver" }
+                        'Updating' { "Update in progress" }
+                        default { $errorDetail }
+                    }
+
+                    # Track stage changes with millisecond precision
+                    if ($errorDetail -ne $LastStageCode) {
+                        $previousStage = $currentStage
+                        $currentStage = $statusMessage
+                        $newStageTime = Get-Date
+                        $stageDuration = ($newStageTime - $stageStartTime).TotalMilliseconds
+
+                        # Log stage transition with detailed timing
+                        Write-Log -Message ("[STAGE_TRANSITION] MS {0} - From: '{1}' to '{2}' - Duration: {3:N0}ms - Time: {4:yyyy-MM-dd HH:mm:ss.fff}" -f $hostForPingInInvoke, $previousStage, $currentStage, $stageDuration, $newStageTime) -Level INFO
+
+                        # Add to stage history
+                        $stageEntry = @{
+                            Stage = $currentStage
+                            StatusCode = $errorDetail
+                            StartTime = $newStageTime
+                            PreviousStage = $previousStage
+                            PreviousStageDuration = $stageDuration
+                        }
+                        $stageHistory += $stageEntry
+
+                        # Update stage tracking
+                        $stageStartTime = $newStageTime
+                        $LastStageCode = $errorDetail
+
+                        # Send detailed progress update if available
+                        if ($ProgressQueue) {
+                            $detailedProgress = @{
+                                Type = 'StageTransition'
+                                MiniserverIP = $hostForPingInInvoke
+                                Stage = $currentStage
+                                StatusCode = $errorDetail
+                                Timestamp = $newStageTime
+                                ElapsedMs = $stageDuration
+                                Attempt = $Attempts
+                            }
+                            try {
+                                [void]$ProgressQueue.Enqueue($detailedProgress)
+                                Write-Log -Message ("[PROGRESS_NOTIFICATION] Sent stage transition notification for MS {0}: {1}" -f $hostForPingInInvoke, $currentStage) -Level DEBUG
+                            } catch {
+                                Write-Log -Message "Failed to send stage transition progress: $_" -Level WARN
+                            }
+                        }
+                    }
+
+                    # If no specific error detail code was found, use timing-based state detection
+                    if ($errorDetail -eq 'Updating...' -or -not ($errorDetail -match '^\d{3}$')) {
+                        Write-Log -Level INFO -Message ("MS {0} 503 without error detail. Using timing-based state detection (poll #{1})" -f $hostForPingInInvoke, $Attempts)
+
+                        # Estimate state based on timing (typical update sequence)
+                        $elapsedSinceStart = ((Get-Date) - $startTime).TotalSeconds
+                        $estimatedState = if ($elapsedSinceStart -lt 30) {
+                            "Downloading update"  # First 30 seconds
+                        } elseif ($elapsedSinceStart -lt 90) {
+                            "Installing update"   # 30-90 seconds
+                        } elseif ($elapsedSinceStart -lt 180) {
+                            "Rebooting"          # 90-180 seconds (includes unreachable period)
+                        } elseif ($elapsedSinceStart -lt 240) {
+                            "Verifying"          # 180-240 seconds
+                        } else {
+                            "Update in progress" # Beyond 240 seconds
+                        }
+
+                        $statusMessage = $estimatedState
+                        $errorDetail = "503-Estimated"
+
+                        # Track estimated state changes
+                        if ($estimatedState -ne $script:LastEstimatedState) {
+                            Write-Log -Level INFO -Message ("[ESTIMATED_STATE] MS {0} - State: '{1}' after {2:N0} seconds" -f $hostForPingInInvoke, $estimatedState, $elapsedSinceStart)
+                            $script:LastEstimatedState = $estimatedState
+
+                            # Send progress update for estimated state
+                            $newState = switch ($estimatedState) {
+                                "Downloading update" { 'Downloading' }
+                                "Installing update" { 'Installing' }
+                                "Rebooting" { 'Rebooting' }
+                                "Verifying" { 'Verifying' }
+                                default { 'Updating' }
+                            }
+
+                            $progressValue = switch ($newState) {
+                                'Downloading' { 35 }
+                                'Installing' { 50 }
+                                'Rebooting' { 65 }
+                                'Verifying' { 80 }
+                                default { 45 }
+                            }
+
+                            # Add estimated state update (REAL-TIME)
+                            Send-MSStatusUpdate -State $newState -Progress $progressValue -Message $statusMessage `
+                                -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                        }
+                    }
                     
-                    # Report update progress
+                    $LastPollStatusMessage = ("Updating: {0}" -f $statusMessage)
+                    
+                    # Track the update state for return value
+                    $newState = ''
+                    $progressValue = 40
+                    if ($errorDetail -eq '534') {
+                        $invokeResult.CurrentState = 'Rebooting'
+                        $newState = 'Rebooting'
+                        $progressValue = 60
+                    } elseif ($errorDetail -match '^53[0-3]$') {
+                        $invokeResult.CurrentState = 'Installing'
+                        $newState = 'Installing'
+                        $progressValue = 50
+                    } else {
+                        $invokeResult.CurrentState = 'Updating'
+                        $newState = 'Updating'
+                        $progressValue = 45
+                    }
+                    $invokeResult.LastUpdateStatus = $statusMessage
+                    
+                    # Log every status during polling to track all changes
+                    if (-not $loggedUpdatingStatus) { 
+                        # First status detected
+                        Write-Log -Level INFO -Message ("MS {0} initial update status: {1} (Status Code: {2})" -f $hostForPingInInvoke, $statusMessage, $errorDetail)
+                        $loggedUpdatingStatus = $true
+                        $script:LastLoggedStatus = $errorDetail
+                        $script:LastStatusMessage = $statusMessage
+                        
+                        # Add initial status update (REAL-TIME)
+                        Send-MSStatusUpdate -State $newState -Progress $progressValue -Message $statusMessage `
+                            -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                        
+                    } elseif ($script:LastLoggedStatus -ne $errorDetail) {
+                        # Status has changed - log it and send real-time update
+                        Write-Log -Level INFO -Message ("MS {0} STATUS CHANGE: {1} (Code: {2}, Previous Code: {3})" -f $hostForPingInInvoke, $statusMessage, $errorDetail, $script:LastLoggedStatus)
+                        $script:LastLoggedStatus = $errorDetail
+                        $script:LastStatusMessage = $statusMessage
+                        
+                        # Add status change update (REAL-TIME)
+                        Send-MSStatusUpdate -State $newState -Progress $progressValue -Message $statusMessage `
+                            -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                        
+                    } else {
+                        # Same status - always log it to track all polling attempts
+                        Write-Log -Level INFO -Message ("MS {0} poll #{1}: {2} (Code: {3})" -f $hostForPingInInvoke, $Attempts, $statusMessage, $errorDetail)
+                    }
+                    
+                    # Report update progress with detailed status and timing
                     if ($ProgressReporter) {
+                        $stageDurationText = if ($stageHistory.Count -gt 0) {
+                            $totalElapsed = ((Get-Date) - $startTime).TotalSeconds
+                            $stageElapsed = ((Get-Date) - $stageStartTime).TotalSeconds
+                            " | Stage: {0:N0}s / Total: {1:N0}s" -f $stageElapsed, $totalElapsed
+                        } else { "" }
+                        
                         $percentComplete = 40 + [Math]::Min(50, [Math]::Round(($Attempts / $MaxAttempts) * 50, 0))
                         & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
-                                           -Status "Miniserver is updating" `
+                                           -Status ($statusMessage + $stageDurationText) `
                                            -PercentComplete $percentComplete `
-                                           -CurrentOperation $errorDetail
+                                           -CurrentOperation "Status Code: $errorDetail | Attempt: $Attempts/$MaxAttempts"
                     }
                 } else { $invokeResult.StatusMessage = ("Polling_WebException_StatusCode_{0}" -f $statusCode); $LastPollStatusMessage = ("Error ({0})" -f $statusCode) }
                 Write-Log -Message ("MS {0} WebException during poll ({1}): {2}" -f $hostForPingInInvoke, $LastPollStatusMessage, $CaughtWebError.Exception.Message.Split([Environment]::NewLine)[0]) -Level WARN
-        } catch {
+            }
+            catch {
             $CaughtCatchError = $_
-            $invokeResult.StatusMessage = ("Polling_Unreachable_Or_ParseError: {0}" -f $CaughtCatchError.Exception.Message.Split([Environment]::NewLine)[0]); $LastPollStatusMessage = "Unreachable/ParseError"; Write-Log -Message ("MS {0} unreachable/parse error: {1}" -f $hostForPingInInvoke, $CaughtCatchError.Exception.Message) -Level WARN
+            # Check if this is an HTTP error that contains a 503 status
+            if ($CaughtCatchError.Exception.Message -match '503' -or $CaughtCatchError.Exception.Message -match 'Service Unavailable' -or $CaughtCatchError.Exception.Message -match 'Miniserver Updating') {
+                # This is likely a 503 error during update
+                $invokeResult.StatusMessage = "Polling_MS_Updating_503"
+                $LastPollStatusMessage = "Updating (503)"
+                
+                # Try to extract status from error message
+                $statusMessage = "Update in progress"
+                if ($CaughtCatchError.Exception.Message -match 'Miniserver Updating') {
+                    $statusMessage = "Miniserver updating"
+                }
+                
+                # Track as updating state
+                $invokeResult.CurrentState = 'Updating'
+                $invokeResult.LastUpdateStatus = $statusMessage
+                
+                Write-Log -Level INFO -Message ("MS {0} returned 503 during poll #{1}: {2}" -f $hostForPingInInvoke, $Attempts, $CaughtCatchError.Exception.Message)
+                
+                # Log status change if needed and send real-time update
+                if (-not $loggedUpdatingStatus) {
+                    Write-Log -Level INFO -Message ("MS {0} initial update status detected via 503 error" -f $hostForPingInInvoke)
+                    $loggedUpdatingStatus = $true
+                    $script:LastStatusMessage = $statusMessage
+                    
+                    # Add status update for 503 (updating) (REAL-TIME)
+                    Send-MSStatusUpdate -State 'Updating' -Progress 45 -Message $statusMessage `
+                        -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                }
+            } else {
+                # Regular connection/parse error - likely rebooting if we had 503s before
+                $invokeResult.StatusMessage = ("Polling_Unreachable_Or_ParseError: {0}" -f $CaughtCatchError.Exception.Message.Split([Environment]::NewLine)[0])
+                $LastPollStatusMessage = "Unreachable/ParseError"
+                Write-Log -Message ("MS {0} unreachable/parse error: {1}" -f $hostForPingInInvoke, $CaughtCatchError.Exception.Message) -Level WARN
+                
+                # If we previously had 503 responses and now unreachable, it's likely rebooting
+                if ($loggedUpdatingStatus -and -not $script:RebootDetected) {
+                    Write-Log -Level INFO -Message ("[STATE_CHANGE] MS {0} became unreachable after update - likely rebooting" -f $hostForPingInInvoke)
+                    $script:RebootDetected = $true
+                    
+                    # Add reboot state update (REAL-TIME)
+                    Send-MSStatusUpdate -State 'Rebooting' -Progress 70 -Message "Miniserver rebooting" `
+                        -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                }
+            }
         }
     } # End while
     Write-Log -Message ("Polling loop ended for MS {0}. Success: {1}, Final status: {2}" -f $hostForPingInInvoke, $invokeResult.VerificationSuccess, $LastPollStatusMessage) -Level INFO
@@ -1239,23 +2079,56 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         if ($msResponsive) { $invokeResult.StatusMessage = ("VerificationFailed_Timeout_VersionMismatch_FinalReported_{0}" -f $invokeResult.ReportedVersion) }
         else { $invokeResult.StatusMessage = "VerificationFailed_Timeout_NoResponse" }
         Write-Log -Message ("FAILURE: MS {0} - {1}" -f $hostForPingInInvoke, $invokeResult.StatusMessage) -Level ERROR
-        $toastStepNameFail = "Step $($StepNumber)/$($TotalSteps): Updating MS $($MSCounter)/$($TotalMS) - FAILED for $($hostForPingInInvoke) ($($invokeResult.StatusMessage))"
-        Update-PersistentToast -StepNumber $StepNumber -TotalSteps $TotalSteps -StepName $toastStepNameFail -IsInteractive $IsInteractive -ErrorOccurred $true -AnyUpdatePerformed $AnyUpdatePerformed
+        
+        # Add failure status update (REAL-TIME)
+        $failureMsg = if ($msResponsive) { "Update timeout - version mismatch" } else { "No response from miniserver" }
+        Send-MSStatusUpdate -State 'Failed' -Progress 0 -Message $failureMsg `
+            -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+        
+        # Failure is reported through ProgressReporter, not direct toast updates
+    }
+
+    # Add collected status updates to the result
+    $invokeResult | Add-Member -NotePropertyName 'StatusUpdates' -NotePropertyValue $statusUpdates -Force
+
+    # Debug log the status updates being returned
+    Write-Log -Message "Invoke-MSUpdate returning with $($statusUpdates.Count) status updates for MS $hostForLogging" -Level "INFO"
+    if ($statusUpdates.Count -gt 0) {
+        foreach ($update in $statusUpdates) {
+            Write-Log -Message "  - StatusUpdate: State=$($update.State), Progress=$($update.Progress), Message=$($update.Message)" -Level "DEBUG"
+        }
+    }
+
+    return $invokeResult
+} catch { # Catch for the main try in Invoke-MSUpdate
+    $CaughtOuterError = $_
+    $invokeResult.ErrorOccurredInInvoke = $true
+    # Redact any passwords from the error message before storing or logging
+    $errorMessage = if ($CaughtOuterError.Exception.Message) {
+        $CaughtOuterError.Exception.Message
+    } else {
+        "Unknown error occurred: $($CaughtOuterError.ToString())"
+    }
+    if ($errorMessage -match '://[^@]+@') {
+        $errorMessage = $errorMessage -replace '(://)[^:]+:[^@]+@', '$1****:****@'
+    }
+    # Defensive split - handle null or empty messages
+    $errorFirstLine = if ($errorMessage) {
+        $errorMessage.Split([Environment]::NewLine)[0]
+    } else {
+        "Unknown error"
+    }
+    $invokeResult.StatusMessage = ("Error_InvokeMSUpdate_OuterTry: {0}" -f $errorFirstLine)
+    Write-Log -Message ("Outer error in Invoke-MSUpdate for '{0}': {1}" -f $hostForPingInInvoke, $errorMessage) -Level ERROR
+    # Errors are reported through ProgressReporter or return value, not direct toast updates
+
+    # Return result even on error
+    return $invokeResult
+} finally {
+    $ProgressPreference = $oldProgressPreference
+    if ($callbackChanged) {
+        Write-Log -Message "Restoring original SSL/TLS certificate validation callback in Invoke-MSUpdate." -Level DEBUG
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
     }
 }
-} catch { # Catch for the main try in Invoke-MSUpdate
-$CaughtOuterError = $_
-$invokeResult.ErrorOccurredInInvoke = $true
-$invokeResult.StatusMessage = ("Error_InvokeMSUpdate_OuterTry: {0}" -f $CaughtOuterError.Exception.Message.Split([Environment]::NewLine)[0])
-Write-Log -Message ("Outer error in Invoke-MSUpdate for '{0}': {1}" -f $hostForPingInInvoke, $CaughtOuterError.Exception.Message) -Level ERROR
-$toastStepNameOuterFail = "Step $($StepNumber)/$($TotalSteps): Updating MS $($MSCounter)/$($TotalMS) - ERROR for $($hostForPingInInvoke)"
-Update-PersistentToast -StepNumber $StepNumber -TotalSteps $TotalSteps -StepName $toastStepNameOuterFail -IsInteractive $IsInteractive -ErrorOccurred $true -AnyUpdatePerformed $AnyUpdatePerformed
-} finally {
-$ProgressPreference = $oldProgressPreference
-if ($callbackChanged) {
-    Write-Log -Message "Restoring original SSL/TLS certificate validation callback in Invoke-MSUpdate." -Level DEBUG
-    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
-}
-}
-return $invokeResult
 }

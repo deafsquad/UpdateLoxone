@@ -322,6 +322,72 @@ function Get-FunctionDocumentation {
 }
 
 
+function Get-FunctionTestScore {
+    <#
+    .SYNOPSIS
+        Scores how confidently a function is tested based on context-aware matching.
+    .DESCRIPTION
+        Analyzes test content line-by-line and scores each mention of a function name
+        by its context (direct invocation, mock, assertion, comment, etc.).
+        Returns a score, confidence level, and whether the function should be considered tested.
+    #>
+    param(
+        [string]$TestContent,
+        [string]$FuncName
+    )
+
+    $score = 0
+    $lines = $TestContent -split "`n"
+
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+
+        # Skip comment lines
+        if ($trimmed -match '^\s*#') { continue }
+
+        # Skip lines that don't contain the function name
+        if ($trimmed -notmatch "\b$FuncName\b") { continue }
+
+        # Score by context - first matching pattern wins per line
+        if ($trimmed -match "^\s*$FuncName\s+" -or
+            $trimmed -match "\|\s*$FuncName\b" -or
+            $trimmed -match "=\s*$FuncName\s+" -or
+            $trimmed -match "\(\s*$FuncName\s+" -or
+            $trimmed -match "{\s*$FuncName\s+") {
+            # Direct invocation: function at line start, piped, assigned, in expression, in scriptblock
+            $score += 3
+        }
+        elseif ($trimmed -match "Should\s+-Invoke\s+$FuncName" -or
+                $trimmed -match "Assert-MockCalled\s+.*$FuncName") {
+            # Should -Invoke or Assert-MockCalled verification
+            $score += 3
+        }
+        elseif ($trimmed -match "Mock\s+(?:-CommandName\s+)?['""]?$FuncName['""]?\s") {
+            # Mock declaration
+            $score += 2
+        }
+        elseif ($trimmed -match "Get-Command\s+['""]?$FuncName['""]?") {
+            # Get-Command check
+            $score += 2
+        }
+        elseif ($trimmed -match "(?:Describe|It|Context)\s+['""].*$FuncName") {
+            # Describe/It/Context block name mentioning function (weak evidence)
+            $score += 1
+        }
+        else {
+            # Any other non-comment reference
+            $score += 1
+        }
+    }
+
+    # Determine confidence level
+    $confidence = if ($score -ge 4) { 'High' }
+                  elseif ($score -ge 2) { 'Medium' }
+                  else { 'Low' }
+
+    return @{ Score = $score; Confidence = $confidence; Tested = ($score -ge 2) }
+}
+
 function Get-TestCoverage {
     <#
     .SYNOPSIS
@@ -333,9 +399,6 @@ function Get-TestCoverage {
     
     .PARAMETER ShowDetails
         Shows detailed coverage information in console output
-    
-    .PARAMETER GenerateReport
-        Generates a detailed coverage report file
     
     .PARAMETER OutputPath
         Path where the coverage report will be saved. If not specified, uses TestResults/coverage.md
@@ -353,15 +416,11 @@ function Get-TestCoverage {
         Path to test results directory. If not specified, uses most recent TestRun
     
     .EXAMPLE
-        Get-TestCoverage -GenerateReport -ShowDetails
-        
-    .EXAMPLE
         Get-TestCoverage -CheckUsage -OutputPath "C:\Reports\coverage.md"
     #>
     [CmdletBinding()]
     param(
         [switch]$ShowDetails,
-        [switch]$GenerateReport,
         [string]$OutputPath,
         [switch]$CheckUsage,
         [switch]$ShowIndex,
@@ -378,11 +437,6 @@ function Get-TestCoverage {
         function Write-Host {
             # Do nothing - suppress all output
         }
-    }
-    
-    # Set default output path
-    if (-not $OutputPath -and $GenerateReport) {
-        $OutputPath = Join-Path $script:TestPath "TestResults/coverage.md"
     }
     
     # Initialize collections
@@ -503,6 +557,7 @@ function Get-TestCoverage {
                 Exported = $false
                 Tested = $false
                 TestCount = 0
+                CoverageConfidence = 'None'
                 TestDetails = @{}
                 UsedInCodebase = $false
                 UsageLocations = @()
@@ -735,11 +790,13 @@ function Get-TestCoverage {
         $testContent = Get-Content $testFile.FullName -Raw
         $testFilesAnalyzed++
         
-        # Check each function for test coverage
+        # Check each function for test coverage using context-aware scoring
         foreach ($funcName in $allFunctions.Keys) {
-            if ($testContent -match "\b$funcName\b") {
+            $testScore = Get-FunctionTestScore -TestContent $testContent -FuncName $funcName
+            if ($testScore.Tested) {
                 $allFunctions[$funcName].Tested = $true
                 $allFunctions[$funcName].TestCount++
+                $allFunctions[$funcName].CoverageConfidence = $testScore.Confidence
                 $totalTestReferences++
                 
                 # Get detailed test context
@@ -1397,66 +1454,6 @@ function Get-TestCoverage {
         $testExecutionTotals.ExecutionCoverage = 0
     }
     
-    # Generate report if requested (DEPRECATED - use New-TestCoverageReport instead)
-    if ($GenerateReport) {
-        Write-Host "[DEPRECATED] GenerateReport parameter is deprecated. Use New-TestCoverageReport for report generation." -ForegroundColor Yellow
-        Write-Host "Generating coverage report..." -ForegroundColor Gray
-        
-        $reportContent = Format-TestCoverageReport -CoverageData @{
-            AllFunctions = $allFunctions
-            FunctionsByModule = $functionsByModule
-            DeprecatedTestReferences = $deprecatedTestReferences
-            Statistics = @{
-                TotalFunctions = $allFunctions.Count
-                ExportedFunctions = $exportedFunctions.Count
-                InternalFunctions = $internalFunctions.Count
-                TestInfrastructureFunctions = $testInfrastructureFunctions.Count
-                ActiveFunctions = $totalFunctionsExcludingTestInfra
-                TestedExported = $testedExported.Count
-                TestedInternal = $testedInternal.Count
-                UntestedExported = $untestedExported.Count
-                UntestedInternal = $untestedInternal.Count
-                UnusedExported = $unusedExported.Count
-                UnusedInternal = $unusedInternal.Count
-                TotalCoverage = $totalCoverage
-                ExportedCoverage = $exportedCoverage
-                InternalCoverage = $internalCoverage
-                DeprecatedTests = $deprecatedTestReferences.Count
-                TestFilesAnalyzed = $testFilesAnalyzed
-                TotalTestReferences = $totalTestReferences
-            }
-            TestInfrastructure = $exceptions.testInfrastructure
-            TestInfrastructureCategories = $exceptions.testInfrastructureCategories
-            UntestedExported = $untestedExported
-            UnusedExported = $unusedExported
-            UnusedInternal = $unusedInternal
-            TestExecutionTotals = $testExecutionTotals
-            CheckUsage = $CheckUsage
-            IncludeTestResults = $IncludeTestResults
-            TestResults = $testResults
-            InvocationInfo = ""  # Placeholder for now
-            Runtime = "0m0s"     # Placeholder for now
-        } -DeadTestCalculation $deadTestCalculation -EnforcementData @{
-            Phase = "Phase 2: New-Code-Only"
-            CompliancePercentage = if ($allFunctions.Count -gt 0) { [math]::Round((($allFunctions.Count - $untestedExported.Count) / $allFunctions.Count) * 100, 1) } else { 0 }
-            ExemptedCount = 28  # From TestCoverageExceptions.json
-            GrandfatheredCount = 28
-            PermanentExceptions = 1
-            ActiveViolations = 0
-            NextReviewDate = "2025-07-01"
-            ExceptionTimeline = @{
-                "2025-07-01" = 17
-                "2025-08-01" = 2
-                "2025-09-01" = 9
-            }
-        }
-        
-        # Write with UTF8 encoding without BOM
-        [System.IO.File]::WriteAllText($OutputPath, $reportContent, [System.Text.Encoding]::UTF8)
-        Write-Host ""
-        Write-Host "Report saved to: $OutputPath" -ForegroundColor Green
-    }
-    
     # Return complete data object (enhanced for single-pass optimization)
     return @{
         # Basic counts
@@ -1843,7 +1840,8 @@ function Get-TestContext {
         }
     }
     
-    return $contexts
+    # Use comma operator to prevent PowerShell array unrolling (single-element array would be unwrapped to a bare hashtable)
+    return , $contexts
 }
 
 

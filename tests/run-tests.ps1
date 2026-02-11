@@ -207,6 +207,15 @@ param(
     [Parameter(ParameterSetName = "RunAndCleanup")]
     [switch]$Coverage,
     
+    # Parallel execution
+    [Parameter(ParameterSetName = "RunTests")]
+    [Parameter(ParameterSetName = "RunAndCleanup")]
+    [switch]$Parallel,
+
+    [Parameter(ParameterSetName = "RunTests")]
+    [Parameter(ParameterSetName = "RunAndCleanup")]
+    [int]$MaxParallel = [Environment]::ProcessorCount,
+
     # Error output suppression
     [Parameter(ParameterSetName = "RunTests")]
     [Parameter(ParameterSetName = "RunAndCleanup")]
@@ -329,6 +338,9 @@ if ($UnrecognizedArgs) {
     Write-Host "  -Detailed           : Enable detailed output"
     Write-Host "  -DebugMode          : Maximum verbosity for troubleshooting"
     Write-Host "  -CI                 : CI mode (minimal output, no prompts)"
+    Write-Host "  -LiveProgress       : Show live toast notifications with test progress"
+    Write-Host "  -BlockNotifications : Disable all Windows notifications during test run"
+    Write-Host "  -Coverage           : Generate test coverage reports after execution"
     Write-Host "  -Filter <string>    : Filter by test name pattern"
     Write-Host "  -Tag <string[]>     : Filter by Pester tags"
     Write-Host "  -ExcludeTag <array> : Exclude specific tags"
@@ -340,12 +352,14 @@ if ($UnrecognizedArgs) {
     Write-Host "  -CleanupOnly        : Only cleanup, don't run tests"
     Write-Host "  -WhatIf             : Show what would be cleaned up"
     Write-Host ""
-    Write-Host "Common usage:" -ForegroundColor Gray  
+    Write-Host "Common usage:" -ForegroundColor Gray
     Write-Host "  .\run-tests.ps1                           # Quick unit tests only"
     Write-Host "  .\run-tests.ps1 -TestType All             # Everything"
     Write-Host "  .\run-tests.ps1 -IncludeIntegration       # Unit + Integration"
     Write-Host "  .\run-tests.ps1 -DebugMode -Filter 'Network'  # Debug specific tests"
     Write-Host "  .\run-tests.ps1 -CI -OutputFormat All     # CI pipeline"
+    Write-Host "  .\run-tests.ps1 -Coverage                 # Unit tests + coverage report"
+    Write-Host "  .\run-tests.ps1 -LiveProgress             # Unit tests with toast progress"
     exit 1
 }
 
@@ -1794,6 +1808,309 @@ function Invoke-TestsWithLiveProgress {
     }
 }
 
+# Function to run tests in parallel using separate PowerShell processes per file
+function Invoke-TestsParallel {
+    param(
+        [string[]]$TestPaths,
+        [int]$MaxJobs = [Environment]::ProcessorCount,
+        [string]$Verbosity = 'None'
+    )
+
+    $helperScript = Join-Path $PSScriptRoot "run-single-test.ps1"
+    if (-not (Test-Path $helperScript)) {
+        Write-TestLog "ERROR: run-single-test.ps1 not found at $helperScript" -Color Red
+        return $null
+    }
+
+    # Discover all test files from the given paths
+    $testFiles = @()
+    foreach ($p in $TestPaths) {
+        if (Test-Path $p) {
+            $item = Get-Item $p
+            if ($item.PSIsContainer) {
+                $testFiles += Get-ChildItem -Path $p -Filter "*.Tests.ps1" -File -Recurse
+            } elseif ($item.Name -like "*.Tests.ps1") {
+                $testFiles += $item
+            }
+        }
+    }
+
+    if ($testFiles.Count -eq 0) {
+        Write-TestLog "No test files found for parallel execution" -Color Yellow
+        return @{ Passed = 0; Failed = 0; Skipped = 0; Total = 0; Duration = 0; Failures = @(); FileResults = @() }
+    }
+
+    # Classify files: sequential (Toast, ParallelWorkflow) vs parallel-safe
+    $sequentialFiles = @()
+    $parallelFiles = @()
+    foreach ($f in $testFiles) {
+        if ($f.Name -match 'Toast|ParallelWorkflow') {
+            $sequentialFiles += $f
+        } else {
+            $parallelFiles += $f
+        }
+    }
+
+    Write-TestLog "`n=== PARALLEL TEST EXECUTION ===" -Color Cyan
+    Write-TestLog "Total files: $($testFiles.Count) | Parallel: $($parallelFiles.Count) | Sequential: $($sequentialFiles.Count) | Workers: $MaxJobs" -Color White
+
+    $allFileResults = @()
+    $overallStart = Get-Date
+
+    # LiveProgress: initialize toast if available
+    $useToast = $LiveProgress -and (Get-Command Update-BTNotification -ErrorAction SilentlyContinue)
+    if ($useToast) {
+        $totalTestCount = ($testFiles | ForEach-Object {
+            $content = Get-Content $_.FullName -Raw
+            ([regex]::Matches($content, '\bIt\s+[''"]')).Count
+        } | Measure-Object -Sum).Sum
+        $Global:LiveProgressTotalTests = $totalTestCount
+        $Global:LiveProgressTestCount = 0
+        $Global:LiveProgressPassedCount = 0
+        $Global:LiveProgressFailedCount = 0
+        $Global:LiveProgressSkippedCount = 0
+        if (Get-Command Initialize-LiveProgressToast -ErrorAction SilentlyContinue) {
+            Initialize-LiveProgressToast
+        }
+    }
+
+    # Track toast keep-alive timing for parallel mode
+    $lastToastUpdate = Get-Date
+
+    # --- Phase 1: Run parallel-safe files concurrently ---
+    if ($parallelFiles.Count -gt 0) {
+        Write-TestLog "`nPhase 1: Running $($parallelFiles.Count) files in parallel ($MaxJobs workers)..." -Color Cyan
+
+        $jobs = @()
+        $completed = 0
+        $processedJobs = @{}
+
+        foreach ($file in $parallelFiles) {
+            # Throttle: wait for a slot if at capacity
+            while (@($jobs | Where-Object { $_.State -eq 'Running' }).Count -ge $MaxJobs) {
+                # Keep toast alive during job launching
+                if ($useToast -and ((Get-Date) - $lastToastUpdate).TotalSeconds -ge 3) {
+                    $runtimeSpan = (Get-Date) - $Global:LiveProgressStartTime
+                    $runtimeDisplay = "{0}:{1:d2}" -f [int]$runtimeSpan.TotalMinutes, $runtimeSpan.Seconds
+                    $Global:LiveProgressToastData.StatusText = "$Global:LiveProgressTestTypeDisplay | $runtimeDisplay"
+                    $runningCount = @($jobs | Where-Object { $_.State -eq 'Running' }).Count
+                    $Global:LiveProgressToastData.TestProgressTitle = "Running $runningCount files..."
+                    Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                    $lastToastUpdate = Get-Date
+                }
+                Start-Sleep -Milliseconds 200
+            }
+
+            # Launch job
+            $j = Start-Job -ScriptBlock {
+                param($Script, $TestFile, $Verb)
+                & powershell.exe -NoProfile -NoLogo -File $Script -TestFile $TestFile -Verbosity $Verb 2>&1
+            } -ArgumentList $helperScript, $file.FullName, $Verbosity
+
+            $j | Add-Member -NotePropertyName TestFile -NotePropertyValue $file.Name -Force
+            $jobs += $j
+        }
+
+        # Process jobs as they complete with live toast updates
+        Write-TestLog "" -Color White  # newline after progress
+        $jobTimeout = [datetime]::Now.AddSeconds($script:Timeout * $parallelFiles.Count)
+
+        while (($jobs | Where-Object { -not $processedJobs.ContainsKey($_.Id) }).Count -gt 0) {
+            # Check for timeout
+            if ([datetime]::Now -gt $jobTimeout) {
+                Write-TestLog "  TIMEOUT: Some jobs did not complete in time" -Color Red
+                foreach ($j in @($jobs | Where-Object { -not $processedJobs.ContainsKey($_.Id) })) {
+                    Stop-Job $j -ErrorAction SilentlyContinue
+                    Remove-Job $j -Force -ErrorAction SilentlyContinue
+                    $processedJobs[$j.Id] = $true
+                    $allFileResults += @{
+                        FileName = $j.TestFile; File = $j.TestFile
+                        Passed = 0; Failed = 1; Skipped = 0; Total = 1; Duration = 0
+                        Failures = @(@{ Name = "Timeout"; Error = "Job did not complete in time"; Duration = 0 })
+                        Success = $false
+                    }
+                }
+                break
+            }
+
+            # Process newly completed jobs
+            foreach ($j in @($jobs | Where-Object { $_.State -ne 'Running' -and -not $processedJobs.ContainsKey($_.Id) })) {
+                $processedJobs[$j.Id] = $true
+                $completed++
+                $pct = [math]::Round(($completed / $parallelFiles.Count) * 100)
+                Write-Host "`r  [$completed/$($parallelFiles.Count)] $pct% complete" -NoNewline -ForegroundColor Gray
+
+                $output = Receive-Job $j -ErrorAction SilentlyContinue
+                $outputText = $output -join "`n"
+                Remove-Job $j -Force -ErrorAction SilentlyContinue
+
+                # Parse JSON result between markers
+                $jsonResult = $null
+                if ($outputText -match '###RESULT_JSON###\s*(.+?)\s*###END_RESULT_JSON###') {
+                    try {
+                        $jsonResult = $Matches[1] | ConvertFrom-Json
+                    } catch {
+                        Write-TestLog "  Failed to parse result for $($j.TestFile): $_" -Color Red
+                    }
+                }
+
+                $fileResult = $null
+                if ($jsonResult) {
+                    $status = if ($jsonResult.Failed -gt 0) { "FAIL" } elseif ($jsonResult.Passed -gt 0) { "PASS" } else { "SKIP" }
+                    $color = switch ($status) { "PASS" { "Green" } "FAIL" { "Red" } default { "Yellow" } }
+                    $dur = [math]::Round($jsonResult.Duration / 1000, 1)
+                    Write-TestLog "  $status $($jsonResult.FileName) ($($jsonResult.Passed)p/$($jsonResult.Failed)f/$($jsonResult.Skipped)s) ${dur}s" -Color $color
+
+                    $allFileResults += $jsonResult
+                    $fileResult = $jsonResult
+                } else {
+                    Write-TestLog "  ERROR $($j.TestFile) - no result received" -Color Red
+                    $fileResult = @{ Passed = 0; Failed = 1; Skipped = 0; Total = 1 }
+                    $allFileResults += @{
+                        FileName = $j.TestFile; File = $j.TestFile
+                        Passed = 0; Failed = 1; Skipped = 0; Total = 1; Duration = 0
+                        Failures = @(@{ Name = "Process Error"; Error = "No result from worker"; Duration = 0 })
+                        Success = $false
+                    }
+                }
+
+                # Update LiveProgress toast with result
+                if ($useToast -and $fileResult) {
+                    $Global:LiveProgressTestCount += $fileResult.Total
+                    $Global:LiveProgressPassedCount += $fileResult.Passed
+                    $Global:LiveProgressFailedCount += $fileResult.Failed
+                    $Global:LiveProgressSkippedCount += $fileResult.Skipped
+                    $runtimeSpan = (Get-Date) - $Global:LiveProgressStartTime
+                    $runtimeDisplay = "{0}:{1:d2}" -f [int]$runtimeSpan.TotalMinutes, $runtimeSpan.Seconds
+                    $testPercent = if ($Global:LiveProgressTotalTests -gt 0) { [Math]::Min(1.0, $Global:LiveProgressTestCount / $Global:LiveProgressTotalTests) } else { 0 }
+                    $Global:LiveProgressToastData.StatusText = "$Global:LiveProgressTestTypeDisplay | $runtimeDisplay"
+                    $Global:LiveProgressToastData.ModuleProgressTitle = "Phase 1: Parallel"
+                    $Global:LiveProgressToastData.ProgressBarStatus = "$completed / $($parallelFiles.Count) files"
+                    $Global:LiveProgressToastData.ProgressBarValue = [Math]::Min(1.0, $completed / $parallelFiles.Count)
+                    $Global:LiveProgressToastData.TestProgressTitle = "$($fileResult.FileName)"
+                    $Global:LiveProgressToastData.OverallProgressStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
+                    $Global:LiveProgressToastData.OverallProgressValue = $testPercent
+                    $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount`n❌ Failed: $Global:LiveProgressFailedCount`n⏭️ Skipped: $Global:LiveProgressSkippedCount"
+                    Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                    $lastToastUpdate = Get-Date
+                }
+            }
+
+            # Keep toast alive with runtime updates every 3 seconds
+            if ($useToast -and ((Get-Date) - $lastToastUpdate).TotalSeconds -ge 3) {
+                $runtimeSpan = (Get-Date) - $Global:LiveProgressStartTime
+                $runtimeDisplay = "{0}:{1:d2}" -f [int]$runtimeSpan.TotalMinutes, $runtimeSpan.Seconds
+                $Global:LiveProgressToastData.StatusText = "$Global:LiveProgressTestTypeDisplay | $runtimeDisplay"
+                $Global:LiveProgressToastData.ModuleProgressTitle = "Phase 1: Parallel"
+                $Global:LiveProgressToastData.ProgressBarStatus = "$completed / $($parallelFiles.Count) files"
+                $Global:LiveProgressToastData.ProgressBarValue = [Math]::Min(1.0, $completed / $parallelFiles.Count)
+                $runningCount = @($jobs | Where-Object { $_.State -eq 'Running' }).Count
+                $Global:LiveProgressToastData.TestProgressTitle = "Running $runningCount files..."
+                Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                $lastToastUpdate = Get-Date
+            }
+
+            Start-Sleep -Milliseconds 200
+        }
+    }
+
+    # --- Phase 2: Run sequential files one at a time ---
+    if ($sequentialFiles.Count -gt 0) {
+        Write-TestLog "`nPhase 2: Running $($sequentialFiles.Count) sequential files (Toast/ParallelWorkflow)..." -Color Cyan
+
+        foreach ($file in $sequentialFiles) {
+            $output = & powershell.exe -NoProfile -NoLogo -File $helperScript -TestFile $file.FullName -Verbosity $Verbosity 2>&1
+            $outputText = $output -join "`n"
+
+            $jsonResult = $null
+            if ($outputText -match '###RESULT_JSON###\s*(.+?)\s*###END_RESULT_JSON###') {
+                try {
+                    $jsonResult = $Matches[1] | ConvertFrom-Json
+                } catch {
+                    Write-TestLog "  Failed to parse result for $($file.Name): $_" -Color Red
+                }
+            }
+
+            $fileResult = $null
+            if ($jsonResult) {
+                $status = if ($jsonResult.Failed -gt 0) { "FAIL" } elseif ($jsonResult.Passed -gt 0) { "PASS" } else { "SKIP" }
+                $color = switch ($status) { "PASS" { "Green" } "FAIL" { "Red" } default { "Yellow" } }
+                $dur = [math]::Round($jsonResult.Duration / 1000, 1)
+                Write-TestLog "  $status $($jsonResult.FileName) ($($jsonResult.Passed)p/$($jsonResult.Failed)f/$($jsonResult.Skipped)s) ${dur}s" -Color $color
+                $allFileResults += $jsonResult
+                $fileResult = $jsonResult
+            } else {
+                Write-TestLog "  ERROR $($file.Name) - no result received" -Color Red
+                $fileResult = @{ Passed = 0; Failed = 1; Skipped = 0; Total = 1; FileName = $file.Name }
+                $allFileResults += @{
+                    FileName = $file.Name; File = $file.FullName
+                    Passed = 0; Failed = 1; Skipped = 0; Total = 1; Duration = 0
+                    Failures = @(@{ Name = "Process Error"; Error = "No result from worker"; Duration = 0 })
+                    Success = $false
+                }
+            }
+
+            # Update LiveProgress toast
+            if ($useToast -and $fileResult) {
+                $Global:LiveProgressTestCount += $fileResult.Total
+                $Global:LiveProgressPassedCount += $fileResult.Passed
+                $Global:LiveProgressFailedCount += $fileResult.Failed
+                $Global:LiveProgressSkippedCount += $fileResult.Skipped
+                $runtimeSpan = (Get-Date) - $Global:LiveProgressStartTime
+                $runtimeDisplay = "{0}:{1:d2}" -f [int]$runtimeSpan.TotalMinutes, $runtimeSpan.Seconds
+                $testPercent = if ($Global:LiveProgressTotalTests -gt 0) { [Math]::Min(1.0, $Global:LiveProgressTestCount / $Global:LiveProgressTotalTests) } else { 0 }
+                $Global:LiveProgressToastData.StatusText = "$Global:LiveProgressTestTypeDisplay | $runtimeDisplay"
+                $Global:LiveProgressToastData.TestProgressTitle = "$($fileResult.FileName)"
+                $Global:LiveProgressToastData.OverallProgressStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
+                $Global:LiveProgressToastData.OverallProgressValue = $testPercent
+                $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount`n❌ Failed: $Global:LiveProgressFailedCount`n⏭️ Skipped: $Global:LiveProgressSkippedCount"
+                Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # --- Aggregate results ---
+    $totalPassed = ($allFileResults | Measure-Object -Property Passed -Sum).Sum
+    $totalFailed = ($allFileResults | Measure-Object -Property Failed -Sum).Sum
+    $totalSkipped = ($allFileResults | Measure-Object -Property Skipped -Sum).Sum
+    $totalTests = ($allFileResults | Measure-Object -Property Total -Sum).Sum
+    $wallTime = ((Get-Date) - $overallStart).TotalSeconds
+    $sumTime = [math]::Round(($allFileResults | Measure-Object -Property Duration -Sum).Sum / 1000, 1)
+
+    Write-TestLog "`n=== PARALLEL RESULTS ===" -Color Cyan
+    Write-TestLog "Passed: $totalPassed | Failed: $totalFailed | Skipped: $totalSkipped | Total: $totalTests" -Color $(if ($totalFailed -eq 0) { 'Green' } else { 'Red' })
+    Write-TestLog "Wall time: $([math]::Round($wallTime, 1))s | Sequential would be: ${sumTime}s | Speedup: $([math]::Round($sumTime / [math]::Max($wallTime, 0.1), 1))x" -Color White
+
+    # Show failures
+    $allFailures = @()
+    foreach ($fr in $allFileResults) {
+        if ($fr.Failures -and $fr.Failures.Count -gt 0) {
+            foreach ($fail in $fr.Failures) {
+                $allFailures += @{ File = $fr.FileName; Name = $fail.Name; Error = $fail.Error }
+            }
+        }
+    }
+
+    if ($allFailures.Count -gt 0) {
+        Write-TestLog "`nFailed tests:" -Color Red
+        foreach ($f in $allFailures) {
+            Write-TestLog "  [$($f.File)] $($f.Name)" -Color Red
+            Write-TestLog "    $($f.Error)" -Color DarkRed
+        }
+    }
+
+    return @{
+        Passed = $totalPassed
+        Failed = $totalFailed
+        Skipped = $totalSkipped
+        Total = $totalTests
+        Duration = $wallTime
+        SequentialDuration = $sumTime
+        Failures = $allFailures
+        FileResults = $allFileResults
+    }
+}
+
 # Function to run a category of tests
 function Invoke-TestCategory {
     param(
@@ -1995,6 +2312,7 @@ function Invoke-TestCategory {
         $script:Results[$ResultsKey].Total = $actualTestsRun
         $script:Results[$ResultsKey].Passed = $pesterResult.PassedCount
         $script:Results[$ResultsKey].Failed = $pesterResult.FailedCount
+        $script:Results[$ResultsKey].Skipped = $pesterResult.SkippedCount
         $script:Results[$ResultsKey].Duration = (Get-Date) - $categoryStartTime
         $script:Results[$ResultsKey].Status = if ($pesterResult.FailedCount -eq 0) { "Passed" } else { "Failed" }
         
@@ -2226,7 +2544,7 @@ $script:Results.UnitTests = @{ Status = "NotRun"; Total = 0; Passed = 0; Failed 
 
 # Check if we should use unified progress for multiple categories
 # ONLY use unified progress when LiveProgress is explicitly requested
-$useUnifiedProgress = $LiveProgress -and (
+$useUnifiedProgress = $LiveProgress -and -not $Parallel -and (
     ($script:RunUnit -and $script:RunIntegration) -or
     ($script:RunUnit -and $script:RunSystem) -or
     ($script:RunIntegration -and $script:RunSystem) -or
@@ -2674,9 +2992,80 @@ if ($script:LiveProgressFullResults) {
     }
 }
 
+# --- PARALLEL EXECUTION PATH ---
+if ($Parallel) {
+    # Determine which test folders to include based on TestType
+    $parallelTestPaths = @()
+    if ($script:RunUnit) {
+        $unitPath = Join-Path $script:TestsPath "Unit"
+        if (Test-Path $unitPath) { $parallelTestPaths += $unitPath }
+    }
+    if ($script:RunIntegration) {
+        $intPath = Join-Path $script:TestsPath "Integration"
+        if (Test-Path $intPath) { $parallelTestPaths += $intPath }
+    }
+    if ($script:RunSystem -and -not $SkipSystemTests) {
+        $sysPath = Join-Path $script:TestsPath "System"
+        if (Test-Path $sysPath) { $parallelTestPaths += $sysPath }
+    }
+
+    # Determine verbosity for workers
+    $workerVerbosity = if ($script:DebugMode) { 'Detailed' } elseif ($script:Detailed) { 'Normal' } else { 'None' }
+
+    $parallelResult = Invoke-TestsParallel -TestPaths $parallelTestPaths -MaxJobs $MaxParallel -Verbosity $workerVerbosity
+
+    if ($parallelResult) {
+        # Populate script results from parallel output
+        # Categorize file results by folder/name
+        foreach ($fr in $parallelResult.FileResults) {
+            $filePath = if ($fr.File) { $fr.File } else { $fr.FileName }
+            if ($filePath -match '\\Integration\\' -or $filePath -match 'Integration') {
+                $script:Results.IntegrationTests.Passed += $fr.Passed
+                $script:Results.IntegrationTests.Failed += $fr.Failed
+                $script:Results.IntegrationTests.Skipped += $fr.Skipped
+                $script:Results.IntegrationTests.Total += $fr.Total
+                $script:Results.IntegrationTests.Status = "Completed"
+            } elseif ($filePath -match '\\System\\' -or $filePath -match 'System\.Tests') {
+                $script:Results.SystemTests.Passed += $fr.Passed
+                $script:Results.SystemTests.Failed += $fr.Failed
+                $script:Results.SystemTests.Skipped += $fr.Skipped
+                $script:Results.SystemTests.Total += $fr.Total
+                $script:Results.SystemTests.Status = "Completed"
+            } else {
+                $script:Results.UnitTests.Passed += $fr.Passed
+                $script:Results.UnitTests.Failed += $fr.Failed
+                $script:Results.UnitTests.Skipped += $fr.Skipped
+                $script:Results.UnitTests.Total += $fr.Total
+                $script:Results.UnitTests.Status = "Completed"
+            }
+        }
+
+        $script:Results.UnitTests.Duration = [TimeSpan]::FromSeconds($parallelResult.Duration)
+        $script:Results.TotalTests = $parallelResult.Total
+        $script:Results.PassedTests = $parallelResult.Passed
+        $script:Results.FailedTests = $parallelResult.Failed
+        $script:Results.SkippedTests = $parallelResult.Skipped
+
+        # Collect failure details for summary (matches FailedTestDetails format)
+        foreach ($f in $parallelResult.Failures) {
+            $script:Results.FailedTestDetails += @{
+                Name     = $f.Name
+                File     = $f.File
+                Error    = $f.Error
+                Category = if ($f.File -match 'Integration') { 'Integration' } elseif ($f.File -match 'System') { 'System' } else { 'Unit' }
+            }
+        }
+
+        # Skip all normal execution paths
+        $script:RunUnit = $false
+        $script:RunIntegration = $false
+        $script:RunSystem = $false
+    }
+}
+
 # When running ALL tests without LiveProgress, run everything at once and categorize
 # This needs to happen RIGHT AFTER discovery, before detailed output
-if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress) {
+if ($TestType -eq 'All' -and -not $LiveProgress -and -not $useUnifiedProgress -and -not $Parallel) {
     Write-TestLog "`nRunning all tests and categorizing results..." -Color Cyan
     
     # Run all tests at once
@@ -3088,7 +3477,7 @@ if ($script:RunUnit -and $testCategories.Unit -and $testCategories.Unit.Count -g
             $script:Results.UnitTests.Total = $testCategories.Unit.Count
             $script:Results.UnitTests.Passed = [Math]::Min($script:Results.UnitTests.Passed, $testCategories.Unit.Count)
             $script:Results.UnitTests.Failed = 0  # Will be set from actual failed test details
-            $script:Results.UnitTests.Skipped = 0  # Will be set from actual skipped test details
+            # Skipped count preserved from Invoke-TestCategory - do not zero out
         }
     }
 }
@@ -3583,6 +3972,40 @@ if ($TestType -ne 'All') {
             # Don't add to global skipped/total counts - these weren't requested
             # $script:Results.SkippedTests += $estimatedSystemTests
             # $script:Results.TotalTests += $estimatedSystemTests
+        }
+    }
+}
+
+# Recompute global totals from per-file results to avoid double-counting from multiple code paths
+$script:Results.TotalTests = 0
+$script:Results.PassedTests = 0
+$script:Results.FailedTests = 0
+$script:Results.SkippedTests = 0
+
+foreach ($category in @('UnitTests', 'IntegrationTests', 'SystemTests')) {
+    if ($script:Results[$category]) {
+        # Recompute category totals from per-file results when available
+        $files = $script:Results[$category].Files
+        if ($files -and $files.Count -gt 0) {
+            $sumPassed = 0; $sumFailed = 0; $sumSkipped = 0
+            foreach ($f in $files) {
+                if ($null -ne $f) {
+                    $sumPassed += if ($f.PSObject.Properties['Passed']) { [int]$f.Passed } elseif ($f.PSObject.Properties['PassedCount']) { [int]$f.PassedCount } else { 0 }
+                    $sumFailed += if ($f.PSObject.Properties['Failed']) { [int]$f.Failed } elseif ($f.PSObject.Properties['FailedCount']) { [int]$f.FailedCount } else { 0 }
+                    $sumSkipped += if ($f.PSObject.Properties['Skipped']) { [int]$f.Skipped } elseif ($f.PSObject.Properties['SkippedCount']) { [int]$f.SkippedCount } else { 0 }
+                }
+            }
+            $script:Results[$category].Passed = $sumPassed
+            $script:Results[$category].Failed = $sumFailed
+            $script:Results[$category].Skipped = $sumSkipped
+            $script:Results[$category].Total = $sumPassed + $sumFailed + $sumSkipped
+        }
+
+        if ($script:Results[$category].Total -gt 0) {
+            $script:Results.TotalTests += $script:Results[$category].Total
+            $script:Results.PassedTests += $script:Results[$category].Passed
+            $script:Results.FailedTests += $script:Results[$category].Failed
+            $script:Results.SkippedTests += $script:Results[$category].Skipped
         }
     }
 }

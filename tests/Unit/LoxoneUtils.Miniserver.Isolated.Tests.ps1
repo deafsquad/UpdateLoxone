@@ -1,4 +1,4 @@
-﻿# Isolated tests for LoxoneUtils.Miniserver that don't require network connectivity
+# Isolated tests for LoxoneUtils.Miniserver that don't require network connectivity
 # These tests focus on parameter validation, module structure, and basic functionality
 #
 # NOTE: Tests that require network connectivity have been moved to:
@@ -51,7 +51,7 @@ BeforeAll {
     # Give some time for mutex to be released
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
-    Start-Sleep -Milliseconds 200
+    Start-Sleep -Milliseconds 20  # Reduced from 200ms
     
     # Mock Update-PersistentToast to avoid actual toast notifications
     Mock Update-PersistentToast {} -ModuleName LoxoneUtils

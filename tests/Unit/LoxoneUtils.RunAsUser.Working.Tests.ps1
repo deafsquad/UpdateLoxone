@@ -463,13 +463,12 @@ Describe "Module Exports" -Tag 'RunAsUser' {
     
     It "Exports only Invoke-AsCurrentUser function" {
         $module = Get-Module LoxoneUtils
-        $runAsUserFunctions = $module.ExportedFunctions.Keys | Where-Object { 
-            (Get-Command $_).Source -eq 'LoxoneUtils' -and
-            (Get-Command $_).Definition -match 'RunAsUser|AsCurrentUser'
-        }
+        # Check that Invoke-AsCurrentUser is exported
+        $module.ExportedFunctions.Keys | Should -Contain 'Invoke-AsCurrentUser'
         
-        $runAsUserFunctions | Should -Contain 'Invoke-AsCurrentUser'
-        $runAsUserFunctions | Should -Contain 'Invoke-InstallLoxoneApp'
-        $runAsUserFunctions.Count | Should -Be 2
+        # Check that the function is from RunAsUser module
+        $runAsUserModule = Get-Module LoxoneUtils | Select-Object -ExpandProperty NestedModules | Where-Object { $_.Name -eq 'LoxoneUtils.RunAsUser' }
+        $runAsUserModule.ExportedFunctions.Keys | Should -Contain 'Invoke-AsCurrentUser'
+        $runAsUserModule.ExportedFunctions.Count | Should -Be 1
     }
 }

@@ -79,8 +79,14 @@ param(
     $PassedLogFile = $null, # Internal: Used when re-launching elevated to specify the log file
     [switch]$EnforceSSLCertificate, # New switch to enforce SSL/TLS certificate validation for MS connections (default is to skip validation)
     [switch]$Parallel, # Enable parallel execution mode
-    [int]$MaxConcurrency = 4, # Maximum concurrent operations for downloads/installs
-    [int]$MaxMSConcurrency = 3 # Maximum concurrent Miniserver updates
+    [int]$MaxConcurrency = 10, # Maximum concurrent operations for downloads/installs
+    [int]$MaxMSConcurrency = 10, # Maximum concurrent Miniserver updates
+
+    # Monitor Testing Parameters
+    [switch]$TestMonitor, # Test Monitor functionality only (no update performed)
+    [int]$TestMonitorDurationSeconds = 120, # How long to run Monitor in test mode
+    [switch]$KeepMonitorRunning, # Don't stop Monitor automatically (for manual testing)
+    [switch]$MonitorDiscoveryMode # Enable extended .lxmon path discovery
 )
 # XML Signature Verification Function removed - Test showed it's not feasible with current structure
 
@@ -428,6 +434,228 @@ if ($scriptContext.Reason -eq "ActionRegisterTaskAndExit") {
     }
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST MONITOR MODE
+# ═══════════════════════════════════════════════════════════════════════════════
+if ($TestMonitor) {
+    Write-Log -Message "╔════════════════════════════════════════════════════════════╗" -Level INFO
+    Write-Log -Message "║          TEST MONITOR MODUS (Kein Update)                 ║" -Level INFO
+    Write-Log -Message "╚════════════════════════════════════════════════════════════╝" -Level INFO
+
+    try {
+        # 1. Lade MS-Liste
+        $msListPath = Join-Path $scriptContext.ScriptSaveFolder "UpdateLoxoneMSList.txt"
+
+        if (-not (Test-Path $msListPath)) {
+            Write-Log -Message "✗ MS-Liste nicht gefunden: $msListPath" -Level ERROR
+            Write-Log -Message "Bitte erstellen Sie UpdateLoxoneMSList.txt im Verzeichnis: $($scriptContext.ScriptSaveFolder)" -Level ERROR
+            Show-FinalStatusToast -StatusMessage "MS-Liste nicht gefunden" -Success $false -LogFileToShow $scriptContext.LogFile
+            exit 1
+        }
+
+        Write-Log -Message "Lade Miniserver-Liste: $msListPath" -Level INFO
+
+        # Einfacher Parser (wird später durch erweiterten ersetzt)
+        $lines = Get-Content $msListPath | Where-Object { $_ -notmatch '^\s*#' -and $_ -notmatch '^\s*$' }
+        $miniServers = @()
+
+        foreach ($line in $lines) {
+            $parts = $line -split ','
+            $uri = [System.Uri]$parts[0]
+            $msName = $uri.Host
+
+            $msEntry = @{
+                Url = $parts[0]
+                Name = $msName
+                EnableMonitor = if ($parts.Count -gt 3 -and $parts[3] -eq 'true') { $true } else { $false }
+            }
+
+            $miniServers += [PSCustomObject]$msEntry
+        }
+
+        $monitorMS = $miniServers | Where-Object { $_.EnableMonitor -eq $true }
+
+        if ($monitorMS.Count -eq 0) {
+            Write-Log -Message "✗ Keine Miniserver mit enable_monitor=true gefunden" -Level WARN
+            # Empty log line removed
+            Write-Log -Message "Bitte UpdateLoxoneMSList.txt anpassen:" -Level INFO
+            Write-Log -Message "Format: URL,version,timestamp,enable_monitor" -Level INFO
+            Write-Log -Message "Beispiel: https://admin:pass@192.168.1.77,,,true" -Level INFO
+            Show-FinalStatusToast -StatusMessage "Keine Miniserver für Monitor konfiguriert" -Success $false -LogFileToShow $scriptContext.LogFile
+            exit 0
+        }
+
+        Write-Log -Message "✓ Gefundene Miniserver für Monitor-Test: $($monitorMS.Count)" -Level INFO
+        foreach ($ms in $monitorMS) {
+            Write-Log -Message "  - $($ms.Name)" -Level INFO
+        }
+        # Empty log line removed
+
+        # 2. Finde monitor.exe
+        Write-Log -Message "Suche loxonemonitor.exe..." -Level INFO
+
+        # Versuche Loxone Config Installation zu finden
+        $configPath = Get-InstalledApplicationPath -AppName "Loxone Config"
+        if (-not $configPath) {
+            Write-Log -Message "✗ Loxone Config nicht installiert" -Level ERROR
+            Show-FinalStatusToast -StatusMessage "Loxone Config nicht gefunden" -Success $false -LogFileToShow $scriptContext.LogFile
+            exit 1
+        }
+
+        Write-Log -Message "Loxone Config gefunden: $configPath" -Level DEBUG
+        $monitorExe = Find-LoxoneMonitorExe -LoxoneConfigInstallPath $configPath
+
+        if (-not $monitorExe) {
+            Write-Log -Message "✗ loxonemonitor.exe nicht gefunden in: $configPath" -Level ERROR
+            Show-FinalStatusToast -StatusMessage "loxonemonitor.exe nicht gefunden" -Success $false -LogFileToShow $scriptContext.LogFile
+            exit 1
+        }
+
+        Write-Log -Message "✓ loxonemonitor.exe: $monitorExe" -Level INFO
+        # Empty log line removed
+
+        # 3. Starte Monitor
+        Write-Log -Message "Starte Monitor-Prozess..." -Level INFO
+        $monitorProc = Start-LoxoneMonitorProcess -MonitorExePath $monitorExe -WorkingDirectory $scriptContext.ScriptSaveFolder
+
+        Write-Log -Message "✓ Monitor gestartet (PID: $($monitorProc.Id))" -Level INFO
+        # Empty log line removed
+
+        # 4. Aktiviere Logging auf MS
+        $localIP = Get-LocalIPAddress
+        Write-Log -Message "Lokale IP für MS-Logging: $localIP" -Level INFO
+        # Empty log line removed
+
+        foreach ($ms in $monitorMS) {
+            Write-Log -Message "Aktiviere Logging auf MS '$($ms.Name)'..." -Level INFO
+            $success = Enable-MiniserverLogging -MiniserverUrl $ms.Url -TargetIP $localIP
+
+            if ($success) {
+                Write-Log -Message "✓ MS '$($ms.Name)' sendet jetzt Logs an $localIP" -Level INFO
+            }
+            else {
+                Write-Log -Message "✗ Konnte Logging auf MS '$($ms.Name)' nicht aktivieren" -Level WARN
+            }
+        }
+
+        # Empty log line removed
+        Write-Log -Message "═══════════════════════════════════════════════════════════" -Level INFO
+        Write-Log -Message "Monitor läuft - suche nach .lxmon Dateien..." -Level INFO
+        Write-Log -Message "Dauer: $TestMonitorDurationSeconds Sekunden" -Level INFO
+        if ($MonitorDiscoveryMode) {
+            Write-Log -Message "Discovery-Modus: AKTIV (erweiterte Suche)" -Level INFO
+        }
+        Write-Log -Message "═══════════════════════════════════════════════════════════" -Level INFO
+        # Empty log line removed
+
+        # 5. Warte kurz bis Logs eintreffen
+        Write-Log -Message "Warte 10 Sekunden bis erste Logs eintreffen..." -Level INFO
+        Start-Sleep -Seconds 10
+
+        # 6. Discovery ausführen
+        Write-Log -Message "Starte .lxmon Discovery..." -Level INFO
+        $foundPath = Find-LxmonFiles -MonitorProcessId $monitorProc.Id -DiscoveryMode:$MonitorDiscoveryMode
+
+        if ($foundPath) {
+            # Empty log line removed
+            Write-Log -Message "═══════════════════════════════════════════════════════════" -Level INFO
+            Write-Log -Message "✓✓✓ .lxmon Speicherort gefunden!" -Level INFO
+            Write-Log -Message "═══════════════════════════════════════════════════════════" -Level INFO
+            Write-Log -Message "Pfad: $foundPath" -Level INFO
+            # Empty log line removed
+            Write-Log -Message "WICHTIG: Diesen Pfad für finalen Code notieren!" -Level INFO
+            # Empty log line removed
+
+            # Zeige gefundene Dateien
+            $files = Get-ChildItem -Path $foundPath -Filter "*.lxmon" -ErrorAction SilentlyContinue
+            if ($files) {
+                Write-Log -Message "Gefundene .lxmon Dateien: $($files.Count)" -Level INFO
+                foreach ($file in $files) {
+                    $sizeKB = [math]::Round($file.Length / 1KB, 2)
+                    Write-Log -Message "  - $($file.Name) (${sizeKB} KB, LastWrite: $($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')))" -Level INFO
+                }
+            }
+            else {
+                Write-Log -Message "⚠ Verzeichnis existiert, aber noch keine .lxmon Dateien" -Level WARN
+                Write-Log -Message "Tipp: Führe Aktionen auf dem Miniserver aus um Logs zu erzeugen" -Level INFO
+            }
+        }
+        else {
+            # Empty log line removed
+            Write-Log -Message "═══════════════════════════════════════════════════════════" -Level INFO
+            Write-Log -Message "✗✗✗ KEINE .lxmon Dateien gefunden!" -Level WARN
+            Write-Log -Message "═══════════════════════════════════════════════════════════" -Level INFO
+            # Empty log line removed
+            Write-Log -Message "Mögliche Ursachen:" -Level INFO
+            Write-Log -Message "1. Monitor hat noch keine Logs empfangen (Miniserver sendet nicht)" -Level INFO
+            Write-Log -Message "2. Logs werden in unbekanntem Verzeichnis gespeichert" -Level INFO
+            # Empty log line removed
+            Write-Log -Message "Bitte manuell im Dateisystem suchen:" -Level INFO
+            Write-Log -Message "  - C:\Windows\Temp (und Unterordner)" -Level INFO
+            Write-Log -Message "  - %USERPROFILE%\AppData\Local\Temp" -Level INFO
+            Write-Log -Message "  - %USERPROFILE%\Documents\Loxone" -Level INFO
+            # Empty log line removed
+
+            if (-not $MonitorDiscoveryMode) {
+                Write-Log -Message "Tipp: Verwende -MonitorDiscoveryMode für erweiterte Suche" -Level INFO
+            }
+        }
+
+        # 7. Ggf. weiterlaufen lassen
+        if ($KeepMonitorRunning) {
+            # Empty log line removed
+            Write-Log -Message "═══════════════════════════════════════════════════════════" -Level INFO
+            Write-Log -Message "Monitor läuft weiter (KeepMonitorRunning aktiv)" -Level INFO
+            Write-Log -Message "Drücke STRG+C zum Beenden" -Level INFO
+            Write-Log -Message "═══════════════════════════════════════════════════════════" -Level INFO
+
+            while ($true) {
+                Start-Sleep -Seconds 10
+
+                # Zeige periodisch Status
+                $currentFiles = Get-ChildItem -Path $foundPath -Filter "*.lxmon" -ErrorAction SilentlyContinue
+                if ($currentFiles) {
+                    Write-Log -Message "[$(Get-Date -Format 'HH:mm:ss')] Monitor aktiv - $($currentFiles.Count) .lxmon Datei(en)" -Level INFO
+                }
+            }
+        }
+    }
+    catch {
+        Write-Log -Message "FEHLER im Test-Monitor Modus: $($_.Exception.Message)" -Level ERROR
+        Write-Log -Message "Stack Trace: $($_.ScriptStackTrace)" -Level DEBUG
+    }
+    finally {
+        # 8. Cleanup
+        # Empty log line removed
+        Write-Log -Message "Beende Test-Monitor Modus..." -Level INFO
+
+        # Deaktiviere Logging auf allen MS
+        if ($monitorMS) {
+            foreach ($ms in $monitorMS) {
+                Write-Log -Message "Deaktiviere Logging auf MS '$($ms.Name)'..." -Level INFO
+                Disable-MiniserverLogging -MiniserverUrl $ms.Url
+            }
+        }
+
+        # Stoppe Monitor
+        Stop-LoxoneMonitorProcess
+
+        # Empty log line removed
+        Write-Log -Message "╔════════════════════════════════════════════════════════════╗" -Level INFO
+        Write-Log -Message "║          TEST MONITOR MODUS BEENDET                       ║" -Level INFO
+        Write-Log -Message "╚════════════════════════════════════════════════════════════╝" -Level INFO
+
+        if ($scriptContext -and $scriptContext.LogFile) {
+            Show-FinalStatusToast -StatusMessage "Test-Monitor Modus abgeschlossen" -Success $true -LogFileToShow $scriptContext.LogFile
+        }
+    }
+
+    exit 0
+}
+# ═══════════════════════════════════════════════════════════════════════════════
+# END TEST MONITOR MODE
+# ═══════════════════════════════════════════════════════════════════════════════
+
 if ($scriptContext.IsInteractive -and -not $scriptContext.IsAdminRun -and -not $scriptContext.IsRunningAsSystem -and -not $scriptContext.Params.RegisterTask) {
     Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) Checking if task '$($scriptContext.TaskName)' needs registration (interactive, non-admin)."
     if (-not (Test-ScheduledTask -TaskName $scriptContext.TaskName -ErrorAction SilentlyContinue)) {
@@ -596,21 +824,24 @@ if (-not $prerequisites.ConfigUpdateNeeded -and -not $prerequisites.AppUpdateNee
         $cachedMS = 0
         
         foreach ($msEntry in $msEntries) {
-            if (Test-MiniserverCacheValid -MSEntry $msEntry -TargetVersion $targetVersion -MaxCacheAgeHours 24) {
+            # Check both cache age AND if MS needs update by passing target version (7 day cache)
+            if (Test-MiniserverCacheValid -MSEntry $msEntry -TargetVersion $targetVersion -MaxCacheAgeHours 168) {
                 $cachedMS++
-                Write-Log -Message "(UpdateLoxone.ps1) MS $($msEntry.IP) cached as current ($($msEntry.CachedVersion), age: $([Math]::Round(((Get-Date) - $msEntry.LastChecked).TotalHours, 1))h)" -Level DEBUG
+                # Cache is valid and MS is at target version
+                Write-Log -Message "(UpdateLoxone.ps1) MS $($msEntry.IP) is current at version $($msEntry.CachedVersion) (cache age: $([Math]::Round(((Get-Date) - $msEntry.LastChecked).TotalHours, 1))h)" -Level DEBUG
             } else {
                 $canSkipAllMS = $false
                 $reason = if (-not $msEntry.HasCache) { "no cache" } 
-                         elseif ($msEntry.CachedVersion -ne $targetVersion) { "version mismatch ($($msEntry.CachedVersion) vs $targetVersion)" }
-                         else { "cache expired" }
+                         elseif (-not $msEntry.LastChecked) { "no timestamp" }
+                         elseif ($msEntry.CachedVersion -ne $targetVersion) { "needs update: $($msEntry.CachedVersion) -> $targetVersion" }
+                         else { "cache expired (age: $([Math]::Round(((Get-Date) - $msEntry.LastChecked).TotalHours, 1))h)" }
                 Write-Log -Message "(UpdateLoxone.ps1) MS $($msEntry.IP) needs check: $reason" -Level DEBUG
             }
         }
         
         if ($canSkipAllMS -and $totalMS -gt 0) {
-            Write-Log -Message "(UpdateLoxone.ps1) SMART EARLY EXIT: All $totalMS miniserver(s) cached as current ($targetVersion). Skipping all network checks." -Level INFO
-            Write-Log -Message "(UpdateLoxone.ps1) Cache hit rate: $cachedMS/$totalMS (100%). Performance gain: ~$($totalMS * 2)+ seconds saved." -Level INFO
+            Write-Log -Message "(UpdateLoxone.ps1) SMART EARLY EXIT: All $totalMS miniserver(s) are at target version $targetVersion. Skipping pipeline initialization." -Level INFO
+            Write-Log -Message "(UpdateLoxone.ps1) Cache hit rate: $cachedMS/$totalMS (100%). All miniservers current." -Level INFO
         } else {
             Write-Log -Message "(UpdateLoxone.ps1) Cache hit rate: $cachedMS/$totalMS. Need to check $($totalMS - $cachedMS) miniserver(s)." -Level INFO
         }
@@ -638,33 +869,64 @@ if (-not $prerequisites.ConfigUpdateNeeded -and -not $prerequisites.AppUpdateNee
     } else {
         Write-Log -Message "(UpdateLoxone.ps1) Some miniservers need checking. Proceeding with full pipeline..." -Level INFO
         
-        # CRITICAL FIX: Always call Get-LoxonePipelineData to run MS PreCheck
+        # CRITICAL FIX: Always call Initialize-UpdatePipelineData to run MS PreCheck
         # This will check actual versions and may find no updates are needed
-        Write-Log -Message "(UpdateLoxone.ps1) Calling Get-LoxonePipelineData to run MS PreCheck..." -Level INFO
+        Write-Log -Message "(UpdateLoxone.ps1) Calling Initialize-UpdatePipelineData to run MS PreCheck..." -Level INFO
         
         # Call the pipeline data function which includes MS PreCheck
-        $pipelineDataResult = Get-LoxonePipelineData -Prerequisites $prerequisites -WorkflowContext $scriptContext
+        $pipelineDataResult = Initialize-UpdatePipelineData -WorkflowContext $scriptContext -Prerequisites $prerequisites
         
         # If pipeline succeeded and no updates needed, we can exit early
         if ($pipelineDataResult.Succeeded) {
             $hasUpdates = $false
+            Write-Log -Message "(UpdateLoxone.ps1) Checking UpdateTargetsInfo for updates needed..." -Level DEBUG
             foreach ($target in $pipelineDataResult.UpdateTargetsInfo) {
+                Write-Log -Message "(UpdateLoxone.ps1) Target: $($target.Type) - $($target.Name), UpdateNeeded: $($target.UpdateNeeded), Status: $($target.Status)" -Level DEBUG
                 if ($target.UpdateNeeded) {
+                    Write-Log -Message "(UpdateLoxone.ps1) Found target with UpdateNeeded=true: $($target.Name)" -Level INFO
                     $hasUpdates = $true
                     break
                 }
             }
+            Write-Log -Message "(UpdateLoxone.ps1) Final hasUpdates value: $hasUpdates" -Level DEBUG
             
             if (-not $hasUpdates) {
                 Write-Log -Message "(UpdateLoxone.ps1) MS PreCheck found all miniservers are current. No updates needed." -Level INFO
                 
+                # Check for connection errors even when no updates are needed
+                $connectionErrors = @($pipelineDataResult.UpdateTargetsInfo | Where-Object { 
+                    $_.Type -eq "Miniserver" -and 
+                    $_.Status -eq "ErrorConnecting" 
+                })
+                
+                if ($connectionErrors.Count -gt 0) {
+                    Write-Log -Message "(UpdateLoxone.ps1) WARNING: $($connectionErrors.Count) miniserver(s) had connection errors" -Level WARN
+                    foreach ($errorMS in $connectionErrors) {
+                        Write-Log -Message "  - $($errorMS.Name): Connection failed" -Level WARN
+                    }
+                    # Set error flag even when no updates are needed
+                    $script:ErrorOccurred = $true
+                }
+                
                 # Update cache for all checked miniservers
                 foreach ($target in $pipelineDataResult.UpdateTargetsInfo) {
-                    if ($target.Type -eq "Miniserver" -and $target.InitialVersion -and $target.InitialVersion -ne "Unknown") {
+                    if ($target.Type -eq "Miniserver" -and $target.InitialVersion -and $target.InitialVersion -ne "Unknown" -and $target.Status -ne "ErrorConnecting") {
                         $msListPath = Join-Path -Path $scriptContext.ScriptSaveFolder -ChildPath "UpdateLoxoneMSList.txt"
-                        if ($target.IP) {
-                            Update-MiniserverListCache -FilePath $msListPath -IP $target.IP -Version $target.InitialVersion
-                            Write-Log -Message "(UpdateLoxone.ps1) Updated cache for MS $($target.IP): $($target.InitialVersion)" -Level DEBUG
+                        
+                        # Extract IP from Name (format: "MS 192.168.178.2")
+                        $ip = $null
+                        if ($target.Name -match '^MS\s+(.+)$') {
+                            $ip = $matches[1].Trim()
+                        } elseif ($target.IP) {
+                            # Fallback to IP property if it exists
+                            $ip = $target.IP
+                        }
+                        
+                        if ($ip) {
+                            Update-MiniserverListCache -FilePath $msListPath -IP $ip -Version $target.InitialVersion
+                            Write-Log -Message "(UpdateLoxone.ps1) Updated cache for MS $($ip): $($target.InitialVersion)" -Level DEBUG
+                        } else {
+                            Write-Log -Message "(UpdateLoxone.ps1) Could not extract IP from target: $($target.Name)" -Level WARN
                         }
                     }
                 }
@@ -674,11 +936,36 @@ if (-not $prerequisites.ConfigUpdateNeeded -and -not $prerequisites.AppUpdateNee
             } else {
                 Write-Log -Message "(UpdateLoxone.ps1) MS PreCheck found updates needed. Proceeding with pipeline." -Level INFO
                 $UpdateTargetsInfo = $pipelineDataResult.UpdateTargetsInfo
+
+                # Check if MS PreCheck jobs are running in parallel (early exit path)
+                if ($pipelineDataResult.MSPreCheckJobsStarted -and $pipelineDataResult.MSPreCheckJobs) {
+                    Write-Log -Message "(UpdateLoxone.ps1) [Parallel Mode - Early Exit] MS PreCheck jobs are running in background" -Level INFO
+                    Write-Log -Message "(UpdateLoxone.ps1) [Parallel Mode - Early Exit] MS updates will be added dynamically as jobs complete" -Level INFO
+
+                    # Store jobs for the parallel workflow to collect dynamically
+                    $script:MSPreCheckJobs = $pipelineDataResult.MSPreCheckJobs
+                    $script:MSPreCheckJobsActive = $true
+                }
+
+                # Check for connection errors in miniservers
+                $connectionErrors = @($UpdateTargetsInfo | Where-Object { 
+                    $_.Type -eq "Miniserver" -and 
+                    $_.Status -eq "ErrorConnecting" 
+                })
+                
+                if ($connectionErrors.Count -gt 0) {
+                    Write-Log -Message "(UpdateLoxone.ps1) WARNING: $($connectionErrors.Count) miniserver(s) had connection errors" -Level WARN
+                    foreach ($errorMS in $connectionErrors) {
+                        Write-Log -Message "  - $($errorMS.Name): Connection failed" -Level WARN
+                    }
+                    # Set error flag but continue with other updates
+                    $script:ErrorOccurred = $true
+                }
             }
         } else {
             Write-Log -Message "(UpdateLoxone.ps1) Pipeline data collection failed. Creating fallback structure." -Level WARN
             
-            # Fallback: Create minimal pipeline data if Get-LoxonePipelineData fails
+            # Fallback: Create minimal pipeline data if Initialize-UpdatePipelineData fails
             $pipelineDataResult = @{
                 Succeeded = $false
                 UpdateTargetsInfo = [System.Collections.ArrayList]::new()
@@ -693,11 +980,11 @@ if (-not $prerequisites.ConfigUpdateNeeded -and -not $prerequisites.AppUpdateNee
             
             # Only add miniserver entries if we're in fallback mode
             foreach ($msEntry in $msEntries) {
-                if (-not (Test-MiniserverCacheValid -MSEntry $msEntry -TargetVersion $targetVersion -MaxCacheAgeHours 24)) {
+                if (-not (Test-MiniserverCacheValid -MSEntry $msEntry -TargetVersion $targetVersion -MaxCacheAgeHours 168)) {
                     # Uncached or expired - needs version checking
                     $msTarget = @{
                         Type = "Miniserver"
-                        Name = Get-RedactedPassword $msEntry.Url  # Use redacted URL for logging
+                        Name = "MS $($msEntry.IP)"  # Use just the IP for display name
                         UpdateNeeded = $true  # Need to check this one
                         Status = "NeedsVersionCheck"
                         OriginalEntry = $msEntry.Url  # Sequential mode expects URL string here
@@ -714,7 +1001,7 @@ if (-not $prerequisites.ConfigUpdateNeeded -and -not $prerequisites.AppUpdateNee
                     # Cached and valid - already up-to-date but add for final summary
                     $msTarget = @{
                         Type = "Miniserver"
-                        Name = Get-RedactedPassword $msEntry.Url  # Use redacted URL for logging
+                        Name = "MS $($msEntry.IP)"  # Use just the IP for display name
                         UpdateNeeded = $false  # Already known to be current from cache
                         Status = "UpToDate"  # Mark as up-to-date for final summary
                         InitialVersion = $msEntry.CachedVersion
@@ -752,12 +1039,24 @@ if (-not $prerequisites.ConfigUpdateNeeded -and -not $prerequisites.AppUpdateNee
         exit 1
     }
     Write-Log -Message "(UpdateLoxone.ps1) Initialize-UpdatePipelineData completed." -Level INFO
-    
+
     $UpdateTargetsInfo = $pipelineDataResult.UpdateTargetsInfo
+
+    # Check if MS PreCheck jobs are running in parallel (parallel mode optimization)
+    if ($pipelineDataResult.MSPreCheckJobsStarted -and $pipelineDataResult.MSPreCheckJobs) {
+        Write-Log -Message "(UpdateLoxone.ps1) [Parallel Mode] MS PreCheck jobs are running in background" -Level INFO
+        Write-Log -Message "(UpdateLoxone.ps1) [Parallel Mode] Config/App downloads will start IMMEDIATELY - MS jobs continue parallel" -Level INFO
+        Write-Log -Message "(UpdateLoxone.ps1) [Parallel Mode] MS updates will be added dynamically as jobs complete" -Level INFO
+
+        # Store jobs for the parallel workflow to collect dynamically
+        $script:MSPreCheckJobs = $pipelineDataResult.MSPreCheckJobs
+        $script:MSPreCheckJobsActive = $true
+
+        # DO NOT wait for jobs here! Let the parallel workflow handle them dynamically
+    }
 }
 
 # Common processing for both early exit and full pipeline paths
-Write-Host "DEBUG: (UpdateLoxone.ps1) After pipeline initialization - UpdateTargetsInfo Count: $($UpdateTargetsInfo.Count)"
 $itemNumDebugInit = 0
 foreach ($itemDebug in $UpdateTargetsInfo) {
     Write-Host "DEBUG: (UpdateLoxone.ps1) After pipeline initialization - Item #$itemNumDebugInit Type: $($itemDebug.Type) - Name: $($itemDebug.Name)"
@@ -780,7 +1079,8 @@ Write-Log -Message "(UpdateLoxone.ps1) Pipeline Data Initialized - TotalWeight: 
 
 # --- Conditional Toast Initialization (After initial checks and context setup) ---
 $anySoftwareUpdateNeeded = ($UpdateTargetsInfo | Where-Object { ($_.Type -eq "Config" -or $_.Type -eq "App") -and $_.UpdateNeeded }).Count -gt 0
-$anyMSPotentiallyNeedingUpdate = ($UpdateTargetsInfo | Where-Object { $_.Type -eq "Miniserver" }).Count -gt 0 
+# Only count MS that actually need updates, not just all MS entries
+$anyMSPotentiallyNeedingUpdate = ($UpdateTargetsInfo | Where-Object { $_.Type -eq "Miniserver" -and $_.UpdateNeeded }).Count -gt 0 
 
 # Determine effective parallel execution mode
 # Priority: 1) Command-line switch (if explicitly set), 2) Configuration file, 3) Default (false)
@@ -796,9 +1096,12 @@ if ($PSBoundParameters.ContainsKey('Parallel')) {
 }
 
 # Override parallel mode if not interactive (scheduled task, etc.)
-if (-not $scriptContext.IsInteractive -and $effectiveParallelMode) {
+# BUT: If user explicitly specified -Parallel, respect their choice
+if (-not $scriptContext.IsInteractive -and $effectiveParallelMode -and -not $PSBoundParameters.ContainsKey('Parallel')) {
     Write-Log -Message "(UpdateLoxone.ps1) Parallel mode disabled for non-interactive execution (scheduled task)" -Level WARN
     $effectiveParallelMode = $false
+} elseif (-not $scriptContext.IsInteractive -and $PSBoundParameters.ContainsKey('Parallel') -and $Parallel) {
+    Write-Log -Message "(UpdateLoxone.ps1) Running in parallel mode despite non-interactive context (explicitly requested via -Parallel switch)" -Level INFO
 }
 
 # Consolidated parallel mode detection (was 5 verbose log entries)
@@ -806,21 +1109,7 @@ $parallelSwitchMsg = if ($PSBoundParameters.ContainsKey('Parallel')) { "$Paralle
 Write-Log -Message "(UpdateLoxone.ps1) Parallel mode: $effectiveParallelMode (switch: $parallelSwitchMsg, config: $($script:UseParallelExecution), interactive: $($scriptContext.IsInteractive))" -Level INFO
 Write-Log -Message "(UpdateLoxone.ps1) Environment LOXONE_PARALLEL_MODE (before): '$($env:LOXONE_PARALLEL_MODE)'" -Level INFO
 
-# Set parallel mode environment variable BEFORE toast initialization if parallel mode is enabled
-if ($effectiveParallelMode) {
-    Write-Log -Message "(UpdateLoxone.ps1) Setting LOXONE_PARALLEL_MODE environment variable to '1' for parallel execution" -Level INFO
-    $env:LOXONE_PARALLEL_MODE = "1"
-    Write-Log -Message "(UpdateLoxone.ps1) Environment LOXONE_PARALLEL_MODE (after): '$($env:LOXONE_PARALLEL_MODE)'" -Level INFO
-    
-    # Also set component information for toast to know what progress bars to create
-    $componentInfo = @{
-        Config = ($UpdateTargetsInfo | Where-Object { $_.Type -eq "Config" -and $_.UpdateNeeded }).Count -gt 0
-        App = ($UpdateTargetsInfo | Where-Object { $_.Type -eq "App" -and $_.UpdateNeeded }).Count -gt 0
-        Miniservers = ($UpdateTargetsInfo | Where-Object { $_.Type -eq "Miniserver" }).Count
-    }
-    [System.Environment]::SetEnvironmentVariable("LOXONE_PARALLEL_COMPONENTS", ($componentInfo | ConvertTo-Json -Compress), "Process")
-    Write-Log -Message "(UpdateLoxone.ps1) Set LOXONE_PARALLEL_COMPONENTS: $($componentInfo | ConvertTo-Json -Compress)" -Level DEBUG
-}
+# Environment variables will be set later only if there's actual work to do
 
 if (-not $anySoftwareUpdateNeeded -and -not $anyMSPotentiallyNeedingUpdate -and -not $scriptContext.IsInteractive -and $scriptContext.IsSelfInvokedForUpdateCheck) {
     Write-Log -Message "(UpdateLoxone.ps1) No software updates needed, no MS to check (or list empty), and script is self-invoked non-interactively. Exiting cleanly." -Level INFO
@@ -832,6 +1121,23 @@ if (
     ($scriptContext.IsSelfInvokedForUpdateCheck -and $anySoftwareUpdateNeeded) -or # For self-invoked (scheduled task), only if software update is needed
     (-not $scriptContext.IsSelfInvokedForUpdateCheck -and ($anySoftwareUpdateNeeded -or $anyMSPotentiallyNeedingUpdate)) # For non-self-invoked (e.g. direct run), if any update or MS check is pending
 ) {
+    # Set LOXONE_PARALLEL_MODE early so toast can detect it
+    if ($effectiveParallelMode) {
+        Write-Log -Message "(UpdateLoxone.ps1) Setting LOXONE_PARALLEL_MODE environment variable early for toast initialization" -Level INFO
+        $env:LOXONE_PARALLEL_MODE = "1"
+        # Force file logging even in parallel mode so we can see what's happening
+        $env:LOXONE_FORCE_FILE_LOGGING = "1"
+        
+        # Pre-calculate component information for toast
+        $componentInfo = @{
+            Config = $prerequisites.ConfigUpdateNeeded
+            App = $prerequisites.AppUpdateNeeded
+            Miniservers = $anyMSPotentiallyNeedingUpdate
+        }
+        [System.Environment]::SetEnvironmentVariable("LOXONE_PARALLEL_COMPONENTS", ($componentInfo | ConvertTo-Json -Compress), "Process")
+        Write-Log -Message "(UpdateLoxone.ps1) Set LOXONE_PARALLEL_COMPONENTS early: $($componentInfo | ConvertTo-Json -Compress)" -Level DEBUG
+    }
+    
     Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) ENTERING initial toast display block. Conditions met: IsSelfInvokedForUpdateCheck=$($scriptContext.IsSelfInvokedForUpdateCheck), anySoftwareUpdateNeeded=$anySoftwareUpdateNeeded, anyMSPotentiallyNeedingUpdate=$anyMSPotentiallyNeedingUpdate, IsRunningAsSystem=$($scriptContext.IsRunningAsSystem)"
     if (-not $scriptContext.IsRunningAsSystem) {
         Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) Not running as SYSTEM. Proceeding with Initialize-LoxoneToastAppId and initial toast."
@@ -953,43 +1259,85 @@ try {
 
     # --- Check for Parallel Execution Mode ---
     if ($effectiveParallelMode) {
-        # Consolidated parallel execution start (was 5 verbose log entries)
-        Write-Log -Message "Starting parallel execution (MaxConcurrency: $MaxConcurrency, MaxMS: $MaxMSConcurrency)" -Level INFO
-    
-    # Build workflow definition for parallel execution
-    $workflowDefinition = @{
-        ConfigUpdate = $null
-        AppUpdate = $null
-        MiniserverUpdates = @()  # Changed from Miniservers to MiniserverUpdates
-        ScriptSaveFolder = $scriptContext.ScriptSaveFolder
-        EnableCRC = $EnableCRC
-    }
+        # First check if there's any work to do before setting up parallel infrastructure
+        # Quick pre-check to avoid unnecessary setup
+        $hasConfigWork = $UpdateTargetsInfo | Where-Object { $_.Type -eq "Config" -and ($_.UpdateNeeded -eq $true -or $_.UpdateNeeded -eq "True") }
+        $hasAppWork = $UpdateLoxoneApp -and ($UpdateTargetsInfo | Where-Object { $_.Type -eq "App" -and ($_.UpdateNeeded -eq $true -or $_.UpdateNeeded -eq "True") })
+        $hasMSWork = $UpdateTargetsInfo | Where-Object { $_.Type -eq "Miniserver" -and ($_.UpdateNeeded -eq $true -or $_.UpdateNeeded -eq "True") }
+        
+        if (-not $hasConfigWork -and -not $hasAppWork -and -not $hasMSWork) {
+            Write-Log -Message "No work detected for parallel workflow (Config: $($hasConfigWork -ne $null), App: $($hasAppWork -ne $null), MS: $($hasMSWork -ne $null)). Skipping parallel setup." -Level INFO
+            # Skip to the no-work result
+            $parallelResult = @{
+                Success = $true
+                Downloads = @()
+                Installations = @()
+                MiniserverResults = @()
+                TotalDuration = 0
+            }
+            # Set a flag to skip the rest of parallel setup
+            $skipParallelSetup = $true
+        } else {
+            # Consolidated parallel execution start (was 5 verbose log entries)
+            Write-Log -Message "Starting parallel execution (MaxConcurrency: $MaxConcurrency, MaxMS: $MaxMSConcurrency)" -Level INFO
+            $skipParallelSetup = $false
+        }
+        
+        if (-not $skipParallelSetup) {
+            # Build workflow definition for parallel execution
+            $workflowDefinition = @{
+                ConfigUpdate = $null
+                AppUpdate = $null
+                MiniserverUpdates = @()  # Changed from Miniservers to MiniserverUpdates
+                ScriptSaveFolder = $scriptContext.ScriptSaveFolder
+                DownloadDir = $scriptContext.DownloadDir  # Add DownloadDir for parallel workflow
+                EnableCRC = $EnableCRC
+            }
     
     # Check Config update requirements
     $configTarget = $UpdateTargetsInfo | Where-Object { $_.Type -eq "Config" -and ($_.UpdateNeeded -eq $true -or $_.UpdateNeeded -eq "True") } | Select-Object -First 1
     if ($configTarget) {
         Write-Log -Message "Config update needed: $($configTarget.InitialVersion) -> $($configTarget.TargetVersion)" -Level INFO
+        Write-Log -Message "ConfigTarget properties - DownloadUrl: '$($configTarget.DownloadUrl)', ExpectedCRC: '$($configTarget.ExpectedCRC)', ExpectedSize: '$($configTarget.ExpectedSize)'" -Level DEBUG
+        
+        # Debug: Check all properties
+        $configTarget | Get-Member -MemberType Properties | ForEach-Object {
+            Write-Log -Message "  ConfigTarget.$($_.Name) = '$($configTarget.$($_.Name))'" -Level DEBUG
+        }
+        
         $workflowDefinition.ConfigUpdate = @{
-            Url = $configTarget.DownloadURL
+            Url = $configTarget.DownloadUrl  # Fixed property name casing
             Version = $configTarget.TargetVersion
             TargetVersion = $configTarget.TargetVersion  # Add this for parallel workflow
+            InitialVersion = $configTarget.InitialVersion  # Track if it's a fresh install
             ExpectedCRC32 = $configTarget.ExpectedCRC
-            FileSize = $configTarget.ExpectedFilesize
+            FileSize = $configTarget.ExpectedSize
+            OutputPath = $configTarget.ZipFilePath  # Use the pre-configured path from target
         }
+        
+        Write-Log -Message "WorkflowDefinition.ConfigUpdate.Url = '$($workflowDefinition.ConfigUpdate.Url)'" -Level DEBUG
     }
     
     # Check App update requirements
+    Write-Log -Message "Checking App update requirements. UpdateLoxoneApp: $UpdateLoxoneApp" -Level DEBUG
     if ($UpdateLoxoneApp) {
         $appTarget = $UpdateTargetsInfo | Where-Object { $_.Type -eq "App" -and ($_.UpdateNeeded -eq $true -or $_.UpdateNeeded -eq "True") } | Select-Object -First 1
+        Write-Log -Message "App target found: $($null -ne $appTarget), UpdateNeeded: $($appTarget.UpdateNeeded)" -Level DEBUG
         if ($appTarget) {
             Write-Log -Message "App update needed: $($appTarget.InitialVersion) -> $($appTarget.TargetVersion)" -Level INFO
+            Write-Log -Message "AppTarget properties - DownloadUrl: '$($appTarget.DownloadUrl)', ExpectedCRC: '$($appTarget.ExpectedCRC)', ExpectedSize: '$($appTarget.ExpectedSize)'" -Level DEBUG
+            
             $workflowDefinition.AppUpdate = @{
-                Url = $appTarget.DownloadURL
+                Url = $appTarget.DownloadUrl  # Fixed property name casing
                 Version = $appTarget.TargetVersion
                 TargetVersion = $appTarget.TargetVersion  # Add this for parallel workflow
+                InitialVersion = $appTarget.InitialVersion  # Track if it's a fresh install
                 ExpectedCRC32 = $appTarget.ExpectedCRC
-                FileSize = $appTarget.ExpectedFilesize
+                FileSize = $appTarget.ExpectedSize
+                OutputPath = $appTarget.InstallerPath  # Use the pre-configured path from target
             }
+            
+            Write-Log -Message "WorkflowDefinition.AppUpdate.Url = '$($workflowDefinition.AppUpdate.Url)'" -Level DEBUG
         }
     }
     
@@ -1016,15 +1364,28 @@ try {
             Write-Log -Message "UpdateTarget: Type='$($target.Type)', Name='$($target.Name)', UpdateNeeded='$($target.UpdateNeeded)', HasOriginalEntry=$($null -ne $target.OriginalEntry)" -Level DEBUG
         }
         
-        $msTargets = @($UpdateTargetsInfo | Where-Object { $_.Type -eq "Miniserver" -and $_.UpdateNeeded })
-        Write-Log -Message "After filtering: Found $($msTargets.Count) miniserver(s) needing updates" -Level INFO
+        # Filter out miniservers with connection errors or network unreachable
+        $msTargets = @($UpdateTargetsInfo | Where-Object { 
+            $_.Type -eq "Miniserver" -and 
+            $_.UpdateNeeded -and 
+            $_.Status -ne "ErrorConnecting" -and
+            $_.Status -ne "NetworkUnreachable"
+        })
+        Write-Log -Message "After filtering: Found $($msTargets.Count) miniserver(s) needing updates (excluding connection errors)" -Level INFO
         
-        if ($msTargets -and $msTargets.Count -gt 0) {
-            Write-Log -Message "Found $($msTargets.Count) miniserver(s) needing updates in UpdateTargetsInfo" -Level INFO
+        # Start MS Worker if: (1) MS targets exist OR (2) MS PreCheck jobs are running (parallel mode)
+        if (($msTargets -and $msTargets.Count -gt 0) -or $script:MSPreCheckJobsActive) {
+            if ($msTargets -and $msTargets.Count -gt 0) {
+                Write-Log -Message "Found $($msTargets.Count) miniserver(s) needing updates in UpdateTargetsInfo" -Level INFO
+            }
+            if ($script:MSPreCheckJobsActive) {
+                Write-Log -Message "[Parallel Mode] MS PreCheck jobs are running - MS Worker will collect them dynamically" -Level INFO
+            }
             $workflowDefinition.MiniserverUpdates = @()
             foreach ($msTarget in $msTargets) {
                 Write-Log -Message "Adding Miniserver to parallel workflow from UpdateTargetsInfo: $($msTarget.Name)" -Level DEBUG
                 Write-Log -Message "MS Target properties: $($msTarget | ConvertTo-Json -Compress)" -Level DEBUG
+                Write-Log -Message "MS InitialVersion value: '$($msTarget.InitialVersion)' (Type: $($msTarget.InitialVersion.GetType().Name))" -Level INFO
                 
                 # Parse the miniserver entry to get IP and credentials
                 $entryToProcess = $null
@@ -1049,7 +1410,8 @@ try {
                     
                     if ($msEntry -is [string]) {
                         # Parse string format entry
-                        if ($msEntry -match '@([^:/]+)') {
+                        # Extract IP - exclude colons, slashes, AND commas (for cached entries)
+                        if ($msEntry -match '@([^:/,]+)') {
                             $msIP = $matches[1]
                         }
                         if ($msEntry -match '://([^@]+)@') {
@@ -1099,10 +1461,12 @@ try {
                             UpdateLevel = $updateChannel
                             Name = $msTarget.Name
                             TargetVersion = $msTarget.TargetVersion
+                            CurrentVersion = $msTarget.InitialVersion  # Pass pre-checked version to avoid re-checking
+                            OriginalEntry = if ($msEntry -is [string]) { $msEntry } elseif ($msEntry -and $msEntry.Url) { $msEntry.Url } else { $null }  # Pass entry for fallback
                         }
                         
                         $workflowDefinition.MiniserverUpdates += $msUpdate
-                        Write-Log -Message "Added miniserver $msIP to workflow (Channel: $updateChannel)" -Level INFO
+                        Write-Log -Message "Added miniserver $msIP to workflow (Channel: $updateChannel, CurrentVersion: '$($msUpdate.CurrentVersion)')" -Level INFO
                     }
                     else {
                         Write-Log -Message "Warning: Failed to parse miniserver entry - IP: $msIP, Has Credential: $($null -ne $msCredential)" -Level WARN
@@ -1115,15 +1479,41 @@ try {
         }
     }
     
-    # Execute parallel workflow
-    try {
-        Write-Log -Message "Starting parallel workflow execution..." -Level INFO
-        $parallelResult = Start-ParallelWorkflow -WorkflowDefinition $workflowDefinition `
-                                                 -MaxConcurrency $MaxConcurrency `
-                                                 -MaxMSConcurrency $MaxMSConcurrency
+            # Execute parallel workflow only if there's work to do
+            Write-Log -Message "Checking if workflow has work - ConfigUpdate: $($null -ne $workflowDefinition.ConfigUpdate), AppUpdate: $($null -ne $workflowDefinition.AppUpdate), MiniserverUpdates: $($workflowDefinition.MiniserverUpdates.Count)" -Level DEBUG
+            $hasWork = $workflowDefinition.ConfigUpdate -or 
+                       $workflowDefinition.AppUpdate -or 
+                       ($workflowDefinition.MiniserverUpdates -and $workflowDefinition.MiniserverUpdates.Count -gt 0)
+            Write-Log -Message "Workflow has work: $hasWork" -Level INFO
+            
+            if ($hasWork) {
+                # Update parallel mode environment variables with actual work information if not already set
+                if ($effectiveParallelMode -and $env:LOXONE_PARALLEL_MODE -ne "1") {
+                    Write-Log -Message "(UpdateLoxone.ps1) Setting LOXONE_PARALLEL_MODE environment variable to '1' for parallel execution" -Level INFO
+                    $env:LOXONE_PARALLEL_MODE = "1"
+                }
+                
+                if ($effectiveParallelMode) {
+                    # Update component information with actual workflow data
+                    $componentInfo = @{
+                        Config = ($UpdateTargetsInfo | Where-Object { $_.Type -eq "Config" -and $_.UpdateNeeded }).Count -gt 0
+                        App = ($UpdateTargetsInfo | Where-Object { $_.Type -eq "App" -and $_.UpdateNeeded }).Count -gt 0
+                        Miniservers = ($workflowDefinition.MiniserverUpdates -and $workflowDefinition.MiniserverUpdates.Count -gt 0)
+                    }
+                    [System.Environment]::SetEnvironmentVariable("LOXONE_PARALLEL_COMPONENTS", ($componentInfo | ConvertTo-Json -Compress), "Process")
+                    Write-Log -Message "(UpdateLoxone.ps1) Updated LOXONE_PARALLEL_COMPONENTS with workflow data: $($componentInfo | ConvertTo-Json -Compress)" -Level DEBUG
+                }
+                
+                try {
+                    Write-Log -Message "Starting parallel workflow execution..." -Level INFO
+                    $parallelResult = Start-ParallelWorkflow -WorkflowDefinition $workflowDefinition `
+                                                             -MaxConcurrency $MaxConcurrency `
+                                                             -MaxMSConcurrency $MaxMSConcurrency `
+                                                             -MSPreCheckJobs $script:MSPreCheckJobs `
+                                                             -MSPreCheckJobsActive ($script:MSPreCheckJobsActive -eq $true)
         
         # Update target info based on parallel results
-        foreach ($download in $parallelResult.Downloads) {
+        foreach ($download in $parallelResult.Downloads.Values) {
             $targetType = if ($download.Component -eq 'Config') { 'Config' } else { 'App' }
             $target = $UpdateTargetsInfo | Where-Object { $_.Type -eq $targetType } | Select-Object -First 1
             
@@ -1146,15 +1536,16 @@ try {
             }
         }
         
-        Write-Log -Message "Processing installation results. Count: $($parallelResult.Installations.Count)" -Level INFO
-        foreach ($install in $parallelResult.Installations) {
-            Write-Log -Message "Processing install result - Component: $($install.Component), Status: $($install.Status), ID: $($install.Id)" -Level INFO
+        if ($parallelResult.Installations -and $parallelResult.Installations.Count -gt 0) {
+            Write-Log -Message "Processing installation results. Count: $($parallelResult.Installations.Count)" -Level INFO
+            foreach ($install in $parallelResult.Installations.Values) {
+                Write-Log -Message "Processing install result - Component: $($install.Component), Status: $($install.Status), Version: $($install.Version)" -Level INFO
             $targetType = if ($install.Component -eq 'Config') { 'Config' } else { 'App' }
             $target = $UpdateTargetsInfo | Where-Object { $_.Type -eq $targetType } | Select-Object -First 1
             
             if ($target -and $install.Status -eq 'Completed') {
                 # Check if this is a fresh install or update
-                $isNewInstall = ($target.InitialVersion -eq $null -or $target.InitialVersion -eq "")
+                $isNewInstall = ($target.InitialVersion -eq $null -or $target.InitialVersion -eq "" -or $target.InitialVersion -eq "0.0.0.0")
                 $target.Status = if ($isNewInstall) { 'InstallSuccessful' } else { 'UpdateSuccessful' }
                 $target.UpdatePerformed = $true
                 $scriptGlobalState.anyUpdatePerformed = $true
@@ -1166,10 +1557,13 @@ try {
                 } else {
                     # Get app version from registry - need to provide the registry path
                     $appDetails = Get-AppVersionFromRegistry -RegistryPath 'HKCU:\Software\3c55ef21-dcba-528f-8e08-1a92f8822a13' -ErrorAction SilentlyContinue
-                    $installedVersion = if ($appDetails -and -not $appDetails.Error) { $appDetails.FileVersion } else { $null }
+                    # Use DisplayVersion for UI, fall back to FileVersion
+                    $installedVersion = if ($appDetails -and -not $appDetails.Error) {
+                        if ($appDetails.DisplayVersion) { $appDetails.DisplayVersion } else { $appDetails.FileVersion }
+                    } else { $null }
                 }
                 $target.VersionAfterUpdate = $installedVersion
-                
+
                 Write-Log -Message "$targetType installation completed successfully. Version: $installedVersion" -Level INFO
             }
             elseif ($target -and $install.Status -eq 'Failed') {
@@ -1178,6 +1572,7 @@ try {
                 $errorMsg = if ($install.Error) { $install.Error } elseif ($install.ExitCode) { "Exit code: $($install.ExitCode)" } else { "Installation failed" }
                 Write-Log -Message "$targetType installation failed: $errorMsg" -Level ERROR
             }
+        }
         }
         
         # Check for components that were downloaded but not installed
@@ -1195,25 +1590,27 @@ try {
             foreach ($msResultPair in $parallelResult.Miniservers.GetEnumerator()) {
                 $msResult = $msResultPair.Value
             # Find MS target in UpdateTargetsInfo
-            # First try exact match with "MS" type
-            $msTarget = $UpdateTargetsInfo | Where-Object { $_.Type -eq "MS" -and $_.Name -eq $msResult.IP } | Select-Object -First 1
+            # Try multiple matching strategies to find the existing MS entry
+            $msTarget = $UpdateTargetsInfo | Where-Object { 
+                ($_.Type -eq "Miniserver" -or $_.Type -eq "MS") -and 
+                ($_.IP -eq $msResult.IP -or 
+                 $_.Name -eq "MS $($msResult.IP)" -or 
+                 $_.Name -eq $msResult.IP -or
+                 ($_.OriginalEntry -and $_.OriginalEntry -match "@$([regex]::Escape($msResult.IP))"))
+            } | Select-Object -First 1
             
-            # If not found, try with "Miniserver" type (pre-check uses "Miniserver")
-            # Match by IP property since Name contains redacted URL
             if (-not $msTarget) {
-                $msTarget = $UpdateTargetsInfo | Where-Object { $_.Type -eq "Miniserver" -and $_.IP -eq $msResult.IP } | Select-Object -First 1
-            }
-            
-            if (-not $msTarget) {
-                # Create MS target if it doesn't exist
+                # Only create if truly doesn't exist (shouldn't happen if pre-check ran)
+                Write-Log -Message "Warning: Creating new MS target for $($msResult.IP) - this shouldn't happen if pre-check ran" -Level WARN
                 $msTarget = New-Object PSObject -Property @{
                     Type = "Miniserver"
-                    Name = $msResult.IP
+                    Name = "MS $($msResult.IP)"
                     Status = ""
                     UpdatePerformed = $false
                     VersionAfterUpdate = $null
                     Error = $null
                     InitialVersion = $msResult.Version
+                    IP = $msResult.IP
                 }
                 $UpdateTargetsInfo.Add($msTarget)
             }
@@ -1249,17 +1646,25 @@ try {
             elseif (-not $msResult.Success) {
                 $msTarget.Status = 'UpdateFailed'
                 $msTarget.Error = $msResult.Error
+
+                # DO NOT update cache on failure/timeout
+                # The MS might have updated after we timed out
+                # Let the next run's PreCheck verify the actual version
+
                 try {
                     # Create a safe error message for logging
-                    $errorMsg = if ($msResult.Error) { 
+                    $errorMsg = if ($msResult.Error) {
                         # Remove or replace problematic characters
-                        $msResult.Error -replace "[`'`"]", "" 
-                    } else { 
-                        "Unknown error" 
+                        $msResult.Error -replace "[`'`"]", ""
+                    } else {
+                        "Unknown error"
                     }
                     # Safe string formatting to handle null/empty values
                     $ipAddress = if ($msResult.IP) { $msResult.IP } else { "Unknown IP" }
                     Write-Log -Message "MS $ipAddress update failed: $errorMsg" -Level ERROR
+
+                    # Log that cache was NOT updated (important for debugging)
+                    Write-Log -Message "Cache NOT updated for failed MS $ipAddress - will verify actual version on next run" -Level INFO
                 } catch {
                     # If Write-Log fails, write to host as fallback
                     Write-Host "ERROR: MS $($msResult.IP) update failed - could not write to log" -ForegroundColor Red
@@ -1361,19 +1766,30 @@ try {
             }
         }
         
-        # Skip sequential execution when parallel mode is used
-        Write-Log -Message "Skipping sequential pipeline execution (parallel mode completed)" -Level INFO
-        
-    }
-    catch {
-        $script:ErrorOccurred = $true
-        Write-Log -Message "Fatal error in parallel workflow: $_" -Level ERROR
-        throw
-        }
-    }
+                    # Skip sequential execution when parallel mode is used
+                    Write-Log -Message "Skipping sequential pipeline execution (parallel mode completed)" -Level INFO
+                    
+                }
+                catch {
+                    $script:ErrorOccurred = $true
+                    Write-Log -Message "Fatal error in parallel workflow: $_" -Level ERROR
+                    throw
+                }
+            } else {
+                Write-Log -Message "No work to do in parallel workflow (no updates needed)" -Level INFO
+                $parallelResult = @{
+                    Success = $true
+                    Downloads = @()
+                    Installations = @()
+                    MiniserverResults = @()
+                    TotalDuration = 0
+                }
+            }
+        } # End of if (-not $skipParallelSetup)
+    } # End of if ($effectiveParallelMode)
     else {
-        # Original sequential execution
-        Write-Log -Message "Using sequential execution mode" -Level INFO
+    # Original sequential execution
+    Write-Log -Message "Using sequential execution mode" -Level INFO
 
     # --- Main Pipeline Definition ---
     $steps = @(
@@ -1689,17 +2105,24 @@ if (Get-Command Show-FinalStatusToast -ErrorAction SilentlyContinue) {
 }
 }
 finally {
-Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) Main pipeline 'finally' block executing."
+Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY BLOCK START - Main pipeline 'finally' block executing."
 
-# Clean up all ThreadJobs to prevent background processes from continuing
-Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: Cleaning up all ThreadJobs..."
 try {
-    # First stop any progress workers
-    $progressWorkers = @(Get-Job -ErrorAction SilentlyContinue | Where-Object { 
-        $_.Name -match "ProgressWorker|Progress Worker" -and ($_.State -eq 'Running' -or $_.State -eq 'NotStarted')
-    })
-    
-    if ($progressWorkers.Count -gt 0) {
+    # Clean up all ThreadJobs to prevent background processes from continuing - but only if we created any
+    $allJobsToCheck = @(Get-Job -ErrorAction SilentlyContinue | Where-Object { 
+    $_.Name -match "ProgressWorker|Progress Worker|MS Worker|Config Worker|App Worker|Download Worker|Install Worker" -or
+    $_.Location -match "UpdateLoxone|LoxoneUtils"
+})
+
+if ($allJobsToCheck.Count -gt 0) {
+    Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: Found $($allJobsToCheck.Count) job(s) to clean up"
+    try {
+        # First stop any progress workers
+        $progressWorkers = @($allJobsToCheck | Where-Object { 
+            $_.Name -match "ProgressWorker|Progress Worker" -and ($_.State -eq 'Running' -or $_.State -eq 'NotStarted')
+        })
+        
+        if ($progressWorkers.Count -gt 0) {
         Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: Found $($progressWorkers.Count) Progress Worker(s) to clean up"
         foreach ($job in $progressWorkers) {
             Write-Log -Level INFO -Message "  Stopping Progress Worker: $($job.Name) (ID: $($job.Id), State: $($job.State))"
@@ -1743,34 +2166,20 @@ try {
     } else {
         Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: All ThreadJobs cleaned up successfully"
     }
-} catch {
-    Write-Log -Level ERROR -Message "(UpdateLoxone.ps1) FINALLY: Error during ThreadJob cleanup: $_"
-}
-
-$anyUpdatePerformedActualInFinally = ($UpdateTargetsInfo | Where-Object {$_.UpdatePerformed -eq $true -or $_.Status -eq "UpdateSuccessful"}).Count -gt 0
-Write-Log -Message "(Finally) AnyUpdatePerformedActualInFinally: $anyUpdatePerformedActualInFinally" -Level DEBUG
-
-$logPathToShowFinally = $scriptContext.LogFile 
-$logPathToShowFinally = $scriptContext.LogFile 
-
-if (-not $script:SystemRelaunchExitOccurred) {
-    if ($scriptContext.LogFile -and (Test-Path $scriptContext.LogFile) -and (Get-Command Invoke-LogFileRotation -ErrorAction SilentlyContinue)) {
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) Attempting final log rotation in 'finally' block for '$($scriptContext.LogFile)' (SystemRelaunchExitOccurred is false)."
-        try {
-            $rotatedPath = Invoke-LogFileRotation -LogFilePath $scriptContext.LogFile -MaxArchiveCount 24 -MaxSizeKB ($scriptContext.Params.MaxLogFileSizeMB * 1024) -ErrorAction Stop
-            if ($rotatedPath) { $logPathToShowFinally = $rotatedPath } 
-            Write-Log -Message "(UpdateLoxone.ps1) Log rotation in 'finally' block completed. Effective log path for toast: $logPathToShowFinally" -Level DEBUG
-        } catch {
-            Write-Log -Level WARN -Message "(UpdateLoxone.ps1) Error during log rotation in 'finally' block: $($_.Exception.Message)"
-        }
-    } elseif ($scriptContext.LogFile) {
-        Write-Log -Level WARN -Message "(UpdateLoxone.ps1) Invoke-LogFileRotation not found or LogFile path invalid. Skipping log rotation in 'finally' (SystemRelaunchExitOccurred is false)."
-    } else {
-        Write-Log -Level WARN -Message "(UpdateLoxone.ps1) LogFile path not set in scriptContext. Skipping log rotation in 'finally' (SystemRelaunchExitOccurred is false)."
+    } catch {
+        Write-Log -Level ERROR -Message "(UpdateLoxone.ps1) FINALLY: Error during ThreadJob cleanup: $_"
     }
 } else {
-    Write-Log -Level INFO -Message "(UpdateLoxone.ps1) Skipping final log rotation in 'finally' block because SystemRelaunchExitOccurred is true."
 }
+} catch {
+    Write-Host "[ERROR IN FINALLY] $_" -ForegroundColor Red
+    Write-Log -Level ERROR -Message "(UpdateLoxone.ps1) FINALLY: Unexpected error in job cleanup section: $_"
+}
+
+
+$anyUpdatePerformedActualInFinally = ($UpdateTargetsInfo | Where-Object {$_.UpdatePerformed -eq $true -or $_.Status -eq "UpdateSuccessful"}).Count -gt 0
+
+$logPathToShowFinally = $scriptContext.LogFile
 
 if (-not $script:ErrorOccurred) {
     Write-Log -Message "(UpdateLoxone.ps1) Constructing final success/summary notification message in 'finally' block." -Level INFO
@@ -1781,16 +2190,20 @@ if (-not $script:ErrorOccurred) {
     Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) Finally block: parallel=$($script:IsParallelMode), error=$($script:ErrorOccurred)"
     
     if ($script:IsParallelMode -or $env:LOXONE_PARALLEL_MODE -eq "1") {
-        Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: Parallel mode detected - skipping toast update (progress worker handled all updates)"
+        # Check if there was actually work done (progress worker was started)
+        $hadWork = ($UpdateTargetsInfo | Where-Object { $_.UpdatePerformed -eq $true }).Count -gt 0
+        if ($hadWork) {
+            Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: Parallel mode - progress worker handled toast updates"
+        } else {
+            Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: Parallel mode - no updates needed, skipping final toast"
+        }
     }
     elseif (-not $script:ErrorOccurred -and $Global:PersistentToastInitialized) {
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY: Preparing final progress toast update to 100% (non-parallel mode)."
         $scriptGlobalState.currentStep = $scriptGlobalState.totalSteps # Ensure it's the last step
         $finalizingWeight = Get-StepWeight -StepID 'Finalize'
         $scriptGlobalState.CurrentWeight += $finalizingWeight
         $scriptGlobalState.CurrentWeight = [Math]::Min($scriptGlobalState.CurrentWeight, $scriptGlobalState.TotalWeight)
 
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY: currentStep='$($scriptGlobalState.currentStep)', totalSteps='$($scriptGlobalState.totalSteps)', CurrentWeight='$($scriptGlobalState.CurrentWeight)', TotalWeight='$($scriptGlobalState.TotalWeight)'"
         
         $finalStepNameForToast = "Update Process Finalizing"
         
@@ -1800,19 +2213,13 @@ if (-not $script:ErrorOccurred) {
         [double]$totalWeightToast = 0.0
 
         # Attempt to get values from $scriptGlobalState.Value, with type casting and logging
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY: Attempting to retrieve and cast values from scriptGlobalState.Value"
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY: Attempting to retrieve and cast values from scriptGlobalState"
         try { $stepNumToast = [int]$scriptGlobalState.currentStep } catch { Write-Log -Level WARN -Message "FINALLY: Error casting scriptGlobalState.currentStep ('$($scriptGlobalState.currentStep)') to int. Defaulting."}
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY (POST-CAST): stepNumToast='$stepNumToast' (Type: $($stepNumToast.GetType().FullName))"
 
         try { $totalStepsToast = [int]$scriptGlobalState.totalSteps } catch { Write-Log -Level WARN -Message "FINALLY: Error casting scriptGlobalState.totalSteps ('$($scriptGlobalState.totalSteps)') to int. Defaulting."}
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY (POST-CAST): totalStepsToast='$totalStepsToast' (Type: $($totalStepsToast.GetType().FullName))"
         
         try { $currentWeightToast = [double]$scriptGlobalState.CurrentWeight } catch { Write-Log -Level WARN -Message "FINALLY: Error casting scriptGlobalState.CurrentWeight ('$($scriptGlobalState.CurrentWeight)') to double. Defaulting."}
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY (POST-CAST): currentWeightToast='$currentWeightToast' (Type: $($currentWeightToast.GetType().FullName))"
 
         try { $totalWeightToast = [double]$scriptGlobalState.TotalWeight } catch { Write-Log -Level WARN -Message "FINALLY: Error casting scriptGlobalState.TotalWeight ('$($scriptGlobalState.TotalWeight)') to double. Defaulting."}
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY (POST-CAST): totalWeightToast='$totalWeightToast' (Type: $($totalWeightToast.GetType().FullName))"
         # Fallback logic using script-scoped variables if $scriptGlobalState.Value was problematic
         if ($totalStepsToast -eq 0) {
             $totalStepsToast = if ($script:totalSteps -gt 0) { $script:totalSteps } else { 1 } # Use script-scoped as fallback, then 1
@@ -1832,17 +2239,7 @@ if (-not $script:ErrorOccurred) {
              Write-Log -Level WARN -Message "FINALLY: currentWeightToast was invalid or 0, adjusted to '$currentWeightToast' for 100%."
         }
         
-        Write-Log -Message "(UpdateLoxone.ps1) MAIN SCRIPT FINALLY: Logging before Update-PersistentToast call (Finalizing)." -Level DEBUG
-        Write-Log -Message "(UpdateLoxone.ps1)   Attempting to pass: Step=${stepNumToast}/${totalStepsToast}, Weight=${currentWeightToast}/${totalWeightToast}" -Level DEBUG
-        $statusTextForLogFinally = "Step ${stepNumToast}/${totalStepsToast}: ${finalStepNameForToast}"
-        Write-Log -Message "(UpdateLoxone.ps1)   Constructed StatusText (Finally) = '$statusTextForLogFinally'" -Level DEBUG
-        $progressValueForLogFinally = if ($totalWeightToast -gt 0) { [Math]::Round(($currentWeightToast / $totalWeightToast) * 100) } else { 100 } 
-        Write-Log -Message "(UpdateLoxone.ps1)   Calculated ProgressValue (Finally percentage) = $progressValueForLogFinally %" -Level DEBUG
 
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY (PRE-CALL VALUES AND TYPES): stepNumToast='$($stepNumToast)' (Type: $($stepNumToast.GetType().FullName))"
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY (PRE-CALL VALUES AND TYPES): totalStepsToast='$($totalStepsToast)' (Type: $($totalStepsToast.GetType().FullName))"
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY (PRE-CALL VALUES AND TYPES): currentWeightToast='$($currentWeightToast)' (Type: $($currentWeightToast.GetType().FullName))"
-        Write-Log -Level DEBUG -Message "(UpdateLoxone.ps1) FINALLY (PRE-CALL VALUES AND TYPES): totalWeightToast='$($totalWeightToast)' (Type: $($totalWeightToast.GetType().FullName))"
         try {
             Update-PersistentToast -StepNumber $stepNumToast `
                                    -TotalSteps $totalStepsToast `
@@ -1927,16 +2324,18 @@ if (-not $script:ErrorOccurred) {
         switch ($targetInfo.Status) {
             "UpdateSuccessful"              { 
                 $displayVersion = if ($targetInfo.Type -eq "App") { & $extractBuildDate $targetInfo.VersionAfterUpdate } else { $targetInfo.VersionAfterUpdate }
-                # Use ⬆️ for miniservers, 🔄 for updates of existing software  
-                $icon = if ($targetInfo.Type -eq "Miniserver") { "⬆️" } else { "🔄" }
+                # Use consistent 🔄 symbol for all updates (Config, App, and Miniserver)
+                $icon = "🔄"
                 $line = "$icon " + $targetNameDisplay + " " + $displayVersion 
             }
             "InstallSuccessful"             { 
                 # Use VersionAfterUpdate if available, otherwise fall back to TargetVersion
                 $versionToUse = if ($targetInfo.VersionAfterUpdate) { $targetInfo.VersionAfterUpdate } else { $targetInfo.TargetVersion }
                 $displayVersion = if ($targetInfo.Type -eq "App" -and $versionToUse) { & $extractBuildDate $versionToUse } else { $versionToUse }
-                # Miniservers can't be "installed", only updated
-                $icon = if ($targetInfo.Type -eq "Miniserver") { "⬆️" } else { "🚀" }
+                # Determine icon based on whether it's a fresh install or update
+                # Check if it was a fresh install (no initial version or 0.0.0.0)
+                $isFreshInstall = -not $targetInfo.InitialVersion -or $targetInfo.InitialVersion -eq "" -or $targetInfo.InitialVersion -eq "0.0.0.0"
+                $icon = if ($isFreshInstall) { "🚀" } else { "🔄" }
                 if ($displayVersion) {
                     $line = "$icon " + $targetNameDisplay + " " + $displayVersion
                 } else {
@@ -2015,6 +2414,24 @@ if (-not $script:ErrorOccurred) {
     # They are now integrated into the logs just before the Update-PersistentToast call (around line 694).
     $finalMessageText = ""
 
+    # Check if pre-flight validation failed (from pipelineDataResult)
+    if ($pipelineDataResult -and
+        ($pipelineDataResult.PSObject.Properties.Name -contains 'ValidationFailed') -and
+        $pipelineDataResult.ValidationFailed) {
+
+        $validationMsg = "⚠️ Pre-Flight Validation Failed`n"
+        $validationMsg += "Config file on server doesn't match size in XML`n"
+        if ($pipelineDataResult.ValidationExpectedSize -and $pipelineDataResult.ValidationActualSize) {
+            $expectedMB = [Math]::Round($pipelineDataResult.ValidationExpectedSize / 1MB, 1)
+            $actualMB = [Math]::Round($pipelineDataResult.ValidationActualSize / 1MB, 1)
+            $validationMsg += "Expected: ${expectedMB}MB, Found: ${actualMB}MB`n"
+        }
+        $validationMsg += "Skipped all updates (Config + Miniserver)`n"
+        $validationMsg += "Loxone XML updated before files uploaded.`n"
+        $validationMsg += "Try again later."
+        $summaryLines += $validationMsg
+    }
+
     if ($summaryLines.Count -gt 0) {
         # Sort by the text after the emoji (first letter of component name)
         $sortedLines = $summaryLines | Sort-Object { ($_ -split ' ', 2)[1] }
@@ -2040,15 +2457,187 @@ if (-not $script:ErrorOccurred) {
     Write-Log -Message "(UpdateLoxone.ps1) 'finally' block executing after an error was caught. Error toast should have been displayed by catch block." -Level INFO
 }
 
-
-Write-Log -Message "(UpdateLoxone.ps1) Attempting final Exit-Function call from LoxoneUtils.Logging..." -Level DEBUG
-if (Get-Command Exit-Function -ErrorAction SilentlyContinue) {
-    Exit-Function 
-} else {
-    Write-Log -Message "(UpdateLoxone.ps1) Exit-Function not found in 'finally' block." -Level WARN
+# Fix Loxone App shortcut icons if App was installed
+# This runs at the end regardless of installation method (parallel or sequential)
+if ($UpdateTargetsInfo) {
+    $appTarget = $UpdateTargetsInfo | Where-Object { $_.Type -eq "App" -and $_.UpdatePerformed -eq $true }
+    if ($appTarget) {
+        Write-Log -Message "(UpdateLoxone.ps1) App was installed, attempting to fix shortcut icons..." -Level INFO
+        try {
+            # Find the Loxone App executable
+            $exePath = $null
+            
+            # Check common installation paths (both system and user)
+            $possiblePaths = @(
+                # The actual location where the App installs
+                "${env:LOCALAPPDATA}\Programs\kerberos\Loxone.exe",
+                # System-wide installations
+                "C:\Program Files\Loxone\Loxone.exe",
+                "C:\Program Files (x86)\Loxone\Loxone.exe",
+                "${env:ProgramFiles}\Loxone\Loxone.exe",
+                "${env:ProgramFiles(x86)}\Loxone\Loxone.exe",
+                # User installations (AppData)
+                "${env:LOCALAPPDATA}\Loxone\Loxone.exe",
+                "${env:LOCALAPPDATA}\Programs\Loxone\Loxone.exe",
+                "${env:APPDATA}\Loxone\Loxone.exe",
+                # User installations (per-user Program Files)
+                "${env:USERPROFILE}\AppData\Local\Programs\Loxone\Loxone.exe",
+                "${env:USERPROFILE}\AppData\Local\Loxone\Loxone.exe"
+            )
+            
+            foreach ($path in $possiblePaths) {
+                if (Test-Path $path) {
+                    $exePath = $path
+                    Write-Log -Message "(UpdateLoxone.ps1) Found Loxone executable at: '$exePath'" -Level INFO
+                    break
+                }
+            }
+            
+            # If not found, search Program Files directories
+            if (-not $exePath) {
+                Write-Log -Message "(UpdateLoxone.ps1) Searching for Loxone.exe in Program Files..." -Level DEBUG
+                $searchPaths = @("${env:ProgramFiles}", "${env:ProgramFiles(x86)}")
+                foreach ($searchPath in $searchPaths) {
+                    if (Test-Path $searchPath) {
+                        $loxoneFolders = Get-ChildItem -Path $searchPath -Directory -Filter "*Loxone*" -ErrorAction SilentlyContinue
+                        foreach ($folder in $loxoneFolders) {
+                            $found = Get-ChildItem -Path $folder.FullName -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue | 
+                                     Where-Object { $_.Name -like "*Loxone*" } | Select-Object -First 1
+                            if ($found) {
+                                $exePath = $found.FullName
+                                Write-Log -Message "(UpdateLoxone.ps1) Found Loxone executable: '$exePath'" -Level INFO
+                                break
+                            }
+                        }
+                        if ($exePath) { break }
+                    }
+                }
+            }
+            
+            # Try to get path from existing shortcuts
+            if (-not $exePath) {
+                Write-Log -Message "(UpdateLoxone.ps1) Trying to find executable from existing shortcuts..." -Level DEBUG
+                $userProfile = [Environment]::GetFolderPath("UserProfile")
+                $shortcutPaths = @(
+                    (Join-Path $userProfile "Desktop\Loxone.lnk"),
+                    (Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone.lnk"),
+                    "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Loxone.lnk"
+                )
+                
+                foreach ($shortcutPath in $shortcutPaths) {
+                    if (Test-Path $shortcutPath) {
+                        try {
+                            $shell = New-Object -ComObject WScript.Shell
+                            $shortcut = $shell.CreateShortcut($shortcutPath)
+                            $targetPath = $shortcut.TargetPath
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) | Out-Null
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
+                            
+                            if ($targetPath -and (Test-Path $targetPath)) {
+                                $exePath = $targetPath
+                                Write-Log -Message "(UpdateLoxone.ps1) Found executable from shortcut: '$exePath'" -Level INFO
+                                break
+                            }
+                        } catch {
+                            Write-Log -Message "(UpdateLoxone.ps1) Error reading shortcut: $_" -Level DEBUG
+                        }
+                    }
+                }
+            }
+            
+            if ($exePath) {
+                # Fix the shortcuts
+                $userProfile = [Environment]::GetFolderPath("UserProfile")
+                $shortcutsToFix = @(
+                    (Join-Path $userProfile "Desktop\Loxone.lnk"),
+                    (Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone.lnk"),
+                    (Join-Path $userProfile "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Loxone\Loxone.lnk"),
+                    "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Loxone.lnk",
+                    "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Loxone\Loxone.lnk"
+                )
+                
+                $fixedCount = 0
+                foreach ($shortcutPath in $shortcutsToFix) {
+                    if (Test-Path $shortcutPath) {
+                        try {
+                            $shell = New-Object -ComObject WScript.Shell
+                            $shortcut = $shell.CreateShortcut($shortcutPath)
+                            
+                            # Update shortcut properties
+                            $shortcut.TargetPath = $exePath
+                            $shortcut.WorkingDirectory = Split-Path $exePath -Parent
+                            $shortcut.IconLocation = "$exePath,0"
+                            $shortcut.Description = "Loxone Smart Home App"
+                            $shortcut.Save()
+                            
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) | Out-Null
+                            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
+                            
+                            Write-Log -Message "(UpdateLoxone.ps1) Fixed shortcut at: $shortcutPath" -Level INFO
+                            $fixedCount++
+                        } catch {
+                            Write-Log -Message "(UpdateLoxone.ps1) Error fixing shortcut at '$shortcutPath': $_" -Level WARN
+                        }
+                    }
+                }
+                
+                if ($fixedCount -gt 0) {
+                    Write-Log -Message "(UpdateLoxone.ps1) Successfully fixed $fixedCount Loxone App shortcut(s)" -Level INFO
+                } else {
+                    Write-Log -Message "(UpdateLoxone.ps1) No shortcuts found to fix" -Level WARN
+                }
+            } else {
+                Write-Log -Message "(UpdateLoxone.ps1) Could not find Loxone executable - unable to fix shortcuts" -Level WARN
+            }
+        } catch {
+            Write-Log -Message "(UpdateLoxone.ps1) Error during icon fixing: $_" -Level WARN
+        }
+    }
 }
 
-# Calculate total script runtime
+# Log rotation - Execute once before script exit
+if (-not $script:SystemRelaunchExitOccurred) {
+    # Use Global:LogFile as it's the actual file being written to
+    $logFileToRotate = $Global:LogFile
+    
+    if ($logFileToRotate -and (Test-Path $logFileToRotate)) {
+        try {
+            # Use default of 1MB if MaxLogFileSizeMB is not available
+            $maxSizeKB = if ($scriptContext.Params.MaxLogFileSizeMB) { 
+                $scriptContext.Params.MaxLogFileSizeMB * 1024 
+            } else { 
+                1024  # Default 1MB
+            }
+            $rotatedPath = Invoke-LogFileRotation -LogFilePath $logFileToRotate -MaxArchiveCount 24 -MaxSizeKB $maxSizeKB -ErrorAction Stop
+            if ($rotatedPath) {
+                Write-Log -Message "(UpdateLoxone.ps1) Log rotated to: $rotatedPath" -Level INFO
+            }
+        } catch {
+            if ($_.Exception.Message -notlike "*is not recognized*" -and $_.Exception.Message -notlike "*Der Begriff*") {
+                Write-Log -Level WARN -Message "(UpdateLoxone.ps1) Error during log rotation: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    # Downloads folder cleanup - clean up old downloaded files
+    if ($scriptContext.DownloadDir -and (Test-Path $scriptContext.DownloadDir)) {
+        try {
+            if (Get-Command Invoke-DownloadsFolderCleanup -ErrorAction SilentlyContinue) {
+                Invoke-DownloadsFolderCleanup -DownloadsPath $scriptContext.DownloadDir -MaxAgeDays 7 -MaxFilesToKeep 10 -ErrorAction Stop
+            }
+        } catch {
+            if ($_.Exception.Message -notlike "*is not recognized*" -and $_.Exception.Message -notlike "*Der Begriff*") {
+                Write-Log -Level WARN -Message "(UpdateLoxone.ps1) Error during downloads cleanup: $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
+if (Get-Command Exit-Function -ErrorAction SilentlyContinue) {
+    Exit-Function 
+}
+
+# Calculate total script runtime - MUST BE LAST
 $totalRuntime = if ($script:ScriptStartTime) { 
     $endTime = Get-Date
     $duration = $endTime - $script:ScriptStartTime
@@ -2057,7 +2646,10 @@ $totalRuntime = if ($script:ScriptStartTime) {
     "unknown" 
 }
 
+# THIS IS THE ABSOLUTE LAST LINE BEFORE EXIT
 Write-Log -Message "(UpdateLoxone.ps1) Script final exit from 'finally' block. ErrorOccurred: $script:ErrorOccurred. Total runtime: $totalRuntime" -Level INFO
+
 if ($script:ErrorOccurred) { exit 1 } else { exit 0 }
 }
 # End of script
+

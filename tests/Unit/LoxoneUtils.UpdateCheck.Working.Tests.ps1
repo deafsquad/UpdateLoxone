@@ -296,54 +296,34 @@ Describe "Get-LoxoneUpdateData Function" -Tag 'UpdateCheck' {
         $params.Keys | Should -Contain 'DebugMode'
     }
     
-    It "Returns expected result structure" -Skip {
-        # Skip: This test calls real function with example.com which times out
-        # Mock the web client to avoid actual network calls
-        Mock New-Object {
-            param($TypeName)
-            if ($TypeName -eq 'System.Net.WebClient') {
-                $mockWebClient = New-Object PSObject
-                Add-Member -InputObject $mockWebClient -MemberType ScriptMethod -Name DownloadString -Value {
-                    param($url)
-                    # Return mock XML
-                    return @'
-<Miniserversoftware>
-    <Release>
-        <Version>13.0.4.44</Version>
-        <Path>http://example.com/release.zip</Path>
-        <FileSize>1000000</FileSize>
-        <crc32>12345678</crc32>
-    </Release>
-    <Test>
-        <Version>13.1.0.0</Version>
-        <Path>http://example.com/test.zip</Path>
-        <FileSize>2000000</FileSize>
-        <crc32>87654321</crc32>
-    </Test>
-    <update Name="Loxone for Windows">
-        <Release>
-            <Version>1.0.0.0 (2024.01.01)</Version>
-            <Path>http://example.com/app.exe</Path>
-            <FileSize>5000000</FileSize>
-            <crc32>ABCDEF12</crc32>
-        </Release>
-    </update>
-</Miniserversoftware>
-'@
+    It "Returns expected result structure" {
+        # Must use InModuleScope on the nested module where Get-LoxoneUpdateData is defined
+        # because Pester mock with -ModuleName doesn't intercept cmdlets in nested modules
+        InModuleScope LoxoneUtils.UpdateCheck {
+            Mock Invoke-WebRequest {
+                [PSCustomObject]@{
+                    Content = '<Miniserversoftware><Release><Version>13.0.4.44</Version><Path>http://example.com/release.zip</Path><FileSize>1000000</FileSize><crc32>12345678</crc32></Release><Test><Version>13.1.0.0</Version><Path>http://example.com/test.zip</Path><FileSize>2000000</FileSize><crc32>87654321</crc32></Test><update Name="Loxone for Windows"><Release><Version>1.0.0.0 (2024.01.01)</Version><Path>http://example.com/app.exe</Path><FileSize>5000000</FileSize><crc32>ABCDEF12</crc32></Release></update></Miniserversoftware>'
+                    StatusCode = 200
                 }
-                return $mockWebClient
             }
-            return $null
-        } -ModuleName LoxoneUtils
-        
-        $result = Get-LoxoneUpdateData -UpdateXmlUrl "http://example.com/update.xml" `
-            -ConfigChannel "Public" `
-            -CheckAppUpdate $true `
-            -AppChannelPreference "Release"
-        
-        # Can't test because the mock causes actual errors
-        # Just verify it returns an object
-        $result | Should -BeOfType [PSCustomObject]
+
+            $result = Get-LoxoneUpdateData -UpdateXmlUrl "http://example.com/update.xml" `
+                -ConfigChannel "Public" `
+                -CheckAppUpdate $true `
+                -AppChannelPreference "Release"
+
+            # Verify it returns an object with expected properties
+            $result | Should -BeOfType [PSCustomObject]
+            $result.Error | Should -BeNullOrEmpty
+            $result.ConfigLatestVersion | Should -Not -BeNullOrEmpty
+            $result.ConfigZipUrl | Should -Be "http://example.com/release.zip"
+            $result.ConfigExpectedZipSize | Should -Be 1000000
+            $result.ConfigExpectedCRC | Should -Be "12345678"
+            $result.AppLatestVersionRaw | Should -Not -BeNullOrEmpty
+            $result.AppInstallerUrl | Should -Be "http://example.com/app.exe"
+            $result.AppExpectedCRC | Should -Be "ABCDEF12"
+            $result.AppExpectedSize | Should -Be 5000000
+        }
     }
 }
 
