@@ -47,7 +47,7 @@ function Start-LoxoneUpdateInstaller {
         Write-Log -Message "Executing Start-Process: '$InstallerPath' /${InstallMode}" -Level DEBUG
         
         # Start the process without -Wait to allow periodic toast updates
-        $process = Start-Process -FilePath $InstallerPath -ArgumentList "/${InstallMode}" -PassThru -ErrorAction Stop
+        $process = Start-Process -FilePath $InstallerPath -ArgumentList "/${InstallMode}", "/NORESTART" -PassThru -ErrorAction Stop
         Write-Log -Message "Installer process started with PID: $($process.Id)" -Level DEBUG
         
         # Wait with timeout (5 minutes max for config installer)
@@ -104,16 +104,25 @@ function Start-LoxoneUpdateInstaller {
         }
         
         Write-Log -Message "Start-Process completed. PID: $($process.Id), ExitCode: $exitCode" -Level DEBUG
-        if ($exitCode -ne 0) {
+
+        # Exit codes 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) and 1641 (ERROR_SUCCESS_REBOOT_INITIATED)
+        # indicate successful installation that requires a system restart (e.g. VC++ Redistributable)
+        $restartRequired = ($exitCode -eq 3010 -or $exitCode -eq 1641)
+        $installSuccess = ($exitCode -eq 0 -or $restartRequired)
+
+        if ($restartRequired) {
+            Write-Log -Message "Installer completed successfully but requires system restart (exit code: $exitCode)." -Level WARN
+        } elseif ($exitCode -ne 0) {
             Write-Log -Message "Installer process exited with non-zero code: $exitCode." -Level WARN
         }
         Write-Log -Message "Update installer process finished waiting." -Level INFO
-        
+
         # Return result object before Exit-Function
         $result = @{
-            Success = ($exitCode -eq 0)
+            Success = $installSuccess
             ExitCode = $exitCode
-            Error = if ($exitCode -ne 0) { "Installer exited with code $exitCode" } else { $null }
+            RestartRequired = $restartRequired
+            Error = if (-not $installSuccess) { "Installer exited with code $exitCode" } else { $null }
         }
         
         Exit-Function

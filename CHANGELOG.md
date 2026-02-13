@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0] - 2026-02-13 02:49:53
+### Added
+- System restart detection for installer exit codes 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) and 1641 (ERROR_SUCCESS_REBOOT_INITIATED)
+- `RestartRequired` flag propagated through installation result objects, parallel workflow progress, and script global state
+- Summary line warning when system restart is required after installation (e.g. VC++ Redistributable dependency)
+- `/NORESTART` flag passed to Loxone Config installer to prevent automatic reboots during silent installation
+
+### Changed
+- Installer success evaluation now treats exit codes 3010 and 1641 as successful installations requiring restart
+- Parallel workflow worker logs distinguish between clean installations and those requiring restart
+- Sequential workflow step processing now checks for `RestartRequired` flag and propagates to global state
+- Verification failure messages no longer append installer exit code when exit code indicates restart-required success
+- Package version bumped to 0.7.0
+
 ## [0.6.9] - 2026-02-11 14:01:13
 ### Added
 - **Miniserver generation detection**: New modules `LoxoneUtils.MiniserverGeneration.psm1` and `LoxoneUtils.MiniserverHardware.psm1` for detecting Gen1-Grey, Gen1-Green, and Gen2 Miniservers via UPNP/version endpoints and MAC prefix analysis

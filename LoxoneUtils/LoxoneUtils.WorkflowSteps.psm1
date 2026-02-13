@@ -1092,6 +1092,7 @@ function Invoke-InstallLoxoneConfig {
 
         $installArgsArray = @(
             "/$effectiveInstallMode",
+            "/NORESTART",
             "/LOG=$quotedInstallerLogPath" # Format /LOG="C:\Path\To\Log.log" (Removed colon)
         )
         Write-Log -Message "($FunctionName) Installer will log to: $installerLogPath" -Level INFO
@@ -1210,7 +1211,13 @@ function Invoke-InstallLoxoneConfig {
             }
             Write-Log -Message "($FunctionName) Loxone Config installer process exited with code: $exitCode" -Level INFO
 
-            if ($exitCode -ne 0) {
+            # Exit codes 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) and 1641 (ERROR_SUCCESS_REBOOT_INITIATED)
+            # indicate successful installation that requires a system restart (e.g. VC++ Redistributable)
+            $restartRequired = ($exitCode -eq 3010 -or $exitCode -eq 1641)
+            if ($restartRequired) {
+                Write-Log -Message "($FunctionName) Installer completed successfully but requires system restart (exit code: $exitCode)." -Level WARN
+                $result.RestartRequired = $true
+            } elseif ($exitCode -ne 0) {
                 Write-Log -Message "($FunctionName) Installer returned non-zero exit code: $exitCode. Installation may have failed." -Level WARN
             }
         } catch { # INSTALLER EXECUTION CATCH (starts line 1034 in original numbering)
@@ -1254,7 +1261,7 @@ function Invoke-InstallLoxoneConfig {
         } else {
             $result.Reason = "VerificationFailed"
             $errorMsg = "Loxone Config update verification failed! Expected '$normalizedTarget', but found '$normalizedNewInstalled' (or version check failed)."
-            if ($exitCode -ne 0) {
+            if ($exitCode -ne 0 -and -not $restartRequired) {
                 $errorMsg += " Installer also exited with code $exitCode."
                 $result.Reason = "InstallFailedAndVerificationFailed"
             }

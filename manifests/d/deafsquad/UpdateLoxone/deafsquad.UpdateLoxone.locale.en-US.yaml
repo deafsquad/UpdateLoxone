@@ -1,5 +1,5 @@
 PackageIdentifier: deafsquad.UpdateLoxone
-PackageVersion: 0.6.9
+PackageVersion: 0.7.0
 PackageLocale: en-US
 Publisher: deafsquad
 Author: deafsquad
@@ -14,6 +14,6 @@ Tags:
   - automation
   - update
   - smart-home
-ReleaseDate: 2026-02-11
+ReleaseDate: 2026-02-13
 ManifestType: locale
 ManifestVersion: 1.6.0

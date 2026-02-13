@@ -1217,7 +1217,11 @@ function Start-ComponentWorker {
                             # Install Config
                             $installResult = Start-LoxoneUpdateInstaller -InstallerPath $installer.FullName -InstallMode "VERYSILENT"
                             if ($installResult.Success) {
-                                Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "$Component Worker" -Message "Config installation completed successfully" -Level "INFO"
+                                if ($installResult.RestartRequired) {
+                                    Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "$Component Worker" -Message "Config installation completed successfully but requires system restart (exit code: $($installResult.ExitCode))" -Level "WARN"
+                                } else {
+                                    Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "$Component Worker" -Message "Config installation completed successfully" -Level "INFO"
+                                }
                                 
                                 # Send verify progress
                                 $verifyStepInfo = $Pipeline.StepMapping.ConfigVerify
@@ -1236,13 +1240,15 @@ function Start-ComponentWorker {
                                 }
                                 
                                 # Mark complete with Verify type to trigger final status
+                                $completeMsg = if ($installResult.RestartRequired) { "Config installed successfully (restart required)" } else { "Config installed successfully" }
                                 $completeProgress = @{
                                     Type = 'Verify'
                                     Component = 'Config'
                                     State = 'Completed'
                                     Progress = 100
-                                    Message = "Config installed successfully"
+                                    Message = $completeMsg
                                     InitialVersion = $UpdateInfo.InitialVersion
+                                    RestartRequired = [bool]$installResult.RestartRequired
                                 }
                                 [void]$Pipeline.ProgressQueue.Enqueue($completeProgress)
                             } else {
@@ -1379,6 +1385,7 @@ function Start-ComponentWorker {
                         Status = 'Completed'
                         Version = $UpdateInfo.TargetVersion
                         InitialVersion = $UpdateInfo.InitialVersion
+                        RestartRequired = [bool]$installResult.RestartRequired
                     })
                 } else {
                     throw "Download failed for $Component"
@@ -1636,6 +1643,9 @@ function Start-InstallWorker {
                                         $installResult = Start-LoxoneUpdateInstaller -InstallerPath $installer.FullName -InstallMode "VERYSILENT"
                                         if (-not $installResult.Success) {
                                             throw "Installation failed with exit code: $($installResult.ExitCode)"
+                                        }
+                                        if ($installResult.RestartRequired) {
+                                            Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "Install Worker" -Message "Config installation requires system restart (exit code: $($installResult.ExitCode))" -Level "WARN"
                                         }
                                         
                                         # Send icon fix progress update for Config

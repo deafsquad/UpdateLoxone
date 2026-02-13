@@ -1564,7 +1564,12 @@ try {
                 }
                 $target.VersionAfterUpdate = $installedVersion
 
-                Write-Log -Message "$targetType installation completed successfully. Version: $installedVersion" -Level INFO
+                if ($install.RestartRequired) {
+                    Write-Log -Message "$targetType installation completed successfully but SYSTEM RESTART IS REQUIRED (VC++ Redistributable). Version: $installedVersion" -Level WARN
+                    $scriptGlobalState.RestartRequired = $true
+                } else {
+                    Write-Log -Message "$targetType installation completed successfully. Version: $installedVersion" -Level INFO
+                }
             }
             elseif ($target -and $install.Status -eq 'Failed') {
                 $target.Status = 'UpdateFailed (Install)'
@@ -2041,6 +2046,10 @@ try {
             if ($stepResult.Succeeded -and ($stepResult.Action -eq "Install" -or $stepResult.Action -eq "Update" -or $stepResult.Action -eq "Download")) {
                  $scriptGlobalState.anyUpdatePerformed = $true # Use .Value for ref types if modifying
             }
+            if (($stepResult.PSObject.Properties | Where-Object {$_.Name -eq 'RestartRequired'}) -and $stepResult.RestartRequired) {
+                Write-Log -Message "Step '$($stepEntry.Name)' indicates system restart is required (VC++ Redistributable)." -Level WARN
+                $scriptGlobalState.RestartRequired = $true
+            }
             if (($stepResult.PSObject.Properties | Where-Object {$_.Name -eq 'InstallSkipped'}) -and $stepResult.InstallSkipped) {
                 $targetInInfo.Status = "InstallSkippedProcessRunning"
                 $targetInInfo.UpdatePerformed = $false
@@ -2430,6 +2439,12 @@ if (-not $script:ErrorOccurred) {
         $validationMsg += "Loxone XML updated before files uploaded.`n"
         $validationMsg += "Try again later."
         $summaryLines += $validationMsg
+    }
+
+    # Add restart required notice if any installer flagged it
+    if ($scriptGlobalState.RestartRequired) {
+        $summaryLines += "⚠ System restart required (VC++ Redistributable installed)"
+        Write-Log -Message "SYSTEM RESTART REQUIRED: A component (likely VC++ Redistributable) requires a system restart to complete installation." -Level WARN
     }
 
     if ($summaryLines.Count -gt 0) {
