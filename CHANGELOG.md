@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] - 2026-02-18_TIMESTAMP_PLACEHOLDER
+## [0.7.6] - 2026-02-18 00:16:41
 ### Changed
 - Increased Miniserver update trigger retry attempts from 3 to 5 to allow VPN tunnels adequate time to establish before failing
 - Disabled redundant Loxone App shortcut icon fix in main script body (now handled inside `Install-LoxoneAppUpdate` workflow step)

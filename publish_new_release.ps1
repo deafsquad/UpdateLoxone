@@ -2018,9 +2018,9 @@ END_CHANGELOG
             # Replace [Unreleased] with the actual version in the updated changelog
             $currentDateTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             
-            if ($updatedChangelog -match '(?m)^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER') {
+            if ($updatedChangelog -match '(?m)^## \[Unreleased\]') {
                 Write-Host "Replacing [Unreleased] with version $ScriptVersion..." -ForegroundColor Gray
-                $updatedChangelog = $updatedChangelog -replace '(?m)^## \[Unreleased\] - YYYY-MM-DD_TIMESTAMP_PLACEHOLDER', "## [$ScriptVersion] - $currentDateTime"
+                $updatedChangelog = $updatedChangelog -replace '(?m)^## \[Unreleased\][^\r\n]*', "## [$ScriptVersion] - $currentDateTime"
             }
             
             Set-Content -Path $changelogPath -Value $updatedChangelog -Encoding UTF8 -NoNewline
