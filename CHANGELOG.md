@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] - 2026-02-18_TIMESTAMP_PLACEHOLDER
+### Changed
+- Increased Miniserver update trigger retry attempts from 3 to 5 to allow VPN tunnels adequate time to establish before failing
+- Disabled redundant Loxone App shortcut icon fix in main script body (now handled inside `Install-LoxoneAppUpdate` workflow step)
+- Updated release manifests to version 0.7.6 with new installer URL and SHA256 hash
+- Release date updated to 2026-02-18 in locale manifest
+
+### Fixed
+- Fixed nested `claude` subprocess calls in `publish_new_release.ps1` failing when `CLAUDECODE` environment variable is set by saving and restoring it around the call
+
 ## [0.7.0] - 2026-02-13 02:49:53
 ### Added
 - System restart detection for installer exit codes 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) and 1641 (ERROR_SUCCESS_REBOOT_INITIATED)

@@ -1903,10 +1903,13 @@ END_CHANGELOG
                 # Skip task enforcement hooks for this subagent call
                 $claudeError = $null
                 $env:CLAUDE_SKIP_TASK_ENFORCEMENT = "1"
+                $savedClaudeCode = $env:CLAUDECODE
+                Remove-Item Env:\CLAUDECODE -ErrorAction SilentlyContinue  # Allow nested claude -p call
                 try {
                     $aiResponse = Get-Content $tempPromptFile -Raw | & claude -p 'Process this changelog verification request and respond EXACTLY as instructed in the format specified. Start your response with UPDATED_CHANGELOG and end with END_CHANGELOG. Do not include any other text outside these markers.' --output-format text --no-session-persistence --tools "" --verbose 2>&1 | Out-String
                 } finally {
                     Remove-Item Env:\CLAUDE_SKIP_TASK_ENFORCEMENT -ErrorAction SilentlyContinue
+                    if ($null -ne $savedClaudeCode) { $env:CLAUDECODE = $savedClaudeCode }
                 }
                 
                 # Check if claude command failed

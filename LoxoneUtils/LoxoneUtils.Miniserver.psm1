@@ -1446,8 +1446,8 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         Set-CertificateValidationBypass; $callbackChanged = $true
     }
 
-    # Trigger update with retry logic (3 attempts)
-    $maxTriggerAttempts = 3
+    # Trigger update with retry logic (5 attempts to allow VPN tunnels time to establish)
+    $maxTriggerAttempts = 5
     $triggerAttempt = 0
     $triggerSuccess = $false
     $lastTriggerError = $null

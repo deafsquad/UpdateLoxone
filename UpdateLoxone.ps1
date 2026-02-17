@@ -2472,6 +2472,7 @@ if (-not $script:ErrorOccurred) {
     Write-Log -Message "(UpdateLoxone.ps1) 'finally' block executing after an error was caught. Error toast should have been displayed by catch block." -Level INFO
 }
 
+<# Fix Loxone App shortcut icons - DISABLED: handled inside Install-LoxoneAppUpdate (WorkflowSteps)
 # Fix Loxone App shortcut icons if App was installed
 # This runs at the end regardless of installation method (parallel or sequential)
 if ($UpdateTargetsInfo) {
@@ -2609,6 +2610,7 @@ if ($UpdateTargetsInfo) {
         }
     }
 }
+#>
 
 # Log rotation - Execute once before script exit
 if (-not $script:SystemRelaunchExitOccurred) {
