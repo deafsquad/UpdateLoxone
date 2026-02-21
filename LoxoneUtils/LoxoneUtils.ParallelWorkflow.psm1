@@ -176,24 +176,31 @@ function Start-ParallelWorkflow {
     # Calculate step mapping for parallel execution - each component has its own step counter
     $stepMapping = @{}
     
-    # Config has its own step progression (1/4, 2/4, etc.)
+    # Config has its own step progression - steps defined as data, count derived dynamically
     if ($WorkflowDefinition.ConfigUpdate) {
-        $configTotalSteps = 4  # Download, Extract, Install, Verify (no icon fix needed)
+        $configStepDefs = @(
+            @{ Key = 'ConfigDownload'; StepName = "Downloading" }
+            @{ Key = 'ConfigExtract';  StepName = "Extracting" }
+            @{ Key = 'ConfigInstall';  StepName = "Installing" }
+            @{ Key = 'ConfigVerify';   StepName = "Verifying" }
+        )
         $configStep = 1
-        $stepMapping.ConfigDownload = @{ StepNumber = $configStep++; TotalSteps = $configTotalSteps; StepName = "Downloading" }
-        $stepMapping.ConfigExtract = @{ StepNumber = $configStep++; TotalSteps = $configTotalSteps; StepName = "Extracting" }
-        $stepMapping.ConfigInstall = @{ StepNumber = $configStep++; TotalSteps = $configTotalSteps; StepName = "Installing" }
-        $stepMapping.ConfigVerify = @{ StepNumber = $configStep++; TotalSteps = $configTotalSteps; StepName = "Verifying" }
+        foreach ($stepDef in $configStepDefs) {
+            $stepMapping[$stepDef.Key] = @{ StepNumber = $configStep++; TotalSteps = $configStepDefs.Count; StepName = $stepDef.StepName }
+        }
     }
-    
-    # App has its own step progression (1/4, 2/4, etc.)
+
+    # App has its own step progression - steps defined as data, count derived dynamically
     if ($WorkflowDefinition.AppUpdate) {
-        $appTotalSteps = 4  # Download, Install, Fix Icons, Verify
+        $appStepDefs = @(
+            @{ Key = 'AppDownload'; StepName = "Downloading" }
+            @{ Key = 'AppInstall';  StepName = "Installing" }
+            @{ Key = 'AppVerify';   StepName = "Verifying" }
+        )
         $appStep = 1
-        $stepMapping.AppDownload = @{ StepNumber = $appStep++; TotalSteps = $appTotalSteps; StepName = "Downloading" }
-        $stepMapping.AppInstall = @{ StepNumber = $appStep++; TotalSteps = $appTotalSteps; StepName = "Installing" }
-        $stepMapping.AppFixIcons = @{ StepNumber = $appStep++; TotalSteps = $appTotalSteps; StepName = "Fixing Icons" }
-        $stepMapping.AppVerify = @{ StepNumber = $appStep++; TotalSteps = $appTotalSteps; StepName = "Verifying" }
+        foreach ($stepDef in $appStepDefs) {
+            $stepMapping[$stepDef.Key] = @{ StepNumber = $appStep++; TotalSteps = $appStepDefs.Count; StepName = $stepDef.StepName }
+        }
     }
     
     # Miniservers have their own counter (usually just 1/1)
@@ -1285,26 +1292,10 @@ function Start-ComponentWorker {
                         if ($installResult.Success) {
                             Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "$Component Worker" -Message "App installation completed successfully" -Level "INFO"
                             
-                            # Fix icons for App
-                            $iconStepInfo = $Pipeline.StepMapping.AppFixIcons
-                            if ($iconStepInfo) {
-                                $iconProgress = @{
-                                    Type = 'FixIcons'
-                                    Component = 'App'
-                                    State = 'FixingIcons'
-                                    Progress = 0
-                                    Message = "Fixing shortcuts..."
-                                    StepNumber = $iconStepInfo.StepNumber
-                                    TotalSteps = $iconStepInfo.TotalSteps
-                                    StepName = $iconStepInfo.StepName
-                                }
-                                [void]$Pipeline.ProgressQueue.Enqueue($iconProgress)
-                            }
-                            
-                            # Wait for installation to complete
+                            # Wait for installation to complete before fixing icons
                             Start-Sleep -Seconds 2
-                            
-                            # Fix shortcut icons
+
+                            # Fix shortcut icons (runs silently, no separate progress step)
                             try {
                                 $exePath = "${env:LOCALAPPDATA}\Programs\kerberos\Loxone.exe"
                                 if (Test-Path $exePath) {
@@ -1647,25 +1638,6 @@ function Start-InstallWorker {
                                         if ($installResult.RestartRequired) {
                                             Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "Install Worker" -Message "Config installation requires system restart (exit code: $($installResult.ExitCode))" -Level "WARN"
                                         }
-                                        
-                                        # Send icon fix progress update for Config
-                                        $iconStepInfo = $null
-                                        if ($Pipeline.StepMapping -and $Pipeline.StepMapping.ConfigFixIcons) {
-                                            $iconStepInfo = $Pipeline.StepMapping.ConfigFixIcons
-                                        }
-                                        $iconProgress = @{
-                                            Type = 'FixIcons'
-                                            Component = 'Config'
-                                            State = 'FixingIcons'
-                                            Progress = 0
-                                            Message = if ($iconStepInfo) { "Fixing icons..." } else { "Fixing Config icons..." }
-                                        }
-                                        if ($iconStepInfo) {
-                                            $iconProgress.StepNumber = $iconStepInfo.StepNumber
-                                            $iconProgress.TotalSteps = $iconStepInfo.TotalSteps
-                                            $iconProgress.StepName = $iconStepInfo.StepName
-                                        }
-                                        [void]$Pipeline.ProgressQueue.Enqueue($iconProgress)
                                         
                                         # Send verify progress update for Config
                                         $verifyStepInfo = $null
@@ -3228,7 +3200,7 @@ function Watch-DirectThreadJobs {
                     }
                     
                     # Handle simple progress updates from workers
-                    if (($progressMsg.Type -eq 'Download' -or $progressMsg.Type -eq 'Install' -or $progressMsg.Type -eq 'Extract' -or $progressMsg.Type -eq 'FixIcons' -or $progressMsg.Type -eq 'Verify' -or $progressMsg.Type -eq 'Miniserver') -and $toastCreated) {
+                    if (($progressMsg.Type -eq 'Download' -or $progressMsg.Type -eq 'Install' -or $progressMsg.Type -eq 'Extract' -or $progressMsg.Type -eq 'Verify' -or $progressMsg.Type -eq 'Miniserver') -and $toastCreated) {
                         # Include IP address for Miniserver updates
                         $logPrefix = if ($progressMsg.Type -eq 'Miniserver' -and $progressMsg.IP) {
                             "MS[$($progressMsg.IP)]"
@@ -3248,7 +3220,7 @@ function Watch-DirectThreadJobs {
                                     if ($progressMsg.Message -match 'Config' -or $progressMsg.Type -eq 'Extract') {
                                         $component = 'Config'
                                         Write-Log "[Watch-DirectThreadJobs] Identified Unknown component as Config from context" -Level "DEBUG"
-                                    } elseif ($progressMsg.Message -match 'App' -or $progressMsg.Type -eq 'FixIcons') {
+                                    } elseif ($progressMsg.Message -match 'App') {
                                         $component = 'App'
                                         Write-Log "[Watch-DirectThreadJobs] Identified Unknown component as App from context" -Level "DEBUG"
                                     }
@@ -3266,7 +3238,6 @@ function Watch-DirectThreadJobs {
                                     $action = if ($progressMsg.Type -eq 'Download') { "Downloading" }
                                              elseif ($progressMsg.Type -eq 'Install') { "Installing" }
                                              elseif ($progressMsg.Type -eq 'Extract') { "Extracting" }
-                                             elseif ($progressMsg.Type -eq 'FixIcons') { "Fixing Icons" }
                                              elseif ($progressMsg.Type -eq 'Verify') { "Verifying" }
                                              elseif ($progressMsg.Type -eq 'Miniserver') { "Updating" }
                                              else { $progressMsg.Type }
@@ -3291,9 +3262,6 @@ function Watch-DirectThreadJobs {
                                         if (-not $statusText) { $statusText = $status }
                                     } elseif ($progressMsg.Type -eq 'Install') {
                                         # During installation, just show the installation message
-                                        $statusText = $status
-                                    } elseif ($progressMsg.Type -eq 'FixIcons') {
-                                        # During icon fixing, show the status
                                         $statusText = $status
                                     } elseif ($progressMsg.Type -eq 'Verify' -and $progressMsg.State -eq 'Verifying') {
                                         # During verification, show verifying status
@@ -3337,9 +3305,6 @@ function Watch-DirectThreadJobs {
                                         if (-not $statusText) { $statusText = $status }
                                     } elseif ($progressMsg.Type -eq 'Install') {
                                         # During installation, just show the installation message
-                                        $statusText = $status
-                                    } elseif ($progressMsg.Type -eq 'FixIcons') {
-                                        # During icon fixing, show the status
                                         $statusText = $status
                                     } elseif ($progressMsg.Type -eq 'Verify' -and $progressMsg.State -eq 'Verifying') {
                                         # During verification, show verifying status

@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.7] - 2026-02-21 05:30:40
+### Changed
+- Miniserver update trigger now verifies response before proceeding with polling
+  - Validates HTTP status code (expects 200)
+  - Parses XML `Code` attribute from Miniserver response to confirm acceptance
+  - Logs full trigger response body and status for diagnostics
+  - Reports clear failure reason when trigger is rejected or returns unexpected response
+- Parallel workflow step mapping refactored from hardcoded counts to data-driven step definitions
+  - Step totals are now derived dynamically from step definition arrays
+  - Config and App step progressions built via iteration instead of manual assignment
+- Removed "Fix Icons" as a separate visible progress step in parallel workflow
+  - Icon fixing still runs after App and Config installation but no longer reports its own progress stage
+  - App update steps reduced from 4 to 3 (Download, Install, Verify)
+- Bumped package version to 0.7.7 in WinGet manifest files
+
+### Fixed
+- Miniserver update trigger no longer assumes success without response validation
+  - Previously discarded trigger response with `Out-Null` and immediately reported success
+  - Now detects and logs failed or rejected update triggers with specific failure reasons
+
 ## [0.7.6] - 2026-02-18 00:16:41
 ### Changed
 - Increased Miniserver update trigger retry attempts from 3 to 5 to allow VPN tunnels adequate time to establish before failing

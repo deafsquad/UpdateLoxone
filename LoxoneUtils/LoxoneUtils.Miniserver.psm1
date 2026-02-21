@@ -1541,32 +1541,63 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             # Log that we're triggering the update
             Write-Log -Message ("TRIGGERING UPDATE for MS {0} to version {1}" -f $hostForPingInInvoke, $NormalizedDesiredVersion) -Level INFO
             
-            Invoke-MiniserverWebRequest -Parameters $triggerParams | Out-Null
-            Write-Log -Message ("UPDATE COMMAND ACCEPTED by '{0}'. Miniserver is starting update process to version {1}." -f $hostForPingInInvoke, $NormalizedDesiredVersion) -Level INFO
-            $invokeResult.StatusMessage = "UpdateAccepted_ProcessStarting"
-            
-            # Add status update that update was triggered (REAL-TIME)
-            Send-MSStatusUpdate -State 'Updating' -Progress 30 -Message "Update triggered" `
-                -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
-            
-            # Initialize status tracking variables for polling
-            $script:LastLoggedStatus = $null
-            $script:LastStatusMessage = $null
-            
-            # Report progress with more accurate status
-            if ($ProgressReporter) {
-                & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
-                                   -Status "Update accepted - Process starting" `
-                                   -PercentComplete 25 `
-                                   -CurrentOperation "Miniserver confirmed update and is preparing"
+            $triggerResponse = Invoke-MiniserverWebRequest -Parameters $triggerParams
+            Write-Log -Message ("Trigger response from MS {0}: StatusCode={1}, ContentLength={2}" -f $hostForPingInInvoke, $triggerResponse.StatusCode, ($triggerResponse.Content | Measure-Object -Character).Characters) -Level INFO
+            Write-Log -Message ("Trigger response body from MS {0}: {1}" -f $hostForPingInInvoke, ($triggerResponse.Content -replace '\s+', ' ').Trim()) -Level INFO
+
+            # Verify trigger response - check HTTP status and XML Code attribute
+            $triggerVerified = $false
+            $triggerFailReason = ""
+            if (-not $triggerResponse) {
+                $triggerFailReason = "No response received from Miniserver"
+            } elseif ($triggerResponse.StatusCode -ne 200) {
+                $triggerFailReason = "HTTP StatusCode=$($triggerResponse.StatusCode) (expected 200)"
+            } elseif (-not $triggerResponse.Content) {
+                $triggerFailReason = "Empty response body"
+            } else {
+                # Parse XML Code attribute from response: <LL control="dev/sys/autoupdate" value="" Code="200"/>
+                if ($triggerResponse.Content -match 'Code="(\d+)"') {
+                    $xmlCode = $Matches[1]
+                    if ($xmlCode -eq '200') {
+                        $triggerVerified = $true
+                    } else {
+                        $triggerFailReason = "Miniserver returned Code=$xmlCode (expected 200)"
+                    }
+                } else {
+                    # No Code attribute found - could be unexpected response format
+                    Write-Log -Message ("Trigger response from MS {0}: No Code attribute in response, treating as accepted (body: {1})" -f $hostForPingInInvoke, ($triggerResponse.Content -replace '\s+', ' ').Trim()) -Level WARN
+                    $triggerVerified = $true
+                }
             }
-            
-            # Worker should report progress through queue, not update toast directly
-            # Toast updates are handled by main thread only
-            
-            # Mark trigger as successful
-            $triggerSuccess = $true
-            Write-Log -Message ("Trigger attempt {0} succeeded for MS {1}" -f $triggerAttempt, $hostForPingInInvoke) -Level DEBUG
+
+            if ($triggerVerified) {
+                Write-Log -Message ("UPDATE COMMAND ACCEPTED by '{0}'. Miniserver is starting update process to version {1}." -f $hostForPingInInvoke, $NormalizedDesiredVersion) -Level INFO
+                $invokeResult.StatusMessage = "UpdateAccepted_ProcessStarting"
+
+                # Add status update that update was triggered (REAL-TIME)
+                Send-MSStatusUpdate -State 'Updating' -Progress 30 -Message "Update triggered" `
+                    -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+
+                # Initialize status tracking variables for polling
+                $script:LastLoggedStatus = $null
+                $script:LastStatusMessage = $null
+
+                # Report progress with more accurate status
+                if ($ProgressReporter) {
+                    & $ProgressReporter -Operation "Miniserver Update [$hostForPingInInvoke]" `
+                                       -Status "Update accepted - Process starting" `
+                                       -PercentComplete 25 `
+                                       -CurrentOperation "Miniserver confirmed update and is preparing"
+                }
+
+                # Mark trigger as successful
+                $triggerSuccess = $true
+                Write-Log -Message ("Trigger attempt {0} succeeded for MS {1}" -f $triggerAttempt, $hostForPingInInvoke) -Level DEBUG
+            } else {
+                Write-Log -Message ("UPDATE COMMAND REJECTED/FAILED for MS {0}: {1}" -f $hostForPingInInvoke, $triggerFailReason) -Level WARN
+                $invokeResult.StatusMessage = "UpdateTriggerFailed"
+                $invokeResult.TriggerFailReason = $triggerFailReason
+            }
             
         } catch {
             $CaughtError = $_
