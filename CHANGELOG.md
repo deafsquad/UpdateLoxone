@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.8] - 2026-02-21 06:16:44
+### Added
+- Invocation parameter logging on startup ÔÇö logs all bound parameters, PowerShell version, username, and hostname after module load for easier troubleshooting
+
+### Changed
+- BurntToast module install and import now use background jobs with a 30-second timeout to prevent hangs on headless or remote sessions
+- BurntToast failures are no longer fatal ÔÇö toast notifications gracefully degrade and the script continues without them
+- NuGet provider and PSGallery trust are pre-configured before BurntToast install to prevent interactive prompts that could block unattended execution
+- Bumped package version to 0.7.8 in all WinGet manifest files
+
+### Fixed
+- Fixed single-line miniserver list files causing errors in cache operations by wrapping `Get-Content` results with `@()` array subexpression to prevent PowerShell's single-element array unrolling
+
 ## [0.7.7] - 2026-02-21 05:30:40
 ### Changed
 - Miniserver update trigger now verifies response before proceeding with polling

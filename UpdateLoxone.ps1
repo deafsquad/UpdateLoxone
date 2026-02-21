@@ -280,35 +280,72 @@ if ($script:InitialSystemInvocation) {
         Write-Host "DEBUG: (UpdateLoxone.ps1) Could not clear type data: $_" -ForegroundColor Gray
     }
 
-    # Import the main LoxoneUtils module using its manifest.
-    Write-Host "INFO: (UpdateLoxone.ps1) Checking for BurntToast module before LoxoneUtils import..." -ForegroundColor Cyan
+    # Import BurntToast with timeout and graceful fallback (toast is optional, not critical)
+    Write-Host "INFO: (UpdateLoxone.ps1) Checking for BurntToast module..." -ForegroundColor Cyan
+    $burntToastReady = $false
+    $btTimeoutSec = 30
+
+    # Step 1: Install if not available
     if (-not (Get-Module -ListAvailable -Name BurntToast)) {
-        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast module not found. Attempting to install..." -ForegroundColor Yellow
+        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast not found. Installing (timeout: ${btTimeoutSec}s)..." -ForegroundColor Yellow
         try {
-            Install-Module BurntToast -Scope CurrentUser -Force -Confirm:$false -SkipPublisherCheck -ErrorAction Stop
-            Write-Host "INFO: (UpdateLoxone.ps1) BurntToast module installed successfully." -ForegroundColor Green
-            try {
-                Write-Host "INFO: (UpdateLoxone.ps1) Explicitly importing BurntToast into the current session..." -ForegroundColor Cyan
+            # Ensure NuGet provider is available (prevents interactive prompts that hang)
+            if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+                Write-Host "INFO: (UpdateLoxone.ps1) Installing NuGet provider..." -ForegroundColor Cyan
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser -ErrorAction Stop | Out-Null
+            }
+            # Trust PSGallery to prevent prompts
+            $gallery = Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue
+            if ($gallery -and $gallery.InstallationPolicy -ne 'Trusted') {
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            }
+            $installJob = Start-Job -ScriptBlock {
+                Install-Module BurntToast -Scope CurrentUser -Force -Confirm:$false -SkipPublisherCheck -ErrorAction Stop
+            }
+            $completed = $installJob | Wait-Job -Timeout $btTimeoutSec
+            if ($completed) {
+                Receive-Job $installJob -ErrorAction Stop
+                Write-Host "INFO: (UpdateLoxone.ps1) BurntToast installed successfully." -ForegroundColor Green
+            } else {
+                Stop-Job $installJob -ErrorAction SilentlyContinue
+                Write-Host "WARN: (UpdateLoxone.ps1) BurntToast install timed out after ${btTimeoutSec}s." -ForegroundColor Yellow
+            }
+            Remove-Job $installJob -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Host "WARN: (UpdateLoxone.ps1) BurntToast install failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    # Step 2: Import with timeout (prevents hangs on remote/headless machines)
+    if (Get-Module -ListAvailable -Name BurntToast) {
+        Write-Host "INFO: (UpdateLoxone.ps1) Importing BurntToast (timeout: ${btTimeoutSec}s)..." -ForegroundColor Cyan
+        try {
+            # Test import in a background job first to detect hangs
+            $importJob = Start-Job -ScriptBlock { Import-Module BurntToast -Force -ErrorAction Stop; "OK" }
+            $completed = $importJob | Wait-Job -Timeout $btTimeoutSec
+            if ($completed) {
+                $jobResult = Receive-Job $importJob -ErrorAction Stop
+                Remove-Job $importJob -Force -ErrorAction SilentlyContinue
+                # Job succeeded - now import in main session (should be fast, assemblies cached)
                 Import-Module BurntToast -Force -ErrorAction Stop
+                $burntToastReady = $true
                 Write-Host "INFO: (UpdateLoxone.ps1) BurntToast imported successfully." -ForegroundColor Green
-            } catch {
-                Write-Error "CRITICAL ERROR: (UpdateLoxone.ps1) Failed to import BurntToast after installation. Error: $($_.Exception.Message)."
-                exit 1
+            } else {
+                Stop-Job $importJob -ErrorAction SilentlyContinue
+                Remove-Job $importJob -Force -ErrorAction SilentlyContinue
+                Write-Host "WARN: (UpdateLoxone.ps1) BurntToast import timed out after ${btTimeoutSec}s (headless/remote session?)." -ForegroundColor Yellow
             }
         } catch {
-            Write-Error "CRITICAL ERROR: (UpdateLoxone.ps1) Failed to install BurntToast module. Error: $($_.Exception.Message). Please install it manually and re-run the script."
-            exit 1
+            Remove-Job -Name * -Force -ErrorAction SilentlyContinue
+            Write-Host "WARN: (UpdateLoxone.ps1) BurntToast import failed: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     } else {
-        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast module is already available." -ForegroundColor Cyan
-        try {
-            Write-Host "INFO: (UpdateLoxone.ps1) Explicitly importing BurntToast into the current session..." -ForegroundColor Cyan
-            Import-Module BurntToast -Force -ErrorAction Stop
-            Write-Host "INFO: (UpdateLoxone.ps1) BurntToast imported successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "CRITICAL ERROR: (UpdateLoxone.ps1) Failed to import already available BurntToast module. Error: $($_.Exception.Message)."
-            exit 1
-        }
+        Write-Host "WARN: (UpdateLoxone.ps1) BurntToast module not available after install attempt." -ForegroundColor Yellow
+    }
+
+    if (-not $burntToastReady) {
+        Write-Host "INFO: (UpdateLoxone.ps1) Toast notifications disabled for this session. Script continues without them." -ForegroundColor Yellow
+        $Global:SuppressLoxoneToastInit = $true
     }
 
     Write-Host "INFO: (UpdateLoxone.ps1) Attempting to import LoxoneUtils manifest: '$UtilsModulePath'..." -ForegroundColor Cyan
@@ -324,6 +361,18 @@ if ($script:InitialSystemInvocation) {
             exit 1
         }
         Write-Log -Message "(UpdateLoxone.ps1) Successfully loaded LoxoneUtils module via manifest. Write-Log is available." -Level INFO
+
+        # Log invocation parameters dynamically
+        $paramStrings = @()
+        foreach ($key in ($PSBoundParameters.Keys | Sort-Object)) {
+            $val = $PSBoundParameters[$key]
+            if ($val -is [switch]) { $paramStrings += "-$key" }
+            elseif ($val -is [securestring]) { $paramStrings += "-$key ****" }
+            else { $paramStrings += "-$key '$val'" }
+        }
+        $invocationLine = if ($paramStrings.Count -gt 0) { $paramStrings -join ' ' } else { '(no explicit parameters)' }
+        Write-Log -Message "(UpdateLoxone.ps1) Invocation: .\UpdateLoxone.ps1 $invocationLine" -Level INFO
+        Write-Log -Message "(UpdateLoxone.ps1) PowerShell: $($PSVersionTable.PSVersion) | User: $env:USERNAME | Host: $env:COMPUTERNAME" -Level INFO
     }
     catch {
         $errorMessage = "CRITICAL ERROR: (UpdateLoxone.ps1) Failed to import LoxoneUtils module manifest ('$UtilsModulePath'). Error details: $($_.Exception.Message)"

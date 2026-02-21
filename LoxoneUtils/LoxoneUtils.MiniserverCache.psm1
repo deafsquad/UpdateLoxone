@@ -173,7 +173,7 @@ function Update-MiniserverListCache {
     }
     
     try {
-        $lines = Get-Content $FilePath
+        $lines = @(Get-Content $FilePath)
         $updated = $false
         $timestampStr = $Timestamp.ToString("yyyyMMdd_HHmmss")
         
@@ -237,7 +237,7 @@ function Get-MiniserverListWithCache {
     Write-Log -Message "[CACHE] Reading miniserver list with cache from: $FilePath" -Level DEBUG
     
     $entries = @()
-    $lines = Get-Content $FilePath
+    $lines = @(Get-Content $FilePath)
     $cacheHits = 0
     $totalEntries = 0
     
