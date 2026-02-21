@@ -2336,7 +2336,18 @@ function Start-MiniserverWorker {
                             [void]$Pipeline.LogQueue.Enqueue($logEntry)
                             
                             # Use pre-checked version if available, otherwise check now (with retry logic)
+                            # Treat placeholder values as missing - 'Checking...' means pre-check failed
                             $currentVersion = $ms.CurrentVersion
+                            if ($currentVersion -and $currentVersion -notmatch '^\d+\.\d+') {
+                                $logEntry = @{
+                                    Timestamp = Get-Date
+                                    Worker = "MS[$($ms.IP)]"
+                                    Message = "Pre-check version '$currentVersion' is not a valid version string, re-checking..."
+                                    Level = "WARN"
+                                }
+                                [void]$Pipeline.LogQueue.Enqueue($logEntry)
+                                $currentVersion = $null
+                            }
                             if (-not $currentVersion) {
                                 $logEntry = @{
                                     Timestamp = Get-Date

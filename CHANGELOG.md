@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.7.9] - 2026-02-21 06:27:56
+### Fixed
+- Fixed parallel Miniserver worker treating placeholder version strings (e.g., 'Checking...') as valid versions, which could cause update logic to skip or fail
+  - Non-numeric version values from failed pre-checks are now detected and re-fetched with a warning log
+
 ## [0.7.8] - 2026-02-21 06:16:44
 ### Added
 - Invocation parameter logging on startup ÔÇö logs all bound parameters, PowerShell version, username, and hostname after module load for easier troubleshooting
