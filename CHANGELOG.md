@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0] - 2026-02-28 07:43:57
+### Added
+- Configurable environment prechecks that run before the update pipeline proceeds
+  - Time window check: restrict updates to specific hours (e.g., `01:00-06:00`), supports midnight-crossing windows
+  - Miniserver state check: query Miniserver endpoints to verify expected values before allowing updates (e.g., confirm nobody is home)
+  - Prechecks are configured via `UpdateLoxone.config.json` under the `Prechecks` key
+  - Detailed logging of each precheck result with PASS/FAIL status
+  - Toast notification when updates are available but blocked by failed prechecks (interactive mode only)
+- `Get-MSCredentialsFromList` helper function to extract Miniserver credentials from the MS list file
+- `Test-UpdatePrechecks` function that evaluates all configured precheck conditions and returns structured results
+
 ## [0.7.9] - 2026-02-21 06:27:56
 ### Fixed
 - Fixed parallel Miniserver worker treating placeholder version strings (e.g., 'Checking...') as valid versions, which could cause update logic to skip or fail

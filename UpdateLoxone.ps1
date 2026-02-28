@@ -126,6 +126,7 @@ $script:MyScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # Configuration defaults (can be overridden by user settings)
 $script:UseParallelExecution = $false  # Default to sequential execution unless explicitly enabled
+$script:PrecheckConfig = $null  # Default: no prechecks configured
 
 # Load user configuration if exists
 $configPath = Join-Path $script:MyScriptRoot "UpdateLoxone.config.json"
@@ -136,9 +137,174 @@ if (Test-Path $configPath) {
             $script:UseParallelExecution = $userConfig.UseParallelExecution
             Write-Host "Loaded UseParallelExecution from config: $($script:UseParallelExecution)" -ForegroundColor Green
         }
+        if ($null -ne $userConfig.Prechecks) {
+            $script:PrecheckConfig = $userConfig.Prechecks
+            Write-Host "Loaded Prechecks configuration from config" -ForegroundColor Green
+        }
     }
     catch {
         Write-Warning "Failed to load configuration from ${configPath}: $_"
+    }
+}
+
+# --- Precheck Helper Functions ---
+function Get-MSCredentialsFromList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$TargetHost,
+        [Parameter(Mandatory=$true)][string]$MSListPath
+    )
+    if (-not (Test-Path $MSListPath)) { return $null }
+    $lines = @(Get-Content $MSListPath)
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.Trim().StartsWith('#')) { continue }
+        $url = $line.Split(',')[0].Trim()
+        if ($url -notmatch '^[a-zA-Z]+://') { $url = "http://" + $url }
+        # Extract host from URL (same regex as MiniserverCache.psm1)
+        if ($url -match '@([^/:]+)' -and $Matches[1] -eq $TargetHost) {
+            if ($url -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+                $scheme = $Matches.scheme
+                $credPart = $Matches.credentials
+                if ($credPart -match '^(?<user>[^:]+):(?<pass>.+)$') {
+                    return @{
+                        Username = $Matches.user
+                        Password = $Matches.pass
+                        Scheme   = $scheme
+                    }
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Test-UpdatePrechecks {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]$PrecheckConfig,
+        [Parameter(Mandatory=$true)][string]$MSListPath
+    )
+    $results = @()
+
+    # --- Time Window Check ---
+    if ($PrecheckConfig.TimeWindow -and $PrecheckConfig.TimeWindow.Start -and $PrecheckConfig.TimeWindow.End) {
+        try {
+            $now = Get-Date
+            $startTime = [datetime]::ParseExact($PrecheckConfig.TimeWindow.Start, "HH:mm", $null)
+            $endTime = [datetime]::ParseExact($PrecheckConfig.TimeWindow.End, "HH:mm", $null)
+
+            $currentMinutes = $now.Hour * 60 + $now.Minute
+            $startMinutes = $startTime.Hour * 60 + $startTime.Minute
+            $endMinutes = $endTime.Hour * 60 + $endTime.Minute
+
+            if ($startMinutes -le $endMinutes) {
+                # Same-day window (e.g., 01:00-06:00)
+                $inWindow = ($currentMinutes -ge $startMinutes) -and ($currentMinutes -lt $endMinutes)
+            } else {
+                # Midnight-crossing window (e.g., 23:00-05:00)
+                $inWindow = ($currentMinutes -ge $startMinutes) -or ($currentMinutes -lt $endMinutes)
+            }
+
+            $windowStr = "$($PrecheckConfig.TimeWindow.Start)-$($PrecheckConfig.TimeWindow.End)"
+            $nowStr = Get-Date -Format 'HH:mm'
+            $results += @{
+                Check       = "TimeWindow"
+                Passed      = $inWindow
+                Description = if ($inWindow) { "Current time $nowStr is within window $windowStr" } else { "Current time $nowStr is outside window $windowStr" }
+                Expected    = $windowStr
+                Actual      = $nowStr
+                Error       = $null
+            }
+        }
+        catch {
+            $results += @{
+                Check       = "TimeWindow"
+                Passed      = $false
+                Description = "Failed to parse time window configuration"
+                Expected    = "$($PrecheckConfig.TimeWindow.Start)-$($PrecheckConfig.TimeWindow.End)"
+                Actual      = $null
+                Error       = $_.Exception.Message
+            }
+        }
+    }
+
+    # --- Miniserver State Checks ---
+    if ($PrecheckConfig.MiniserverStates) {
+        foreach ($stateCheck in $PrecheckConfig.MiniserverStates) {
+            $checkResult = @{
+                Check       = "MiniserverState"
+                Passed      = $false
+                Description = $stateCheck.Description
+                Expected    = $stateCheck.ExpectedValue
+                Actual      = $null
+                Error       = $null
+            }
+
+            try {
+                $creds = Get-MSCredentialsFromList -TargetHost $stateCheck.Host -MSListPath $MSListPath
+                if (-not $creds) {
+                    $checkResult.Error = "No credentials found for $($stateCheck.Host) in MS list"
+                    $results += $checkResult
+                    continue
+                }
+
+                $encodedEndpoint = [Uri]::EscapeDataString($stateCheck.Endpoint)
+                $uri = "$($creds.Scheme)://$($stateCheck.Host)/jdev/sps/io/$encodedEndpoint"
+
+                $webClient = New-Object System.Net.WebClient
+                try {
+                    $webClient.Encoding = [System.Text.Encoding]::UTF8
+                    $authBytes = [System.Text.Encoding]::ASCII.GetBytes("$($creds.Username):$($creds.Password)")
+                    $webClient.Headers.Add("Authorization", "Basic $([Convert]::ToBase64String($authBytes))")
+                    $response = $webClient.DownloadString($uri)
+                }
+                finally {
+                    $webClient.Dispose()
+                }
+
+                # Parse JSON response: {"LL": {"control": "...", "value": "0", "Code": "200"}}
+                $parsed = $response | ConvertFrom-Json
+                if ($parsed.LL.Code -ne "200") {
+                    $checkResult.Error = "MS returned Code=$($parsed.LL.Code) for endpoint $($stateCheck.Endpoint)"
+                    $results += $checkResult
+                    continue
+                }
+
+                $actualValue = $parsed.LL.value
+                $checkResult.Actual = $actualValue
+                $checkResult.Passed = ($actualValue -eq $stateCheck.ExpectedValue)
+            }
+            catch {
+                $checkResult.Error = "Failed to query $($stateCheck.Host): $($_.Exception.Message)"
+            }
+
+            $results += $checkResult
+        }
+    }
+
+    # --- Build Return Value ---
+    $allPassed = ($results | Where-Object { -not $_.Passed }).Count -eq 0
+
+    $failureSummary = ""
+    if (-not $allPassed) {
+        $failedResults = @($results | Where-Object { -not $_.Passed })
+        $summaryLines = @()
+        foreach ($f in $failedResults) {
+            if ($f.Check -eq "TimeWindow") {
+                $summaryLines += "Time: $($f.Actual) not in $($f.Expected)"
+            } elseif ($f.Error) {
+                $summaryLines += "$($f.Description): $($f.Error)"
+            } else {
+                $summaryLines += "$($f.Description): expected=$($f.Expected), actual=$($f.Actual)"
+            }
+        }
+        $failureSummary = $summaryLines -join "`n"
+    }
+
+    return @{
+        Passed         = $allPassed
+        Results        = $results
+        FailureSummary = $failureSummary
     }
 }
 
@@ -1536,6 +1702,39 @@ try {
             Write-Log -Message "Workflow has work: $hasWork" -Level INFO
             
             if ($hasWork) {
+                # --- Environment Prechecks (only when updates are pending) ---
+                if ($null -ne $script:PrecheckConfig) {
+                    $msListPathForPrechecks = Join-Path -Path $scriptContext.ScriptSaveFolder -ChildPath "UpdateLoxoneMSList.txt"
+                    Write-Log -Message "(UpdateLoxone.ps1) Updates pending - running environment prechecks..." -Level INFO
+                    $precheckResult = Test-UpdatePrechecks -PrecheckConfig $script:PrecheckConfig -MSListPath $msListPathForPrechecks
+
+                    foreach ($r in $precheckResult.Results) {
+                        $status = if ($r.Passed) { "PASS" } else { "FAIL" }
+                        $detail = if ($r.Error) { " Error: $($r.Error)" }
+                                  elseif ($r.Actual) { " (expected: $($r.Expected), actual: $($r.Actual))" }
+                                  else { "" }
+                        Write-Log -Message "(UpdateLoxone.ps1) Precheck [$status] $($r.Check): $($r.Description)$detail" -Level INFO
+                    }
+
+                    if (-not $precheckResult.Passed) {
+                        Write-Log -Message "(UpdateLoxone.ps1) Prechecks FAILED. Update pipeline blocked." -Level WARN
+
+                        if ($scriptContext.IsInteractive) {
+                            $toastMsg = "Update available but blocked by prechecks`n$($precheckResult.FailureSummary)"
+                            Show-FinalStatusToast -StatusMessage $toastMsg -Success $false -LogFileToShow $scriptContext.LogFile
+                        } else {
+                            Write-Log -Message "(UpdateLoxone.ps1) Non-interactive mode: suppressing precheck failure toast." -Level INFO
+                        }
+
+                        if ($scriptContext.LogFile) {
+                            Invoke-LogFileRotation -LogFilePath $scriptContext.LogFile -MaxArchiveCount 24 -ErrorAction SilentlyContinue
+                        }
+                        exit 0
+                    }
+
+                    Write-Log -Message "(UpdateLoxone.ps1) All prechecks passed. Continuing with updates." -Level INFO
+                }
+
                 # Update parallel mode environment variables with actual work information if not already set
                 if ($effectiveParallelMode -and $env:LOXONE_PARALLEL_MODE -ne "1") {
                     Write-Log -Message "(UpdateLoxone.ps1) Setting LOXONE_PARALLEL_MODE environment variable to '1' for parallel execution" -Level INFO
