@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1] - 2026-03-04 04:47:55
+### Changed
+- Precheck failures no longer block the entire update pipeline; only Config and Miniserver updates are blocked while App updates proceed independently
+- Toast notifications now show "Blocked (prechecks)" status for Config and Miniserver progress bars when prechecks fail, instead of leaving them in "Waiting..." state
+- Final summary now includes precheck failure reason when prechecks blocked part of the pipeline
+- Suppressed duplicate final success toast when a precheck failure toast was already displayed
+- Bumped package version to 0.8.1
+
 ## [0.8.0] - 2026-02-28 07:43:57
 ### Added
 - Configurable environment prechecks that run before the update pipeline proceeds

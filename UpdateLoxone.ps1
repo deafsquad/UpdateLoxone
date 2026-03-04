@@ -1717,22 +1717,75 @@ try {
                     }
 
                     if (-not $precheckResult.Passed) {
-                        Write-Log -Message "(UpdateLoxone.ps1) Prechecks FAILED. Update pipeline blocked." -Level WARN
+                        Write-Log -Message "(UpdateLoxone.ps1) Prechecks FAILED. Config + MS updates blocked. App update will proceed." -Level WARN
+                        $script:PrechecksFailed = $true
+                        $script:PrecheckFailureSummary = $precheckResult.FailureSummary
 
-                        if ($scriptContext.IsInteractive) {
-                            $toastMsg = "Update available but blocked by prechecks`n$($precheckResult.FailureSummary)"
-                            Show-FinalStatusToast -StatusMessage $toastMsg -Success $false -LogFileToShow $scriptContext.LogFile
-                        } else {
-                            Write-Log -Message "(UpdateLoxone.ps1) Non-interactive mode: suppressing precheck failure toast." -Level INFO
+                        # Remove Config and MS from workflow (version-coupled, need MS reboot)
+                        # App update is independent and can proceed
+                        if ($workflowDefinition.ConfigUpdate) {
+                            Write-Log -Message "(UpdateLoxone.ps1) Removing Config update from workflow (blocked by prechecks)" -Level INFO
+                            $workflowDefinition.ConfigUpdate = $null
+                        }
+                        if ($workflowDefinition.MiniserverUpdates -and $workflowDefinition.MiniserverUpdates.Count -gt 0) {
+                            Write-Log -Message "(UpdateLoxone.ps1) Removing $($workflowDefinition.MiniserverUpdates.Count) MS update(s) from workflow (blocked by prechecks)" -Level INFO
+                            $workflowDefinition.MiniserverUpdates = @()
                         }
 
-                        if ($scriptContext.LogFile) {
-                            Invoke-LogFileRotation -LogFilePath $scriptContext.LogFile -MaxArchiveCount 24 -ErrorAction SilentlyContinue
+                        # If only MS/Config were pending and no App update, nothing left to do
+                        if (-not $workflowDefinition.AppUpdate) {
+                            Write-Log -Message "(UpdateLoxone.ps1) No App update pending either. Nothing to do." -Level INFO
+                            # Update toast to show blocked status before exit
+                            if ($Global:PersistentToastData) {
+                                $blockedReason = ($precheckResult.Results | Where-Object { -not $_.Passed } | ForEach-Object {
+                                    if ($_.Check -eq "TimeWindow") { "Time: $($_.Actual) not in $($_.Expected)" }
+                                    elseif ($_.Error) { $_.Description }
+                                    else { "$($_.Description): $($_.Actual)" }
+                                }) -join ', '
+                                $Global:PersistentToastData.ConfigStatus = "Blocked (prechecks)"
+                                $Global:PersistentToastData.ConfigProgress = 1.0
+                                $Global:PersistentToastData.MiniserverStatus = "Blocked (prechecks)"
+                                $Global:PersistentToastData.MiniserverProgress = 1.0
+                                $Global:PersistentToastData.AppStatus = "No update needed"
+                                $Global:PersistentToastData.AppProgress = 1.0
+                                $Global:PersistentToastData.StatusText = "Prechecks failed: $blockedReason"
+                                try {
+                                    if (Get-Command Update-Toast -ErrorAction SilentlyContinue) { Update-Toast }
+                                } catch { }
+                            }
+                            if ($scriptContext.IsInteractive) {
+                                $toastMsg = "Update available but blocked by prechecks`n$($precheckResult.FailureSummary)"
+                                Show-FinalStatusToast -StatusMessage $toastMsg -Success $false -LogFileToShow $scriptContext.LogFile
+                            }
+                            if ($scriptContext.LogFile) {
+                                Invoke-LogFileRotation -LogFilePath $scriptContext.LogFile -MaxArchiveCount 24 -ErrorAction SilentlyContinue
+                            }
+                            exit 0
                         }
-                        exit 0
+
+                        # Update toast progress bars to show blocked status instead of "Waiting..."
+                        if ($Global:PersistentToastData) {
+                            $blockedReason = ($precheckResult.Results | Where-Object { -not $_.Passed } | ForEach-Object {
+                                if ($_.Check -eq "TimeWindow") { "Time: $($_.Actual) not in $($_.Expected)" }
+                                elseif ($_.Error) { $_.Description }
+                                else { "$($_.Description): $($_.Actual)" }
+                            }) -join ', '
+                            $Global:PersistentToastData.ConfigStatus = "Blocked (prechecks)"
+                            $Global:PersistentToastData.ConfigProgress = 1.0
+                            $Global:PersistentToastData.ConfigTitle = "Loxone Config"
+                            $Global:PersistentToastData.MiniserverStatus = "Blocked (prechecks)"
+                            $Global:PersistentToastData.MiniserverProgress = 1.0
+                            $Global:PersistentToastData.MiniserversTitle = "Miniservers"
+                            $Global:PersistentToastData.StatusText = "Prechecks failed: $blockedReason"
+                            try {
+                                if (Get-Command Update-Toast -ErrorAction SilentlyContinue) { Update-Toast }
+                            } catch { }
+                        }
+
+                        Write-Log -Message "(UpdateLoxone.ps1) Continuing with App update only (Config + MS blocked by prechecks)." -Level INFO
+                    } else {
+                        Write-Log -Message "(UpdateLoxone.ps1) All prechecks passed. Continuing with all updates." -Level INFO
                     }
-
-                    Write-Log -Message "(UpdateLoxone.ps1) All prechecks passed. Continuing with updates." -Level INFO
                 }
 
                 # Update parallel mode environment variables with actual work information if not already set
@@ -2703,12 +2756,21 @@ if (-not $script:ErrorOccurred) {
         $finalMessageText = "Process complete, no updates."
     }
 
+    # Append precheck failure reason to final summary if prechecks blocked the pipeline
+    if ($script:PrechecksFailed -and $script:PrecheckFailureSummary) {
+        $finalMessageText += "`n⛔ Blocked: $($script:PrecheckFailureSummary)"
+    }
+
     Write-Log -Message "Final Summary (Success/No Error):`n$finalMessageText" -Level INFO
     if (Get-Command Show-FinalStatusToast -ErrorAction SilentlyContinue) {
+        if ($script:PrechecksFailed) {
+            # Precheck failure toast was already shown — don't overwrite it
+            Write-Log -Message "(UpdateLoxone.ps1) Suppressing final success toast — precheck failure toast already displayed." -Level INFO
+        }
         # Only show success/summary toast if:
         # 1. Running in an interactive host AND
         # 2. EITHER an update was performed OR it wasn't a self-invoked check that found nothing.
-        if ($scriptContext.IsInteractive -and ($anyUpdatePerformedActualInFinally -or -not $scriptContext.IsSelfInvokedForUpdateCheck)) {
+        elseif ($scriptContext.IsInteractive -and ($anyUpdatePerformedActualInFinally -or -not $scriptContext.IsSelfInvokedForUpdateCheck)) {
             Show-FinalStatusToast -StatusMessage $finalMessageText -Success $true -LogFileToShow $logPathToShowFinally
         } else {
             Write-Log -Message "(UpdateLoxone.ps1) Suppressing final status toast. IsInteractive: $($scriptContext.IsInteractive), AnyUpdatePerformed: $anyUpdatePerformedActualInFinally, IsSelfInvoked: $($scriptContext.IsSelfInvokedForUpdateCheck)." -Level INFO
