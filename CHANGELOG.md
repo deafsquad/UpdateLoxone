@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.2] - 2026-03-05 13:46:16
+### Added
+- Added environment prechecks gate that evaluates time window and Miniserver state conditions from config before proceeding with updates
+- Added per-component final summary in toast StatusText showing outcome for each component (e.g., "Config: Blocked | App: Updated | MS: Blocked")
+- Added StepName fallback for component detection in toast progress updates when DownloadFileName is unavailable
+
+### Changed
+- Prechecks now selectively block Config and Miniserver updates (version-coupled) while allowing App updates to proceed independently
+- Toast StatusText now shows precheck failure reason during processing instead of generic "Processing updates..." message
+- Precheck message persists via PrecheckMessage property on PersistentToastData for consistent display throughout workflow
+
+### Fixed
+- Fixed toast progress showing stuck "Waiting..." status for components blocked by prechecks; now correctly shows "Blocked (prechecks)" state
+- Fixed Unknown component detection in toast updates by adding StepName-based fallback when DownloadFileName doesn't match known patterns
+- Fixed $Matches scoping bug in credential lookup where URI scheme was lost
+- Fixed [System.Char] Trim error in MiniserverCache when processing single-entry lists
+- Fixed version check incorrectly treating 'Checking...' placeholder text as a valid version string
+
 ## [0.8.1] - 2026-03-04 04:47:55
 ### Changed
 - Precheck failures no longer block the entire update pipeline; only Config and Miniserver updates are blocked while App updates proceed independently

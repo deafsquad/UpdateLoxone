@@ -1748,7 +1748,8 @@ try {
                                 $Global:PersistentToastData.MiniserverProgress = 1.0
                                 $Global:PersistentToastData.AppStatus = "No update needed"
                                 $Global:PersistentToastData.AppProgress = 1.0
-                                $Global:PersistentToastData.StatusText = "Prechecks failed: $blockedReason"
+                                $Global:PersistentToastData.PrecheckMessage = "Prechecks failed: $blockedReason"
+                                $Global:PersistentToastData.StatusText = $Global:PersistentToastData.PrecheckMessage
                                 try {
                                     if (Get-Command Update-Toast -ErrorAction SilentlyContinue) { Update-Toast }
                                 } catch { }
@@ -1776,7 +1777,8 @@ try {
                             $Global:PersistentToastData.MiniserverStatus = "Blocked (prechecks)"
                             $Global:PersistentToastData.MiniserverProgress = 1.0
                             $Global:PersistentToastData.MiniserversTitle = "Miniservers"
-                            $Global:PersistentToastData.StatusText = "Prechecks failed: $blockedReason"
+                            $Global:PersistentToastData.PrecheckMessage = "Prechecks failed: $blockedReason"
+                            $Global:PersistentToastData.StatusText = $Global:PersistentToastData.PrecheckMessage
                             try {
                                 if (Get-Command Update-Toast -ErrorAction SilentlyContinue) { Update-Toast }
                             } catch { }

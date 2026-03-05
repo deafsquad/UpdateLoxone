@@ -767,10 +767,18 @@ function Update-PersistentToast {
             }
             # Fall back to DownloadFileName if component still unknown
             if ($component -eq 'Unknown' -and $DownloadFileName) {
-                if ($DownloadFileName -match 'Config') { 
-                    $component = 'Config' 
-                } elseif ($DownloadFileName -match 'App|160120250812|LoxoneApp') { 
-                    $component = 'App' 
+                if ($DownloadFileName -match 'Config') {
+                    $component = 'Config'
+                } elseif ($DownloadFileName -match 'App|160120250812|LoxoneApp') {
+                    $component = 'App'
+                }
+            }
+            # Fall back to StepName if component still unknown
+            if ($component -eq 'Unknown' -and $StepName) {
+                if ($StepName -match 'Config') {
+                    $component = 'Config'
+                } elseif ($StepName -match 'App') {
+                    $component = 'App'
                 }
             }
             

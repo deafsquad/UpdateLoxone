@@ -2981,8 +2981,12 @@ function Watch-DirectThreadJobs {
                 $elapsed = $now - $startTime
                 $elapsedText = "{0:mm}:{0:ss}" -f $elapsed
                 
-                # Update StatusText with timer only - MS status goes in progress bar
-                $statusLine = "Processing updates... [$elapsedText]"
+                # Use precheck message if set, otherwise default status
+                $statusLine = if ($Global:PersistentToastData.PrecheckMessage) {
+                    "$($Global:PersistentToastData.PrecheckMessage) [$elapsedText]"
+                } else {
+                    "Processing updates... [$elapsedText]"
+                }
                 
                 # Only add completion details if ALL MS are done
                 # This is handled by the progress update handler
@@ -3544,7 +3548,36 @@ function Watch-DirectThreadJobs {
     $overallSuccess = $results.Errors.Count -eq 0
     
     Write-Log "[Watch-DirectThreadJobs] Workflow completed in $([Math]::Round($duration.TotalSeconds, 2)) seconds. Success: $overallSuccess" -Level "INFO"
-    
+
+    # Update StatusText with final per-component summary
+    if ($Global:PersistentToastData) {
+        $elapsedFinal = "{0:mm\:ss}" -f $duration
+        $summaryParts = @()
+        if ($Global:PersistentToastData.ConfigStatus) {
+            $configState = if ($Global:PersistentToastData.ConfigStatus -match 'Blocked') { 'Blocked' }
+                          elseif ($Global:PersistentToastData.ConfigStatus -match 'Completed|Verified') { 'Updated' }
+                          else { $Global:PersistentToastData.ConfigStatus }
+            $summaryParts += "Config: $configState"
+        }
+        if ($Global:PersistentToastData.AppStatus) {
+            $appState = if ($Global:PersistentToastData.AppStatus -match 'Completed|Verified') { 'Updated' }
+                       elseif ($Global:PersistentToastData.AppStatus -match 'No update') { 'Current' }
+                       else { $Global:PersistentToastData.AppStatus }
+            $summaryParts += "App: $appState"
+        }
+        if ($Global:PersistentToastData.MiniserverStatus) {
+            $msState = if ($Global:PersistentToastData.MiniserverStatus -match 'Blocked') { 'Blocked' }
+                      elseif ($Global:PersistentToastData.MiniserverStatus -match 'Complete') { 'Updated' }
+                      else { $Global:PersistentToastData.MiniserverStatus }
+            $summaryParts += "MS: $msState"
+        }
+        $finalStatus = if ($summaryParts.Count -gt 0) { ($summaryParts -join ' | ') + " [$elapsedFinal]" } else { "Completed [$elapsedFinal]" }
+        $Global:PersistentToastData.StatusText = $finalStatus
+        try {
+            if (Get-Command Update-Toast -ErrorAction SilentlyContinue) { Update-Toast }
+        } catch { }
+    }
+
     return @{
         Success = $overallSuccess
         TotalDuration = $duration.TotalSeconds
