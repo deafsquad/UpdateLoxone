@@ -8,7 +8,7 @@ function Send-MSStatusUpdate {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)]
-        [ValidateSet('Updating','Installing','Rebooting','Verifying','Completed','Failed')]
+        [ValidateSet('Downloading','Updating','Installing','Rebooting','Verifying','Completed','Failed')]
         [string]$State,
 
         [Parameter(Mandatory=$true)]
@@ -1671,6 +1671,8 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                 $plainPasswordForVerifyHeader = $PasswordForAuthHeader
             }
             $PairVerify = "${UsernameForAuthHeader}:${plainPasswordForVerifyHeader}"
+            # Save credentials for FTP download probe before clearing
+            $ftpCredential = New-Object System.Net.NetworkCredential($UsernameForAuthHeader, $plainPasswordForVerifyHeader)
             # Clear the plain text password variable
             if ($null -ne $plainPasswordForVerifyHeader) { Clear-Variable plainPasswordForVerifyHeader -ErrorAction SilentlyContinue }
             $BytesVerify = [System.Text.Encoding]::ASCII.GetBytes($PairVerify)
@@ -1705,6 +1707,21 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         # UseBasicParsing is already in $verifyParams base definition for polling.
         Write-Log -Level DEBUG -Message ("Invoke-MSUpdate (Polling): verifyParams before invoke: $($verifyParams | Out-String)")
 
+        # FTP credential fallback for PSCredential path
+        if ($null -eq $ftpCredential -and $Credential) {
+            try { $ftpCredential = $Credential.GetNetworkCredential() } catch { $ftpCredential = $null }
+        }
+
+        # FTP download probe setup - detect firmware download before MS enters 503 mode
+        $ftpProbeInterval = 6       # Every 6th attempt = ~60 seconds
+        $ftpPreviousFileCount = 0
+        $ftpPreviousTotalSize = [long]0
+        $ftpDownloadDetected = $false
+        $ftpTimeoutExtended = $false
+        # Convert version "16.3.3.11" → prefix "16030311" for matching .upd filenames
+        $ftpVersionPrefix = ($NormalizedDesiredVersion -split '\.' | ForEach-Object { $_.PadLeft(2, '0') }) -join ''
+        Write-Log -Message ("FTP download probe: version prefix '{0}', credentials: {1}" -f $ftpVersionPrefix, $(if ($ftpCredential) { 'available' } else { 'none' })) -Level DEBUG
+
         $Attempts = 0; $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
         $LastPollStatusMessage = "Initiating..."
         $LastStageCode = ""
@@ -1732,6 +1749,65 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             # In ThreadJob context, Write-Host doesn't work properly, use logging instead
             Write-Log -Message ("Polling MS {0} (Attempt {1}/{2}): {3}" -f $hostForPingInInvoke, $Attempts, $MaxAttempts, $LastPollStatusMessage) -Level INFO
             Start-Sleep -Seconds 10
+
+            # FTP download probe - detect firmware download before MS enters 503 update mode
+            # Only probe when: we have FTP creds, it's the right interval, and MS hasn't entered 503 yet
+            if ($null -ne $ftpCredential -and ($Attempts % $ftpProbeInterval -eq 0) -and -not $loggedUpdatingStatus) {
+                try {
+                    $ftpListUri = "ftp://${hostForPingInInvoke}/update/"
+                    $ftpRequest = [System.Net.FtpWebRequest]::Create($ftpListUri)
+                    $ftpRequest.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectoryDetails
+                    $ftpRequest.Credentials = $ftpCredential
+                    $ftpRequest.Timeout = 5000
+                    $ftpRequest.UsePassive = $true
+
+                    $ftpResponse = $ftpRequest.GetResponse()
+                    $ftpReader = New-Object System.IO.StreamReader($ftpResponse.GetResponseStream())
+                    $ftpContent = $ftpReader.ReadToEnd()
+                    $ftpReader.Close(); $ftpResponse.Close()
+
+                    # Parse listing for files matching target version prefix
+                    $ftpLines = @($ftpContent -split "`n" | Where-Object { $_ -match $ftpVersionPrefix })
+                    $currentFileCount = $ftpLines.Count
+                    $currentTotalSize = [long]0
+                    foreach ($ftpLine in $ftpLines) {
+                        if ($ftpLine -match '^\S+\s+\d+\s+\d+\s+\d+\s+(\d+)\s+') {
+                            $currentTotalSize += [long]$Matches[1]
+                        }
+                    }
+
+                    if ($currentFileCount -gt 0) {
+                        $isGrowing = ($currentFileCount -gt $ftpPreviousFileCount) -or ($currentTotalSize -gt $ftpPreviousTotalSize)
+
+                        if (-not $ftpDownloadDetected) {
+                            $ftpDownloadDetected = $true
+                            Write-Log -Message ("[FTP_PROBE] Download detected for MS {0}: {1} files, {2:N1} MB" -f $hostForPingInInvoke, $currentFileCount, ($currentTotalSize / 1MB)) -Level INFO
+
+                            Send-MSStatusUpdate -State 'Downloading' -Progress 20 -Message ("Downloading firmware ({0} files, {1:N0} MB)" -f $currentFileCount, [Math]::Round($currentTotalSize / 1MB)) `
+                                -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+
+                            # Extend timeout to 25 minutes for slow downloads
+                            if (-not $ftpTimeoutExtended) {
+                                $timeout = New-TimeSpan -Minutes 25
+                                $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
+                                $ftpTimeoutExtended = $true
+                                Write-Log -Message ("[FTP_PROBE] Extended polling timeout to 25 minutes for MS {0}" -f $hostForPingInInvoke) -Level INFO
+                            }
+                        } elseif ($isGrowing) {
+                            $sizeDiffMB = [Math]::Round(($currentTotalSize - $ftpPreviousTotalSize) / 1MB, 1)
+                            Write-Log -Message ("[FTP_PROBE] Download progressing for MS {0}: {1} files, {2:N1} MB (+{3} MB)" -f $hostForPingInInvoke, $currentFileCount, ($currentTotalSize / 1MB), $sizeDiffMB) -Level INFO
+
+                            Send-MSStatusUpdate -State 'Downloading' -Progress 25 -Message ("Downloading firmware ({0} files, {1:N0} MB)" -f $currentFileCount, [Math]::Round($currentTotalSize / 1MB)) `
+                                -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                        }
+
+                        $ftpPreviousFileCount = $currentFileCount
+                        $ftpPreviousTotalSize = $currentTotalSize
+                    }
+                } catch {
+                    Write-Log -Message ("[FTP_PROBE] Probe failed for MS {0}: {1}" -f $hostForPingInInvoke, $_.Exception.Message) -Level DEBUG
+                }
+            }
 
             try {
             # Add retry logic for each poll attempt

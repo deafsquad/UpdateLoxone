@@ -836,13 +836,14 @@ function Start-ProgressWorker {
                             foreach ($group in $stateGroups) {
                                 $symbol = switch ($group.Name) {
                                     'Checking' { '🔍' }
+                                    'Downloading' { '⏬' }
                                     'Updating' { '🔄' }
                                     'Polling' { '🚀' }
-                                    'Completed' { 'âœ“' }
+                                    'Completed' { 'âœ”' }
                                     'Failed' { 'âœ—' }
                                     default { '⏳' }
                                 }
-                                $statusParts += "$($group.Count) $symbol"
+                                $statusParts += “$($group.Count) $symbol”
                             }
                             
                             # Only show symbols with counters, no IPs in progress bar
@@ -922,13 +923,14 @@ function Start-ProgressWorker {
                             foreach ($group in $stateGroups) {
                                 $symbol = switch ($group.Name) {
                                     'Checking' { '🔍' }
+                                    'Downloading' { '⏬' }
                                     'Updating' { '🔄' }
                                     'Polling' { '🚀' }
-                                    'Completed' { 'âœ“' }
+                                    'Completed' { 'âœ”' }
                                     'Failed' { 'âœ—' }
                                     default { '⏳' }
                                 }
-                                $statusParts += "$($group.Count) $symbol"
+                                $statusParts += “$($group.Count) $symbol”
                             }
                             
                             $updateData.msStatus = $statusParts -join ' | '
@@ -3352,28 +3354,30 @@ function Watch-DirectThreadJobs {
 
                                     # Build title with step info and appropriate symbol
                                     $msSymbol = switch ($progressMsg.State) {
-                                        'Starting'   { '🔍' }  # Checking/connecting
-                                        'Checking'   { '🔍' }  # Checking version
-                                        'Updating'   { '🚀' }  # Updating (rocket for actual update)
-                                        'Polling'    { '⏳' }  # Waiting for reboot
-                                        'Complete'   { '✓' }   # Completed
-                                        'Completed'  { '✓' }   # Completed
-                                        'Failed'     { '✗' }   # Failed
-                                        default      { '🔄' }  # Generic update symbol
+                                        'Starting'     { '🔍' }  # Checking/connecting
+                                        'Checking'     { '🔍' }  # Checking version
+                                        'Downloading'  { '⏬' }  # Downloading firmware via FTP detection
+                                        'Updating'     { '🚀' }  # Updating (rocket for actual update)
+                                        'Polling'      { '⏳' }  # Waiting for reboot
+                                        'Complete'     { '✓' }   # Completed
+                                        'Completed'    { '✓' }   # Completed
+                                        'Failed'       { '✗' }   # Failed
+                                        default        { '🔄' }  # Generic update symbol
                                     }
                                     
                                     # Show MS count and current state
                                     if ($progressMsg.TotalMiniservers -and $progressMsg.TotalMiniservers -gt 0) {
                                         # Show how many MS are being processed with current state
                                         $stateText = switch ($progressMsg.State) {
-                                            'Starting'   { 'Connecting' }
-                                            'Checking'   { 'Checking' }
-                                            'Updating'   { 'Updating' }
-                                            'Polling'    { 'Restarting' }
-                                            'Complete'   { 'Complete' }
-                                            'Completed'  { 'Complete' }
-                                            'Failed'     { 'Failed' }
-                                            default      { $progressMsg.State }
+                                            'Starting'     { 'Connecting' }
+                                            'Checking'     { 'Checking' }
+                                            'Downloading'  { 'Downloading' }
+                                            'Updating'     { 'Updating' }
+                                            'Polling'      { 'Restarting' }
+                                            'Complete'     { 'Complete' }
+                                            'Completed'    { 'Complete' }
+                                            'Failed'       { 'Failed' }
+                                            default        { $progressMsg.State }
                                         }
                                         $Global:PersistentToastData.MiniserversTitle = "$msSymbol Miniservers ($($progressMsg.TotalMiniservers) MS) - $stateText"
                                     } else {
