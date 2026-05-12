@@ -340,8 +340,11 @@ function Start-ParallelWorkflow {
         Write-Log "Error in parallel workflow: $_" -Level "ERROR"
         throw
     } finally {
-        # Cleanup
+        # Cleanup - clear ALL parallel env vars to prevent leaks between runs in same session
         Remove-Item env:LOXONE_PARALLEL_MODE -ErrorAction SilentlyContinue
+        Remove-Item env:LOXONE_PARALLEL_WORKER -ErrorAction SilentlyContinue
+        Remove-Item env:LOXONE_WORKER_NAME -ErrorAction SilentlyContinue
+        Remove-Item env:LOXONE_IS_WORKER -ErrorAction SilentlyContinue
         Remove-ThreadJobs -Context "Parallel Workflow Cleanup"
     }
 }
@@ -1257,6 +1260,7 @@ function Start-ComponentWorker {
                                     Progress = 100
                                     Message = $completeMsg
                                     InitialVersion = $UpdateInfo.InitialVersion
+                                    TargetVersion = $UpdateInfo.TargetVersion
                                     RestartRequired = [bool]$installResult.RestartRequired
                                 }
                                 [void]$Pipeline.ProgressQueue.Enqueue($completeProgress)
@@ -1355,6 +1359,7 @@ function Start-ComponentWorker {
                                 Progress = 100
                                 Message = "App installed successfully"
                                 InitialVersion = $UpdateInfo.InitialVersion
+                                TargetVersion = $UpdateInfo.TargetVersion
                             }
                             [void]$Pipeline.ProgressQueue.Enqueue($completeProgress)
                         } else {
@@ -2436,8 +2441,12 @@ function Start-MiniserverWorker {
                             }
                             [void]$Pipeline.LogQueue.Enqueue($logEntry)
                             
-                            # Build update URI 
-                            $updateUri = "${msEntry}/dev/sys/autoupdate"
+                            # Build update URI - strip credentials to avoid URI parsing crashes on special chars (#, <, etc.)
+                            $cleanMsEntry = $msEntry
+                            if ($msEntry -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+                                $cleanMsEntry = "$($Matches.scheme)://$($Matches.hostinfo)"
+                            }
+                            $updateUri = "${cleanMsEntry}/dev/sys/autoupdate"
                             
                             $logEntry = @{
                                 Timestamp = Get-Date
@@ -3263,8 +3272,10 @@ function Watch-DirectThreadJobs {
                                 
                                 if ($component -eq 'Config') {
                                     $Global:PersistentToastData.ConfigProgress = [double]($progress / 100.0)
-                                    # Use step title with component prefix
-                                    if ($stepTitle) {
+                                    # Use version number in title when verification completes (replaces "X/X Verifying")
+                                    if ($progressMsg.Type -eq 'Verify' -and $progressMsg.State -eq 'Completed' -and $progressMsg.TargetVersion) {
+                                        $Global:PersistentToastData.ConfigTitle = "Loxone Config $($progressMsg.TargetVersion)"
+                                    } elseif ($stepTitle) {
                                         $Global:PersistentToastData.ConfigTitle = "Loxone Config: $stepTitle"
                                     }
                                     # Build detailed status - avoid repeating action name
@@ -3306,8 +3317,10 @@ function Watch-DirectThreadJobs {
                                     Write-Log "[Watch-DirectThreadJobs] Config update: Progress=$progress%, Title=Loxone Config: $stepTitle, Status=$statusText" -Level "DEBUG"
                                 } elseif ($component -eq 'App') {
                                     $Global:PersistentToastData.AppProgress = [double]($progress / 100.0)
-                                    # Use step title with component prefix
-                                    if ($stepTitle) {
+                                    # Use version number in title when verification completes (replaces "X/X Verifying")
+                                    if ($progressMsg.Type -eq 'Verify' -and $progressMsg.State -eq 'Completed' -and $progressMsg.TargetVersion) {
+                                        $Global:PersistentToastData.AppTitle = "Loxone App $($progressMsg.TargetVersion)"
+                                    } elseif ($stepTitle) {
                                         $Global:PersistentToastData.AppTitle = "Loxone App: $stepTitle"
                                     }
                                     # Build detailed status - avoid repeating action name
@@ -3365,8 +3378,11 @@ function Watch-DirectThreadJobs {
                                         default        { '🔄' }  # Generic update symbol
                                     }
                                     
-                                    # Show MS count and current state
-                                    if ($progressMsg.TotalMiniservers -and $progressMsg.TotalMiniservers -gt 0) {
+                                    # Show MS count and current state, with version when verified
+                                    if ($progressMsg.State -in @('Complete','Completed') -and $progressMsg.Version) {
+                                        # Per-MS completion with version
+                                        $Global:PersistentToastData.MiniserversTitle = "$msSymbol Miniserver $($progressMsg.Version)"
+                                    } elseif ($progressMsg.TotalMiniservers -and $progressMsg.TotalMiniservers -gt 0) {
                                         # Show how many MS are being processed with current state
                                         $stateText = switch ($progressMsg.State) {
                                             'Starting'     { 'Connecting' }

@@ -203,16 +203,40 @@ function Enable-MiniserverLogging {
     $FunctionName = "Enable-MiniserverLogging"
 
     try {
+        # Parse credentials before UriBuilder to avoid crashes on special chars (#, <, etc.) in passwords
+        $cleanUrl = $MiniserverUrl
+        $credential = $null
+        if ($MiniserverUrl -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+            $cleanUrl = "$($Matches.scheme)://$($Matches.hostinfo)"
+            $credPart = $Matches.credentials
+            if ($credPart -match '^(?<user>[^:]+):(?<pass>.+)$') {
+                # Build SecureString via .NET API (avoids ConvertTo-SecureString cmdlet which
+                # requires Microsoft.PowerShell.Security module - fails to auto-load in some
+                # test contexts like Pester InModuleScope).
+                $secPass = [System.Security.SecureString]::new()
+                foreach ($c in $Matches.pass.ToCharArray()) { $secPass.AppendChar($c) }
+                $secPass.MakeReadOnly()
+                $credential = New-Object System.Management.Automation.PSCredential($Matches.user, $secPass)
+            }
+        }
+
         # Baue URL: /dev/sps/log/<ip>
-        $uriBuilder = [System.UriBuilder]$MiniserverUrl
+        $uriBuilder = [System.UriBuilder]$cleanUrl
         $uriBuilder.Path = "/dev/sps/log/$TargetIP"
         $logUrl = $uriBuilder.Uri.ToString()
 
         # Redacted Log für Security
-        $redactedUrl = $logUrl -replace '://[^@]+@', '://***:***@'
-        Write-Log -Message "($FunctionName) Aktiviere MS-Logging: $redactedUrl" -Level INFO
+        Write-Log -Message "($FunctionName) Aktiviere MS-Logging: $logUrl" -Level INFO
 
-        $response = Invoke-WebRequest -Uri $logUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        $iwrParams = @{ Uri = $logUrl; UseBasicParsing = $true; TimeoutSec = 10; ErrorAction = 'Stop' }
+        if ($credential) {
+            $iwrParams.Credential = $credential
+            # AllowUnencryptedAuthentication only exists in PowerShell 7+
+            if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('AllowUnencryptedAuthentication')) {
+                $iwrParams.AllowUnencryptedAuthentication = $true
+            }
+        }
+        $response = Invoke-WebRequest @iwrParams
 
         if ($response.StatusCode -eq 200) {
             Write-Log -Message "($FunctionName) ✓ MS-Logging aktiviert für IP: $TargetIP" -Level INFO
@@ -254,15 +278,39 @@ function Disable-MiniserverLogging {
     $FunctionName = "Disable-MiniserverLogging"
 
     try {
+        # Parse credentials before UriBuilder to avoid crashes on special chars (#, <, etc.) in passwords
+        $cleanUrl = $MiniserverUrl
+        $credential = $null
+        if ($MiniserverUrl -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+            $cleanUrl = "$($Matches.scheme)://$($Matches.hostinfo)"
+            $credPart = $Matches.credentials
+            if ($credPart -match '^(?<user>[^:]+):(?<pass>.+)$') {
+                # Build SecureString via .NET API (avoids ConvertTo-SecureString cmdlet which
+                # requires Microsoft.PowerShell.Security module - fails to auto-load in some
+                # test contexts like Pester InModuleScope).
+                $secPass = [System.Security.SecureString]::new()
+                foreach ($c in $Matches.pass.ToCharArray()) { $secPass.AppendChar($c) }
+                $secPass.MakeReadOnly()
+                $credential = New-Object System.Management.Automation.PSCredential($Matches.user, $secPass)
+            }
+        }
+
         # Baue URL: /dev/sps/log (ohne IP-Parameter)
-        $uriBuilder = [System.UriBuilder]$MiniserverUrl
+        $uriBuilder = [System.UriBuilder]$cleanUrl
         $uriBuilder.Path = "/dev/sps/log"
         $logUrl = $uriBuilder.Uri.ToString()
 
-        $redactedUrl = $logUrl -replace '://[^@]+@', '://***:***@'
-        Write-Log -Message "($FunctionName) Deaktiviere MS-Logging: $redactedUrl" -Level INFO
+        Write-Log -Message "($FunctionName) Deaktiviere MS-Logging: $logUrl" -Level INFO
 
-        $response = Invoke-WebRequest -Uri $logUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        $iwrParams = @{ Uri = $logUrl; UseBasicParsing = $true; TimeoutSec = 10; ErrorAction = 'Stop' }
+        if ($credential) {
+            $iwrParams.Credential = $credential
+            # AllowUnencryptedAuthentication only exists in PowerShell 7+
+            if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('AllowUnencryptedAuthentication')) {
+                $iwrParams.AllowUnencryptedAuthentication = $true
+            }
+        }
+        $response = Invoke-WebRequest @iwrParams
 
         if ($response.StatusCode -eq 200) {
             Write-Log -Message "($FunctionName) ✓ MS-Logging deaktiviert" -Level INFO

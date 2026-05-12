@@ -1906,18 +1906,51 @@ END_CHANGELOG
                 $savedClaudeCode = $env:CLAUDECODE
                 Remove-Item Env:\CLAUDECODE -ErrorAction SilentlyContinue  # Allow nested claude -p call
                 try {
-                    $aiResponse = Get-Content $tempPromptFile -Raw | & claude -p 'Process this changelog verification request and respond EXACTLY as instructed in the format specified. Start your response with UPDATED_CHANGELOG and end with END_CHANGELOG. Do not include any other text outside these markers.' --output-format text --no-session-persistence --tools "" --verbose 2>&1 | Out-String
+                    # Note: dropped --verbose (was flooding stderr that 2>&1 merged into response, breaking marker parsing)
+                    # Keep stderr capture (2>&1) for genuine error output, but no verbose noise this time.
+                    #
+                    # The -p wrapper instruction must REINFORCE the prompt file's format requirement,
+                    # not restrict it. Previous "Do not include any other text outside these markers"
+                    # caused Claude to emit just the bare markers with no content between them.
+                    #
+                    # CRITICAL: PS 5.1's `Get-Content -Raw | & native.exe` pipe converts to OEM/UTF-16
+                    # by default - Claude CLI expects UTF-8 on stdin and ends up seeing garbled or
+                    # empty content. Force UTF-8 on the output encoding so stdin reaches Claude intact.
+                    $prevOutputEncoding = $OutputEncoding
+                    $prevConsoleOutputEncoding = [Console]::OutputEncoding
+                    $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+                    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+                    try {
+                        # Note: removed --tools "" - empty string was disabling ALL tools including
+                        # Glob/Grep/Bash. The agent needs these to investigate the diff if it can't
+                        # parse the full prompt content. Leaving tools at default (Read-only set is fine).
+                        $aiResponse = Get-Content $tempPromptFile -Raw -Encoding UTF8 | & claude -p 'Read the changelog generation request above. Generate the complete Unreleased changelog section between UPDATED_CHANGELOG and END_CHANGELOG markers, following the format and rules specified in the request. The content between the markers MUST start with "## [Unreleased]" and contain ### Added/Changed/Fixed/etc subsections covering all changes shown in the diff.' --output-format text --no-session-persistence 2>&1 | Out-String
+                    } finally {
+                        $OutputEncoding = $prevOutputEncoding
+                        [Console]::OutputEncoding = $prevConsoleOutputEncoding
+                    }
                 } finally {
                     Remove-Item Env:\CLAUDE_SKIP_TASK_ENFORCEMENT -ErrorAction SilentlyContinue
                     if ($null -ne $savedClaudeCode) { $env:CLAUDECODE = $savedClaudeCode }
                 }
-                
+
+                # ALWAYS save raw response immediately so failures are debuggable
+                # (previous code only saved on marker-match-success; empty responses left no trace)
+                try {
+                    $rawResponseFile = Join-Path $PSScriptRoot "claude_response_raw.txt"
+                    Set-Content -Path $rawResponseFile -Value $aiResponse -Encoding UTF8 -ErrorAction SilentlyContinue
+                    $respLen = if ($aiResponse) { $aiResponse.Length } else { 0 }
+                    Write-Host "DEBUG: Raw Claude response saved to $rawResponseFile ($respLen chars)" -ForegroundColor Gray
+                } catch {
+                    Write-Host "DEBUG: Could not save raw response: $($_.Exception.Message)" -ForegroundColor Gray
+                }
+
                 # Check if claude command failed
                 if ($LASTEXITCODE -ne 0) {
                     $claudeError = $aiResponse
                     throw "Claude command failed with exit code $LASTEXITCODE. Error: $claudeError"
                 }
-                
+
                 # Clean up temp file
                 if (Test-Path $tempPromptFile) {
                     Remove-Item $tempPromptFile -Force

@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.8.4] - 2026-05-13 00:25:48
+### Added
+- Miniserver version is now shown in toast titles after successful update (e.g., "Loxone Config 16.0.0.27", "✓ Miniserver 16.0.0.27") instead of generic "Verifying" text
+- `Version` parameter on `Send-MSStatusUpdate` so per-Miniserver completion events can carry the verified firmware version through to toast progress
+- `TargetVersion` propagated through Config and App component completion progress events for use in toast title formatting
+- BurntToast diagnostic logging on initialization — logs module version, path, and whether `-AppId` is supported by `Submit-BTNotification` and `Update-BTNotification`, so toast issues can be diagnosed from log files
+
+### Changed
+- BurntToast import now uses `Start-ThreadJob` (same-process) instead of `Start-Job` (separate process), so the loaded module assemblies are immediately available in the main session without a second import
+- BurntToast version selection is now host-aware:
+  - PowerShell 7+ prefers BurntToast 1.x (different WinRT code path, behaves better under MSIX/Canary builds)
+  - PowerShell 5.1 prefers BurntToast 0.x (supports `-AppId` for Loxone Config branding on toasts)
+  - Falls back to the latest installed version if the preferred major isn't available
+- Toast submission now passes `-AppId` only when the installed BurntToast version actually supports the parameter (0.x supports it, 1.x removed it), preventing parameter-binding errors on 1.x
+- Download verification logic restructured with clearer outcome paths:
+  - Size + CRC both match → fully verified (unchanged)
+  - CRC matches but size mismatches → accept download, log that Loxone metadata is likely stale (file integrity is confirmed by CRC)
+  - Both size and CRC mismatch on App or Config installers >50MB → accept and rely on Authenticode signature verification at install time (Loxone occasionally republishes installers without refreshing metadata)
+  - Verification failure messages now include expected vs. actual values for both size and CRC
+- Parallel workflow cleanup now clears all worker environment variables (`LOXONE_PARALLEL_MODE`, `LOXONE_PARALLEL_WORKER`, `LOXONE_WORKER_NAME`, `LOXONE_IS_WORKER`) in the `finally` block, preventing leaked state from breaking subsequent runs in the same PowerShell session
+- Same env-var cleanup also runs at script startup as a safety net, so crashes or interrupts in prior runs cannot cause toast initialization to fail on the next run
+- Release publisher's nested `claude -p` call now forces UTF-8 on stdin and console output encoding, preventing PowerShell 5.1 from corrupting the prompt content during the pipe; verbose flag and the empty `--tools ""` argument were removed, and the raw response is always saved to disk for post-mortem debugging
+- Bumped package version to 0.8.3 in all WinGet manifest files
+
+### Fixed
+- Miniserver credentials containing special characters (`#`, `<`, etc.) no longer crash URI parsing:
+  - `Get-MiniserverVersion`, `Update-MS`, `Get-MiniserverHardwareInfo`, `Test-MiniserverRequiresHTTPS`, and the parallel Miniserver worker now strip credentials from the URL manually with a regex *before* handing the cleaned `scheme://host` form to `[System.UriBuilder]` or `[System.Uri]`
+  - `#` was previously treated as the URI fragment delimiter, truncating the host portion and breaking all subsequent requests
+  - Credentials parsed by hand are also used to build the `PSCredential` object, avoiding the URL-decoding mismatch that `UriBuilder.Password` introduced for literal passwords
+- Miniserver update trigger URI in the parallel worker now uses the credential-stripped entry, so `Invoke-WebRequest` no longer receives a URI containing unencoded special characters
+- Update trigger verification call (`Invoke-MiniserverUpdate`) also strips credentials from `MSUri` before constructing `[System.Uri]`, populating the auth-header parameters from the URI when they aren't already supplied
+- Removed duplicate `if ($entryToParse -notmatch '^[a-zA-Z]+://')` scheme-prepend block in `Get-MiniserverVersion` that ran twice in a row
+
 ## [0.8.2] - 2026-03-05 13:46:16
 ### Added
 - Added environment prechecks gate that evaluates time window and Miniserver state conditions from config before proceeding with updates

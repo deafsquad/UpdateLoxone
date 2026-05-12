@@ -199,6 +199,16 @@ function Initialize-LoxoneToastAppId {
     try {
         $script:ResolvedToastAppId = Get-LoxoneToastAppId -PreFoundPath $script:InstalledExePath
         Write-SafeLog -Level Debug -Message "Resolved Toast AppId: '$($script:ResolvedToastAppId | Out-String)'"
+
+        # Log BurntToast version + AppId-param availability so we can diagnose toast issues from log files
+        $btMod = Get-Module -Name BurntToast -ErrorAction SilentlyContinue
+        if ($btMod) {
+            $submitHasAppId = (Get-Command Submit-BTNotification -ErrorAction SilentlyContinue).Parameters.ContainsKey('AppId')
+            $updateHasAppId = (Get-Command Update-BTNotification -ErrorAction SilentlyContinue).Parameters.ContainsKey('AppId')
+            Write-SafeLog -Level Info -Message "BurntToast version=$($btMod.Version) path=$($btMod.Path) | Submit-BTNotification -AppId supported: $submitHasAppId | Update-BTNotification -AppId supported: $updateHasAppId"
+        } else {
+            Write-SafeLog -Level Warn -Message "BurntToast module not loaded at Initialize-LoxoneToastAppId time"
+        }
     }
     finally { Exit-SafeFunction }
 }
@@ -1060,11 +1070,12 @@ function Initialize-Toast {
             DataBinding      = $Global:PersistentToastData
             ErrorAction      = 'Stop'
         }
-        
-        if ($script:ResolvedToastAppId) {
+
+        # BurntToast 0.x supports -AppId; 1.x removed it. Pass only when accepted.
+        if ($script:ResolvedToastAppId -and (Get-Command Submit-BTNotification).Parameters.ContainsKey('AppId')) {
             $params.AppId = $script:ResolvedToastAppId
         }
-        
+
         # Submit notification with scenario
         Submit-BTNotification @params
         $Global:PersistentToastInitialized = $true
@@ -1094,11 +1105,12 @@ function Update-Toast {
             DataBinding      = $Global:PersistentToastData
             ErrorAction      = 'Stop'
         }
-        
-        if ($script:ResolvedToastAppId) {
+
+        # BurntToast 0.x supports -AppId; 1.x removed it. Pass only when accepted.
+        if ($script:ResolvedToastAppId -and (Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) {
             $params.AppId = $script:ResolvedToastAppId
         }
-        
+
         Update-BTNotification @params
         Write-SafeLog -Level Debug -Message "Toast updated successfully"
     }
@@ -1198,11 +1210,12 @@ function Show-FinalStatusToast {
             UniqueIdentifier = $toastId
             ErrorAction      = 'Stop'
         }
-        
-        if ($script:ResolvedToastAppId) {
+
+        # BurntToast 0.x supports -AppId; 1.x removed it. Pass only when accepted.
+        if ($script:ResolvedToastAppId -and (Get-Command Submit-BTNotification).Parameters.ContainsKey('AppId')) {
             $params.AppId = $script:ResolvedToastAppId
         }
-        
+
         Submit-BTNotification @params
         Write-SafeLog -Level Info -Message "Final status toast submitted successfully"
     }

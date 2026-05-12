@@ -493,7 +493,7 @@ function Invoke-LoxoneDownload {
                             } else { Write-Log -Level DEBUG -Message "$($ActivityName): Skipping size check POST-DOWNLOAD." }
                             Write-Log -Level DEBUG -Message "$($ActivityName): POST-DOWNLOAD After size check, `$sizeVerified is: $sizeVerified"
 
-                            if ($sizeVerified -and -not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) {
+                            if (-not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) {
                                 Write-Log -Level DEBUG -Message "$($ActivityName): Checking CRC32 POST-DOWNLOAD..."
                                 Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: About to call Get-CRC32 for $DestinationPath"
                                 $localCRC32 = Get-CRC32 -InputFile $DestinationPath
@@ -540,34 +540,32 @@ function Invoke-LoxoneDownload {
                                     $crcVerified = $true 
                                     Write-Log -Level DEBUG -Message "$($ActivityName): CRC matches." 
                                 }
-                            } elseif (-not ([string]::IsNullOrWhiteSpace($ExpectedCRC32))) { Write-Log -Level DEBUG -Message "$($ActivityName): Size mismatch or CRC check skipped." }
-                            else { Write-Log -Level DEBUG -Message "$($ActivityName): Skipping CRC verification." }
+                            } else { Write-Log -Level DEBUG -Message "$($ActivityName): No ExpectedCRC32 provided, skipping CRC verification." }
 
                             if ($sizeVerified -and $crcVerified) {
+                                # Both size and CRC match - fully verified
                                 Write-Log -Message "$($ActivityName): Verification successful (Attempt $attempt)." -Level INFO
                                 try { Update-PersistentToast -StepName "$($ActivityName): Download verified." -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Verified): $($_.Exception.Message)" }
-                                $currentAttemptSuccess = $true 
+                                $currentAttemptSuccess = $true
+                            } elseif ($crcVerified -and -not $sizeVerified) {
+                                # CRC passes but size mismatches - Loxone metadata stale, file integrity confirmed
+                                Write-Log -Message "$($ActivityName): CRC verified but size mismatch (expected: $ExpectedFilesize, actual: $downloadedFileSize). Loxone metadata likely stale. Accepting download." -Level WARN
+                                try { Update-PersistentToast -StepName "$($ActivityName): Download verified (CRC OK)." -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (CRC OK): $($_.Exception.Message)" }
+                                $currentAttemptSuccess = $true
                             } elseif ($SkipCRCValidation -and $sizeVerified) {
-                                # If CRC validation is skipped and size is OK, accept it
-                                Write-Log -Message "$($ActivityName): Size verified, CRC validation skipped (Loxone metadata issue). Accepting download." -Level WARN
+                                # CRC validation explicitly skipped, size is OK
+                                Write-Log -Message "$($ActivityName): Size verified, CRC validation skipped. Accepting download." -Level WARN
                                 try { Update-PersistentToast -StepName "$($ActivityName): Download accepted (size OK)." -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Accepted): $($_.Exception.Message)" }
                                 $currentAttemptSuccess = $true
-                            } elseif ($ActivityName -match "App" -and $downloadedFileSize -gt 100000000) {
-                                # Special handling for App downloads with wrong metadata from Loxone
-                                if (-not $sizeVerified) {
-                                    Write-Log -Message "$($ActivityName): Size mismatch (expected: $ExpectedFilesize, actual: $downloadedFileSize) but file size reasonable (>100MB). Likely Loxone metadata issue. Accepting download." -Level WARN
-                                    $currentAttemptSuccess = $true
-                                } elseif (-not $crcVerified) {
-                                    Write-Log -Message "$($ActivityName): CRC mismatch but file size reasonable (>100MB). Likely Loxone metadata issue. Accepting download." -Level WARN
-                                    Write-Log -Message "  Expected CRC: $ExpectedCRC32, Actual CRC: $localCRC32" -Level WARN
-                                    $currentAttemptSuccess = $true
-                                } else {
-                                    # Both size and CRC failed, but shouldn't happen if we got here
-                                    throw "Both size and checksum verification failed."
-                                }
+                            } elseif (-not $crcVerified -and -not $sizeVerified -and $ActivityName -match "App|Config" -and $downloadedFileSize -gt 50000000) {
+                                # Both CRC and size fail - Loxone republished file with stale metadata
+                                # Both App (.exe) and Config (extracted .exe) have Authenticode signature verification as safety net
+                                Write-Log -Message "$($ActivityName): Both size and CRC mismatch (expected: $ExpectedFilesize/$ExpectedCRC32, actual: $downloadedFileSize/$localCRC32) but file size reasonable (>50MB). Loxone likely republished file. Accepting - installer signature will verify integrity." -Level WARN
+                                try { Update-PersistentToast -StepName "$($ActivityName): Download accepted (signature will verify)." -IsInteractive $IsInteractive -ErrorOccurred $false -AnyUpdatePerformed $AnyUpdatePerformed } catch { Write-Log -Level Warn -Message "Failed to update toast (Signature verify): $($_.Exception.Message)" }
+                                $currentAttemptSuccess = $true
                             } else {
-                                if (-not $sizeVerified) { throw "Incorrect file size." }
-                                if (-not $crcVerified) { throw "Incorrect checksum." }
+                                if (-not $sizeVerified) { throw "Incorrect file size (expected: $ExpectedFilesize, actual: $downloadedFileSize)." }
+                                if (-not $crcVerified) { throw "Incorrect checksum (expected: $ExpectedCRC32, actual: $localCRC32)." }
                             }
                         } catch { 
                             $errorMessage = "$($ActivityName): Verification failed for download attempt {0}: {1}" -f $attempt, $_.Exception.Message

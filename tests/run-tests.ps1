@@ -1132,9 +1132,11 @@ try {
                     UniqueIdentifier = $Global:LiveProgressToastId
                     DataBinding = $Global:LiveProgressToastData
                 }
-                # Always use the Loxone AppId
-                $submitParams.AppId = $loxoneAppId
-                
+                # BurntToast 0.x supports -AppId; 1.x removed it. Only pass when accepted.
+                if ((Get-Command Submit-BTNotification).Parameters.ContainsKey('AppId')) {
+                    $submitParams.AppId = $loxoneAppId
+                }
+
                 Submit-BTNotification @submitParams
                 $Global:LiveProgressToastInitialized = $true
                 Write-Verbose "LiveProgress toast initialized with Loxone branding"
@@ -1179,8 +1181,10 @@ try {
                             UniqueIdentifier = $Global:LiveProgressToastId
                             DataBinding = $Global:LiveProgressToastData
                         }
-                        # Always use the Loxone AppId
-                        $updateParams.AppId = $loxoneAppId
+                        # BurntToast 0.x supports -AppId; 1.x removed it. Only pass when accepted.
+                        if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) {
+                            $updateParams.AppId = $loxoneAppId
+                        }
                         Update-BTNotification @updateParams
                     }
                 }
@@ -1213,7 +1217,9 @@ try {
                 $Global:LiveProgressToastData.ProgressBarStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
                 $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount | ❌ Failed: $Global:LiveProgressFailedCount"
                 
-                Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId
+                $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData }
+                if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                Update-BTNotification @updArgs
             }
         }
         
@@ -1767,7 +1773,9 @@ function Invoke-TestsWithLiveProgress {
             $Global:LiveProgressToastData.OverallProgressValue = $progress
             $Global:LiveProgressToastData.DetailsText = "✅ Passed: $($testResults.PassedCount)`n❌ Failed: $($testResults.FailedCount)`n⏭️ Skipped: $($testResults.SkippedCount)"
             
-            Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+            $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+            if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+            Update-BTNotification @updArgs
         }
         
         # Create a mock PesterResult object for compatibility
@@ -1895,7 +1903,9 @@ function Invoke-TestsParallel {
                     $Global:LiveProgressToastData.StatusText = "$Global:LiveProgressTestTypeDisplay | $runtimeDisplay"
                     $runningCount = @($jobs | Where-Object { $_.State -eq 'Running' }).Count
                     $Global:LiveProgressToastData.TestProgressTitle = "Running $runningCount files..."
-                    Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                    $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+                    if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                    Update-BTNotification @updArgs
                     $lastToastUpdate = Get-Date
                 }
                 Start-Sleep -Milliseconds 200
@@ -1991,7 +2001,9 @@ function Invoke-TestsParallel {
                     $Global:LiveProgressToastData.OverallProgressStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
                     $Global:LiveProgressToastData.OverallProgressValue = $testPercent
                     $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount`n❌ Failed: $Global:LiveProgressFailedCount`n⏭️ Skipped: $Global:LiveProgressSkippedCount"
-                    Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                    $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+                    if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                    Update-BTNotification @updArgs
                     $lastToastUpdate = Get-Date
                 }
             }
@@ -2006,7 +2018,9 @@ function Invoke-TestsParallel {
                 $Global:LiveProgressToastData.ProgressBarValue = [Math]::Min(1.0, $completed / $parallelFiles.Count)
                 $runningCount = @($jobs | Where-Object { $_.State -eq 'Running' }).Count
                 $Global:LiveProgressToastData.TestProgressTitle = "Running $runningCount files..."
-                Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+                if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                Update-BTNotification @updArgs
                 $lastToastUpdate = Get-Date
             }
 
@@ -2064,7 +2078,9 @@ function Invoke-TestsParallel {
                 $Global:LiveProgressToastData.OverallProgressStatus = "$Global:LiveProgressTestCount / $Global:LiveProgressTotalTests tests"
                 $Global:LiveProgressToastData.OverallProgressValue = $testPercent
                 $Global:LiveProgressToastData.DetailsText = "✅ Passed: $Global:LiveProgressPassedCount`n❌ Failed: $Global:LiveProgressFailedCount`n⏭️ Skipped: $Global:LiveProgressSkippedCount"
-                Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+                if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                Update-BTNotification @updArgs
             }
         }
     }
@@ -2954,7 +2970,9 @@ if ($script:LiveProgressFullResults) {
                                 } else {
                                     '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
                                 }
-                                Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                                $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+                                if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                                Update-BTNotification @updArgs
                             } catch {
                                 Write-Verbose "Failed to update toast: $_"
                             }
@@ -2982,7 +3000,9 @@ if ($script:LiveProgressFullResults) {
                         } else {
                             '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
                         }
-                        Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                        $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+                        if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                        Update-BTNotification @updArgs
                     }
                 }
             }
@@ -3689,7 +3709,9 @@ if ($script:RunSystem -and $testCategories.System -and $testCategories.System.Co
                             
                             # Update notification
                             $loxoneAppId = Get-LoxoneConfigToastAppId
-                            Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                            $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+                            if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                            Update-BTNotification @updArgs
                         } catch {
                             Write-Verbose "Failed to update toast: $_"
                         }
@@ -3712,9 +3734,11 @@ if ($script:RunSystem -and $testCategories.System -and $testCategories.System.Co
                     } else {
                         '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
                     }
-                    Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+                    $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+                    if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+                    Update-BTNotification @updArgs
                 }
-                
+
                 # Show error details for failed tests if any
                 if ($systemResult.Results.PassedTests -lt $systemResult.Results.TotalTests) {
                     Write-TestLog "SYSTEM test error details:" -Color Yellow
@@ -4053,7 +4077,9 @@ if ($LiveProgress -and -not $script:LiveProgressNoToast -and (Get-Command Update
         } else {
             '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
         }
-        Update-BTNotification -UniqueIdentifier $Global:LiveProgressToastId -DataBinding $Global:LiveProgressToastData -AppId $loxoneAppId -ErrorAction SilentlyContinue
+        $updArgs = @{ UniqueIdentifier = $Global:LiveProgressToastId; DataBinding = $Global:LiveProgressToastData; ErrorAction = 'SilentlyContinue' }
+        if ((Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) { $updArgs.AppId = $loxoneAppId }
+        Update-BTNotification @updArgs
         Write-TestLog "Final toast notification updated with complete test results" -Level "DEBUG"
     } catch {
         Write-Verbose "Failed to update final toast: $_"

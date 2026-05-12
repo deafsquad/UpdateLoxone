@@ -94,14 +94,14 @@ param(
 trap {
     Write-Host "ERROR: Script terminated unexpectedly: $_" -ForegroundColor Red
     Write-Host "Cleaning up ThreadJobs..." -ForegroundColor Yellow
-    
+
     try {
         # Clean up all ThreadJobs
-        $allJobs = @(Get-Job -ErrorAction SilentlyContinue | Where-Object { 
+        $allJobs = @(Get-Job -ErrorAction SilentlyContinue | Where-Object {
             $_.Name -match "ProgressWorker|MS Worker|Config Worker|App Worker|Download Worker|Install Worker" -or
             $_.Location -match "UpdateLoxone|LoxoneUtils"
         })
-        
+
         if ($allJobs.Count -gt 0) {
             Write-Host "Found $($allJobs.Count) job(s) to clean up" -ForegroundColor Yellow
             foreach ($job in $allJobs) {
@@ -109,14 +109,14 @@ trap {
                 Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
             }
         }
-        
+
         if (Get-Command Remove-ThreadJobs -ErrorAction SilentlyContinue) {
             Remove-ThreadJobs -Context "Trap Handler Cleanup"
         }
     } catch {
         Write-Host "Error during trap cleanup: $_" -ForegroundColor Red
     }
-    
+
     # Exit with error code
     exit 1
 }
@@ -311,6 +311,13 @@ function Test-UpdatePrechecks {
 $Global:PersistentToastInitialized = $false # Ensure toast is created fresh each run
 $script:SystemRelaunchExitOccurred = $false # Flag to indicate if script is exiting due to system re-launch
 
+# Clean up any leaked env vars from previous runs in same PowerShell session
+# Worker threads set these but crashes/interrupts can prevent cleanup, causing toast init to fail on next run
+Remove-Item env:LOXONE_PARALLEL_MODE -ErrorAction SilentlyContinue
+Remove-Item env:LOXONE_PARALLEL_WORKER -ErrorAction SilentlyContinue
+Remove-Item env:LOXONE_WORKER_NAME -ErrorAction SilentlyContinue
+Remove-Item env:LOXONE_IS_WORKER -ErrorAction SilentlyContinue
+
 # --- Early SYSTEM Context Check and Minimal Module Load for Re-launch ---
 $script:IsRunningAsSystemEarlyCheck = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value -eq 'S-1-5-18'
 $script:InitialSystemInvocation = $script:IsRunningAsSystemEarlyCheck -and (-not $PSBoundParameters.ContainsKey('PassedLogFile') -or [string]::IsNullOrWhiteSpace($PassedLogFile))
@@ -482,27 +489,81 @@ if ($script:InitialSystemInvocation) {
         }
     }
 
-    # Step 2: Import with timeout (prevents hangs on remote/headless machines)
-    if (Get-Module -ListAvailable -Name BurntToast) {
+    # Step 2: Import with timeout via ThreadJob (same-process, module loaded into shared AppDomain)
+    # ThreadJob is killable on timeout, unlike direct Import-Module which can't be interrupted
+    if (Get-Module -Name BurntToast) {
+        $btMod = Get-Module -Name BurntToast
+        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast already loaded - version=$($btMod.Version), path=$($btMod.Path)" -ForegroundColor Green
+        $burntToastReady = $true
+    } elseif (Get-Module -ListAvailable -Name BurntToast) {
+        # Pick BurntToast version per host:
+        #  - PS 7+ (pwsh, often MSIX-packaged): prefer 1.x (uses ToastNotificationManagerCompat,
+        #    different code path that may behave better with WinRT under MSIX/Canary builds).
+        #  - PS 5.1 (powershell.exe, unpackaged): prefer 0.x — supports -AppId on Submit/Update-BTNotification
+        #    so toasts use Loxone Config branding.
+        # If preferred major isn't installed, fall back to whatever's available.
+        $preferredVersion = $null
+        $availableVersions = @(Get-Module -ListAvailable -Name BurntToast | Sort-Object Version)
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $cand = $availableVersions | Where-Object { $_.Version.Major -ge 1 } | Select-Object -Last 1
+            $rationale = '1.x preferred for PS 7+ (different WinRT code path)'
+        } else {
+            $cand = $availableVersions | Where-Object { $_.Version.Major -eq 0 } | Select-Object -Last 1
+            $rationale = '0.x preferred for PS 5.1 (supports -AppId for Loxone branding)'
+        }
+        if ($cand) {
+            $preferredVersion = $cand.Version
+            Write-Host "INFO: (UpdateLoxone.ps1) PSVersion=$($PSVersionTable.PSVersion) - $rationale. Selecting BurntToast $preferredVersion (available: $(($availableVersions | ForEach-Object { $_.Version }) -join ', '))" -ForegroundColor Cyan
+        } else {
+            Write-Host "INFO: (UpdateLoxone.ps1) PSVersion=$($PSVersionTable.PSVersion) - preferred major not installed, falling back to default (latest available: $($availableVersions[-1].Version))" -ForegroundColor Yellow
+        }
         Write-Host "INFO: (UpdateLoxone.ps1) Importing BurntToast (timeout: ${btTimeoutSec}s)..." -ForegroundColor Cyan
         try {
-            # Test import in a background job first to detect hangs
-            $importJob = Start-Job -ScriptBlock { Import-Module BurntToast -Force -ErrorAction Stop; "OK" }
-            $completed = $importJob | Wait-Job -Timeout $btTimeoutSec
-            if ($completed) {
-                $jobResult = Receive-Job $importJob -ErrorAction Stop
-                Remove-Job $importJob -Force -ErrorAction SilentlyContinue
-                # Job succeeded - now import in main session (should be fast, assemblies cached)
-                Import-Module BurntToast -Force -ErrorAction Stop
-                $burntToastReady = $true
-                Write-Host "INFO: (UpdateLoxone.ps1) BurntToast imported successfully." -ForegroundColor Green
+            # Ensure ThreadJob module is available (PS7+ built-in, PS5.1 needs module)
+            if (-not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) {
+                Import-Module ThreadJob -ErrorAction SilentlyContinue
+            }
+
+            if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue) {
+                # ThreadJob runs in the same process - module assemblies shared with main session
+                $importJob = Start-ThreadJob -ScriptBlock {
+                    param($Ver)
+                    if ($Ver) { Import-Module BurntToast -RequiredVersion $Ver -ErrorAction Stop }
+                    else      { Import-Module BurntToast -ErrorAction Stop }
+                } -ArgumentList $preferredVersion
+                $completed = $importJob | Wait-Job -Timeout $btTimeoutSec
+                if ($completed) {
+                    Receive-Job $importJob -ErrorAction Stop | Out-Null
+                    Remove-Job $importJob -Force -ErrorAction SilentlyContinue
+                    # ThreadJob loaded it in same process; verify it's accessible
+                    if (Get-Module -Name BurntToast) {
+                        $burntToastReady = $true
+                        $btMod = Get-Module -Name BurntToast
+                        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast imported (via ThreadJob) - version=$($btMod.Version), path=$($btMod.Path)" -ForegroundColor Green
+                    } else {
+                        # ThreadJob loaded in its runspace only - try quick main-session import
+                        # Since ThreadJob succeeded, assemblies are cached; main should be fast
+                        if ($preferredVersion) { Import-Module BurntToast -RequiredVersion $preferredVersion -ErrorAction Stop }
+                        else                   { Import-Module BurntToast -ErrorAction Stop }
+                        $burntToastReady = $true
+                        $btMod = Get-Module -Name BurntToast
+                        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast imported - version=$($btMod.Version), path=$($btMod.Path)" -ForegroundColor Green
+                    }
+                } else {
+                    Stop-Job $importJob -ErrorAction SilentlyContinue
+                    Remove-Job $importJob -Force -ErrorAction SilentlyContinue
+                    Write-Host "WARN: (UpdateLoxone.ps1) BurntToast import hung after ${btTimeoutSec}s - continuing without toasts." -ForegroundColor Yellow
+                }
             } else {
-                Stop-Job $importJob -ErrorAction SilentlyContinue
-                Remove-Job $importJob -Force -ErrorAction SilentlyContinue
-                Write-Host "WARN: (UpdateLoxone.ps1) BurntToast import timed out after ${btTimeoutSec}s (headless/remote session?)." -ForegroundColor Yellow
+                # Fallback: no ThreadJob available, direct import (no timeout possible)
+                Write-Host "WARN: (UpdateLoxone.ps1) ThreadJob unavailable - doing direct import (no timeout protection)." -ForegroundColor Yellow
+                if ($preferredVersion) { Import-Module BurntToast -RequiredVersion $preferredVersion -ErrorAction Stop }
+                else                   { Import-Module BurntToast -ErrorAction Stop }
+                $burntToastReady = $true
+                $btMod = Get-Module -Name BurntToast
+                Write-Host "INFO: (UpdateLoxone.ps1) BurntToast imported - version=$($btMod.Version), path=$($btMod.Path)" -ForegroundColor Green
             }
         } catch {
-            Remove-Job -Name * -Force -ErrorAction SilentlyContinue
             Write-Host "WARN: (UpdateLoxone.ps1) BurntToast import failed: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     } else {
@@ -879,61 +940,48 @@ if ($scriptContext.IsInteractive -and -not $scriptContext.IsAdminRun -and -not $
     }
 }
 
-# Clean up any dead threads from previous runs before starting
+# Clean up any dead/stale jobs from previous runs before starting.
+# Aggressive cleanup: a healthy previous run removes its own jobs, so anything not currently
+# Running at startup is by definition stale. Generic Start-ThreadJob auto-named jobs (Job1234)
+# don't match a Worker name regex, so we filter by STATE rather than name.
 Write-Log -Message "(UpdateLoxone.ps1) Checking for and cleaning up any dead threads from previous runs..." -Level INFO
 try {
-    # Get all existing jobs, especially ThreadJobs
     $existingJobs = @(Get-Job -ErrorAction SilentlyContinue)
     if ($existingJobs.Count -gt 0) {
-        Write-Log -Message "Found $($existingJobs.Count) existing job(s). Analyzing..." -Level WARN
-        
-        # Filter for dead/orphaned jobs that might be from previous UpdateLoxone runs
-        $suspiciousJobs = $existingJobs | Where-Object {
-            # Look for jobs that match our typical naming patterns
-            $_.Name -match "ProgressWorker|MS Worker|Config Worker|App Worker|Download Worker|Install Worker" -or
-            # Also check for jobs that have been running for a suspiciously long time
-            ($_.State -eq 'Running' -and $_.PSBeginTime -and ((Get-Date) - $_.PSBeginTime).TotalMinutes -gt 30) -or
-            # Jobs in failed/stopped state from our modules
-            ($_.State -in @('Failed', 'Stopped', 'Completed') -and $_.Location -match "UpdateLoxone|LoxoneUtils")
+        $stateSummary = ($existingJobs | Group-Object State | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ', '
+        Write-Log -Message "Found $($existingJobs.Count) existing job(s). States: $stateSummary" -Level WARN
+
+        # Anything not Running is stale. Running jobs are only removed if they match our worker
+        # patterns OR have been running > 30 minutes (orphaned from a long-dead previous run).
+        $toRemove = $existingJobs | Where-Object {
+            ($_.State -in @('Completed','Failed','Stopped','Disconnected','Suspended','Blocked')) -or
+            ($_.State -eq 'Running' -and $_.Name -match "ProgressWorker|MS Worker|Config Worker|App Worker|Download Worker|Install Worker") -or
+            ($_.State -eq 'Running' -and $_.PSBeginTime -and ((Get-Date) - $_.PSBeginTime).TotalMinutes -gt 30)
         }
-        
-        if ($suspiciousJobs.Count -gt 0) {
-            Write-Log -Message "Found $($suspiciousJobs.Count) suspicious job(s) that appear to be from previous UpdateLoxone runs:" -Level WARN
-            foreach ($job in $suspiciousJobs) {
-                $jobInfo = "Job: $($job.Name), State: $($job.State), ID: $($job.Id)"
-                if ($job.PSBeginTime) {
-                    $runtime = (Get-Date) - $job.PSBeginTime
-                    $jobInfo += ", Runtime: $($runtime.TotalMinutes.ToString('F1')) minutes"
+
+        $removed = 0; $failed = 0
+        foreach ($job in $toRemove) {
+            try {
+                if ($job.State -eq 'Running') {
+                    Stop-Job -Job $job -ErrorAction SilentlyContinue
+                    Start-Sleep -Milliseconds 200
                 }
-                Write-Log -Message "  - $jobInfo" -Level WARN
-                
-                # Force stop and remove the job
-                try {
-                    if ($job.State -eq 'Running') {
-                        Write-Log -Message "    Stopping job $($job.Id)..." -Level INFO
-                        Stop-Job -Job $job -ErrorAction SilentlyContinue
-                        Start-Sleep -Milliseconds 500  # Give it time to stop
-                    }
-                    
-                    Write-Log -Message "    Removing job $($job.Id)..." -Level INFO
-                    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-                    Write-Log -Message "    Successfully cleaned up job $($job.Id)" -Level INFO
-                } catch {
-                    Write-Log -Message "    Failed to clean up job $($job.Id): $_" -Level WARN
-                }
+                Remove-Job -Job $job -Force -ErrorAction Stop
+                $removed++
+            } catch {
+                $failed++
+                Write-Log -Message "  Failed to remove job ID=$($job.Id) Name='$($job.Name)' State=$($job.State): $($_.Exception.Message)" -Level WARN
             }
-            
-            # Verify cleanup
-            $remainingJobs = @(Get-Job -ErrorAction SilentlyContinue | Where-Object { 
-                $_.Name -match "ProgressWorker|MS Worker|Config Worker|App Worker|Download Worker|Install Worker"
-            })
-            if ($remainingJobs.Count -gt 0) {
-                Write-Log -Message "WARNING: Still have $($remainingJobs.Count) UpdateLoxone-related jobs after cleanup!" -Level WARN
-            } else {
-                Write-Log -Message "All UpdateLoxone-related jobs cleaned up successfully." -Level INFO
+        }
+        Write-Log -Message "Cleanup result: removed=$removed, failed=$failed" -Level INFO
+
+        $remaining = @(Get-Job -ErrorAction SilentlyContinue)
+        if ($remaining.Count -gt 0) {
+            Write-Log -Message "Remaining $($remaining.Count) job(s) (legitimately running or stuck):" -Level WARN
+            foreach ($job in $remaining) {
+                $rt = if ($job.PSBeginTime) { "$([Math]::Round(((Get-Date) - $job.PSBeginTime).TotalMinutes,1))min" } else { '?' }
+                Write-Log -Message "  - ID=$($job.Id) Name='$($job.Name)' State=$($job.State) Runtime=$rt" -Level WARN
             }
-        } else {
-            Write-Log -Message "No suspicious UpdateLoxone-related jobs found." -Level INFO
         }
     } else {
         Write-Log -Message "No existing jobs found. Starting with clean slate." -Level INFO
@@ -2443,14 +2491,18 @@ if ($allJobsToCheck.Count -gt 0) {
         }
     }
     
-    # Then stop all other UpdateLoxone-related jobs
-    $allJobs = @(Get-Job -ErrorAction SilentlyContinue | Where-Object { 
+    # Then stop all other UpdateLoxone-related jobs.
+    # Broader filter: include generic Start-ThreadJob auto-named jobs that don't match
+    # explicit worker name patterns. Any job finished or older than 30min is also stale.
+    $allJobs = @(Get-Job -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -match "MS Worker|Config Worker|App Worker|Download Worker|Install Worker|ProgressWorker" -or
-        $_.Location -match "UpdateLoxone|LoxoneUtils"
+        $_.Location -match "UpdateLoxone|LoxoneUtils" -or
+        ($_.State -in @('Completed','Failed','Stopped','Disconnected','Suspended','Blocked')) -or
+        ($_.State -eq 'Running' -and $_.PSBeginTime -and ((Get-Date) - $_.PSBeginTime).TotalMinutes -gt 30)
     })
-    
+
     if ($allJobs.Count -gt 0) {
-        Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: Found $($allJobs.Count) UpdateLoxone-related job(s) to clean up"
+        Write-Log -Level INFO -Message "(UpdateLoxone.ps1) FINALLY: Found $($allJobs.Count) stale job(s) to clean up"
         foreach ($job in $allJobs) {
             Write-Log -Level INFO -Message "  Stopping job: $($job.Name) (ID: $($job.Id), State: $($job.State))"
             Stop-Job -Job $job -Force -ErrorAction SilentlyContinue

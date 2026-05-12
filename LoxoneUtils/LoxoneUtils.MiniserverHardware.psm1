@@ -52,8 +52,13 @@ function Get-MiniserverHardwareInfo {
     }
     
     try {
-        # Parse the MS entry to get the base URL
-        $uri = [System.Uri]$MSEntry
+        # Parse the MS entry to get the base URL - strip credentials first because
+        # special chars (#, <) in passwords break [System.Uri] casting.
+        $cleanEntry = $MSEntry
+        if ($MSEntry -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+            $cleanEntry = "$($Matches.scheme)://$($Matches.hostinfo)"
+        }
+        $uri = [System.Uri]$cleanEntry
         $baseUrl = "$($uri.Scheme)://$($uri.Host)"
         if ($uri.Port -ne 80 -and $uri.Port -ne 443) {
             $baseUrl += ":$($uri.Port)"
@@ -263,10 +268,15 @@ function Test-MiniserverRequiresHTTPS {
     )
     
     try {
-        # Parse the entry
-        $uri = [System.Uri]$MSEntry
+        # Parse the entry - strip credentials first because special chars (#, <) in passwords
+        # break [System.Uri] casting (# is the URI fragment delimiter).
+        $cleanEntry = $MSEntry
+        if ($MSEntry -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+            $cleanEntry = "$($Matches.scheme)://$($Matches.hostinfo)"
+        }
+        $uri = [System.Uri]$cleanEntry
         $host = $uri.Host
-        
+
         # Test HTTP
         $httpUrl = "http://$host/dev/cfg/version"
         $httpWorks = $false

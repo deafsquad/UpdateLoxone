@@ -22,6 +22,9 @@ function Send-MSStatusUpdate {
         [string]$HostForLogging,
 
         [Parameter(Mandatory=$false)]
+        [string]$Version = $null,
+
+        [Parameter(Mandatory=$false)]
         [System.Collections.Concurrent.ConcurrentQueue[hashtable]]$ProgressQueue = $null,
 
         [Parameter(Mandatory=$false)]
@@ -36,6 +39,7 @@ function Send-MSStatusUpdate {
         Timestamp = Get-Date
         IP = $HostForLogging
     }
+    if ($Version) { $statusUpdate.Version = $Version }
 
     # REAL-TIME: Send to ProgressQueue immediately if provided
     if ($null -ne $ProgressQueue) {
@@ -283,23 +287,17 @@ function Get-MiniserverVersion {
             }
         }
         if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
-        if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
-        
-        # Use UriBuilder for scheme, host, and constructing the final version check URI
-        $uriBuilderForHostAndPath = [System.UriBuilder]$entryToParse # This parses the whole string initially
-        $result.MSIP = $uriBuilderForHostAndPath.Host
-        $msIP = $result.MSIP
-        # $parsedScheme = $uriBuilderForHostAndPath.Scheme # Scheme will be determined later based on HTTP/HTTPS attempts
 
-        # Manually parse username and password from the original $entryToParse to avoid URL-decoding issues with UriBuilder.Password
-        # These will be used specifically for constructing the Basic Auth header.
+        # Manually parse credentials FIRST to avoid UriBuilder choking on special chars (#, <, etc.) in passwords
         $usernameForAuthHeader = $null
         $passwordForAuthHeader = $null
+        $cleanUriForBuilder = $entryToParse
         if ($entryToParse -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
             $credPartFromFile = $Matches.credentials
+            $cleanUriForBuilder = "$($Matches.scheme)://$($Matches.hostinfo)"
             if ($credPartFromFile -match '^(?<user>[^:]+):(?<pass>.+)$') {
                 $usernameForAuthHeader = $Matches.user
-                $passwordForAuthHeader = $Matches.pass # This is the literal password string from the input
+                $passwordForAuthHeader = $Matches.pass # Literal password from file, never URL-parsed
                 Write-Log -Level DEBUG -Message ("$($FunctionName): Manually parsed Username for Auth Header: '{0}'" -f $usernameForAuthHeader)
                 Write-Log -Level DEBUG -Message ("$($FunctionName): Manually parsed Password for Auth Header (length): {0}" -f $passwordForAuthHeader.Length)
             } else {
@@ -309,17 +307,19 @@ function Get-MiniserverVersion {
             Write-Log -Level DEBUG -Message ("$($FunctionName): MSEntry '$($entryToParse -replace "([Pp]assword=)[^;]+", '$1********')' does not seem to contain user:pass@host format for direct manual parsing for Auth Header.")
         }
 
-        # Create $credential object using UriBuilder's properties.
-        # This $credential object might be used by Invoke-WebRequest for other auth mechanisms (e.g. NTLM on HTTPS)
-        # or if our manual parsing for the Auth Header fails.
-        # Note: $uriBuilderForHostAndPath.Password IS URL-decoded.
-        if (-not ([string]::IsNullOrWhiteSpace($uriBuilderForHostAndPath.UserName))) {
+        # Use UriBuilder on the credential-stripped URL only (scheme://host) to safely extract host
+        $uriBuilderForHostAndPath = [System.UriBuilder]$cleanUriForBuilder
+        $result.MSIP = $uriBuilderForHostAndPath.Host
+        $msIP = $result.MSIP
+
+        # Create $credential object from manually-parsed credentials
+        # Used by Invoke-WebRequest for auth mechanisms (e.g. NTLM on HTTPS)
+        if (-not ([string]::IsNullOrWhiteSpace($usernameForAuthHeader))) {
             try {
                 # Ensure ConvertTo-SecureString is available - handle type data conflicts
                 if (-not (Get-Command ConvertTo-SecureString -ErrorAction SilentlyContinue)) {
                     Write-Log -Level WARN -Message ("$($FunctionName): ConvertTo-SecureString not available, attempting to import Microsoft.PowerShell.Security module...")
                     try {
-                        # First try to remove any conflicting type data
                         $typeData = Get-TypeData -TypeName "System.Security.AccessControl.ObjectSecurity" -ErrorAction SilentlyContinue
                         if ($typeData) {
                             Remove-TypeData -TypeData $typeData -ErrorAction SilentlyContinue
@@ -327,24 +327,21 @@ function Get-MiniserverVersion {
                         Import-Module Microsoft.PowerShell.Security -Force -DisableNameChecking -ErrorAction Stop
                     } catch {
                         Write-Log -Level ERROR -Message ("$($FunctionName): Failed to import security module: $_")
-                        # Fall back to creating credential without ConvertTo-SecureString
                         $credential = $null
                         throw "Security module load failed: $_"
                     }
                 }
-                
-                $securePasswordFromUriBuilder = $uriBuilderForHostAndPath.Password | ConvertTo-SecureString -AsPlainText -Force
-                $credential = New-Object System.Management.Automation.PSCredential($uriBuilderForHostAndPath.UserName, $securePasswordFromUriBuilder)
-                Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName (for general \$credential obj): '{0}'" -f $uriBuilderForHostAndPath.UserName)
-                Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.Password (for general \$credential obj, URL-decoded, length): {0}" -f $uriBuilderForHostAndPath.Password.Length)
-                Write-Log -Level DEBUG -Message ("$($FunctionName): General \$credential object created for user: '{0}'" -f $credential.UserName)
+
+                $securePassword = $passwordForAuthHeader | ConvertTo-SecureString -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($usernameForAuthHeader, $securePassword)
+                Write-Log -Level DEBUG -Message ("$($FunctionName): Credential object created for user: '{0}'" -f $credential.UserName)
             } catch {
                 Write-Log -Level ERROR -Message ("$($FunctionName): Failed to create credential object: $_")
                 $result.Error = "Failed to create credential: $_"
                 return $result
             }
         } else {
-            Write-Log -Level DEBUG -Message ("$($FunctionName): UriBuilder.UserName is NULL/Whitespace. No general \$credential object created from UriBuilder properties.")
+            Write-Log -Level DEBUG -Message ("$($FunctionName): No credentials found. No \$credential object created.")
         }
         
         # If $usernameForAuthHeader is still null (manual parsing failed or not applicable) AND $credential exists,
@@ -359,10 +356,8 @@ function Get-MiniserverVersion {
         # Construct the $versionUri (e.g., http://e1lox/dev/cfg/version or https://e1lox/dev/cfg/version)
         # The scheme for $versionUri will be determined by the HTTPS/HTTP logic later.
         # For now, build it based on the original scheme and host, then clear userinfo for this specific URI.
-        $tempUriBuilderForVersionPath = [System.UriBuilder]$entryToParse
+        $tempUriBuilderForVersionPath = [System.UriBuilder]$cleanUriForBuilder
         $tempUriBuilderForVersionPath.Path = "/dev/cfg/version"
-        $tempUriBuilderForVersionPath.Password = $null
-        $tempUriBuilderForVersionPath.UserName = $null
         $versionUri = $tempUriBuilderForVersionPath.Uri.AbsoluteUri # This will be the base, scheme might change
 
         Write-Log -Message ("$($FunctionName): Checking MS version for '{0}' (parsed host)." -f $msIP) -Level DEBUG
@@ -819,24 +814,25 @@ try {
         Write-Log -Level DEBUG -Message ("$($FunctionName): Extracted URL from cached entry: '{0}'" -f ($entryToParse -replace "([Pp]assword=)[^;]+", '$1********'))
     }
     if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
-    
-    $uriBuilderForHostAndPath = [System.UriBuilder]$entryToParse
-    $msIP = $uriBuilderForHostAndPath.Host
-    
-    # Manually parse username and password for Basic Auth header
+
+    # Parse credentials FIRST to avoid UriBuilder choking on special chars (#, <, etc.) in passwords
+    $cleanUriForBuilder = $entryToParse
     if ($entryToParse -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
         $credPartFromFile = $Matches.credentials
+        $cleanUriForBuilder = "$($Matches.scheme)://$($Matches.hostinfo)"
         if ($credPartFromFile -match '^(?<user>[^:]+):(?<pass>.+)$') {
             $usernameForAuthHeader = $Matches.user
             $passwordForAuthHeader = $Matches.pass
         }
     }
 
-    # Fallback to UriBuilder's properties if manual parsing failed, for $credential object
-    if (-not ([string]::IsNullOrWhiteSpace($uriBuilderForHostAndPath.UserName))) {
-        $securePasswordFromUriBuilder = $uriBuilderForHostAndPath.Password | ConvertTo-SecureString -AsPlainText -Force
-        $credential = New-Object System.Management.Automation.PSCredential($uriBuilderForHostAndPath.UserName, $securePasswordFromUriBuilder)
-        if ([string]::IsNullOrEmpty($usernameForAuthHeader)) { $usernameForAuthHeader = $credential.UserName } # Populate if manual parse was empty
+    $uriBuilderForHostAndPath = [System.UriBuilder]$cleanUriForBuilder
+    $msIP = $uriBuilderForHostAndPath.Host
+
+    # Create $credential object from manually-parsed credentials
+    if (-not ([string]::IsNullOrWhiteSpace($usernameForAuthHeader))) {
+        $securePassword = $passwordForAuthHeader | ConvertTo-SecureString -AsPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential($usernameForAuthHeader, $securePassword)
     }
 
     # Determine the target update level string for comparison
@@ -846,11 +842,9 @@ try {
         Write-Log -Level DEBUG -Message ("$($FunctionName): Translated ConfiguredUpdateChannel 'Test' to 'Alpha' for comparison.")
     }
 
-    # Construct URI for /dev/cfg/updatelevel
-    $updateLevelUriBuilder = [System.UriBuilder]$entryToParse # Start with the full entry
+    # Construct URI for /dev/cfg/updatelevel (credential-free)
+    $updateLevelUriBuilder = [System.UriBuilder]$cleanUriForBuilder
     $updateLevelUriBuilder.Path = "/dev/cfg/updatelevel"
-    $updateLevelUriBuilder.Password = $null # Clear userinfo for the request URI itself
-    $updateLevelUriBuilder.UserName = $null
     
     # The scheme (http/https) will be handled by the request logic below
     $baseUpdateLevelUri = $updateLevelUriBuilder.Uri.AbsoluteUri
@@ -1088,25 +1082,14 @@ try { # Main function try
                 Write-Log -Level DEBUG -Message ("Update-MS: Extracted URL from cached entry: '{0}'" -f ($entryToParse -replace "([Pp]assword=)[^;]+", '$1********'))
             }
             if ($entryToParse -notmatch '^[a-zA-Z]+://') { $entryToParse = "http://" + $entryToParse }
-            $uriBuilder = [System.UriBuilder]$entryToParse
-            $msIP = $uriBuilder.Host
-            $msStatusObject.MSIP = $msIP
 
-            if (-not ([string]::IsNullOrWhiteSpace($uriBuilder.UserName))) {
-                $securePassword = $uriBuilder.Password | ConvertTo-SecureString -AsPlainText -Force
-                $credential = New-Object System.Management.Automation.PSCredential($uriBuilder.UserName, $securePassword)
-            }
-            
-            $uriBuilder.Path = "/dev/cfg/version"
-            $uriBuilder.Password = $null; $uriBuilder.UserName = $null
-            $versionUriForCheck = $uriBuilder.Uri.AbsoluteUri
-
-            # Manually parse username and password from $entryToParse for Auth Header in Update-MS InitialCheck
+            # Parse credentials FIRST to avoid UriBuilder choking on special chars (#, <, etc.) in passwords
             $usernameForAuthHeaderUpdateMS = $null
             $passwordForAuthHeaderUpdateMS = $null
-            # $entryToParse already has scheme, e.g., http://user:pass@host
+            $cleanUriForBuilder = $entryToParse
             if ($entryToParse -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
                 $credPartFromEntry = $Matches.credentials
+                $cleanUriForBuilder = "$($Matches.scheme)://$($Matches.hostinfo)"
                 if ($credPartFromEntry -match '^(?<user>[^:]+):(?<pass>.+)$') {
                     $usernameForAuthHeaderUpdateMS = $Matches.user
                     $passwordForAuthHeaderUpdateMS = $Matches.pass
@@ -1118,6 +1101,18 @@ try { # Main function try
             } else {
                 Write-Log -Level DEBUG -Message ("Update-MS InitialCheck: Entry '$($entryToParse -replace "([Pp]assword=)[^;]+", '$1********')' does not seem to contain user:pass@host format for direct manual parsing for Auth Header.")
             }
+
+            $uriBuilder = [System.UriBuilder]$cleanUriForBuilder
+            $msIP = $uriBuilder.Host
+            $msStatusObject.MSIP = $msIP
+
+            if (-not ([string]::IsNullOrWhiteSpace($usernameForAuthHeaderUpdateMS))) {
+                $securePassword = $passwordForAuthHeaderUpdateMS | ConvertTo-SecureString -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($usernameForAuthHeaderUpdateMS, $securePassword)
+            }
+
+            $uriBuilder.Path = "/dev/cfg/version"
+            $versionUriForCheck = $uriBuilder.Uri.AbsoluteUri
             
             Write-Log -Message ("Checking current MS version for '{0}'..." -f $msIP) -Level "INFO"
             $responseObject = $null; $initialVersionCheckSuccess = $false; $currentNormalizedVersion = $null
@@ -1277,7 +1272,7 @@ try { # Main function try
                 # Toast updates are handled by the main thread, not in worker context
                 # Progress is reported through return values and callbacks
                 
-                $autoupdateUriBuilder = [System.UriBuilder]$entryToParse; $autoupdateUriBuilder.Path = "/dev/sys/autoupdate"
+                $autoupdateUriBuilder = [System.UriBuilder]$cleanUriForBuilder; $autoupdateUriBuilder.Path = "/dev/sys/autoupdate"
                 $uriForUpdateTrigger = $autoupdateUriBuilder.Uri.AbsoluteUri
                 
                 $invokeParams = @{
@@ -1408,11 +1403,25 @@ $oldProgressPreference = $ProgressPreference
 
 try { # Main try for ProgressPreference and SSL Callback restoration
     $ProgressPreference = 'SilentlyContinue'
-    
-    $uriObjectForInvoke = [System.Uri]$MSUri
+
+    # Strip credentials from MSUri to avoid URI parsing crashes on special chars (#, <, etc.)
+    $cleanMSUri = $MSUri
+    if ($MSUri -match '^(?<scheme>[^:]+)://(?<credentials>[^@]+)@(?<hostinfo>.+)$') {
+        $cleanMSUri = "$($Matches.scheme)://$($Matches.hostinfo)"
+        # Populate auth params from URI if not already provided
+        if ([string]::IsNullOrEmpty($UsernameForAuthHeader)) {
+            $credPart = $Matches.credentials
+            if ($credPart -match '^(?<user>[^:]+):(?<pass>.+)$') {
+                $UsernameForAuthHeader = $Matches.user
+                if ($null -eq $PasswordForAuthHeader) { $PasswordForAuthHeader = $Matches.pass }
+            }
+        }
+    }
+
+    $uriObjectForInvoke = [System.Uri]$cleanMSUri
     $hostForPingInInvoke = $uriObjectForInvoke.Host
     $schemeInInvoke = $uriObjectForInvoke.Scheme
-    $verificationUriBuilder = [System.UriBuilder]$MSUri; $verificationUriBuilder.Path = "/dev/cfg/version"
+    $verificationUriBuilder = [System.UriBuilder]$cleanMSUri; $verificationUriBuilder.Path = "/dev/cfg/version"
     $verificationUriForPolling = $verificationUriBuilder.Uri.AbsoluteUri
 
     $invokeResult.StatusMessage = "TriggeringUpdate"
@@ -1459,7 +1468,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         try { # For IWR - Trigger
             # Increase timeout for HTTPS connections which may take longer
             $triggerTimeout = if ($schemeInInvoke -eq 'https') { 15 } else { 10 }
-            $triggerParams = @{ Uri = $MSUri; Method = 'Get'; TimeoutSec = $triggerTimeout; ErrorAction = 'Stop' }
+            $triggerParams = @{ Uri = $cleanMSUri; Method = 'Get'; TimeoutSec = $triggerTimeout; ErrorAction = 'Stop' }
             
             # Log credential availability for debugging - be extra defensive for PS7
             $pwdTypeForLog = "unknown"
@@ -1863,7 +1872,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     Write-Log -Message ("UPDATE SUCCESSFUL for MS {0}: Now running version {1}" -f $hostForPingInInvoke, $NormalizedDesiredVersion) -Level INFO
                     
                     # Add status update for successful verification (REAL-TIME)
-                    Send-MSStatusUpdate -State 'Completed' -Progress 100 -Message "Updated to $NormalizedDesiredVersion" `
+                    Send-MSStatusUpdate -State 'Completed' -Progress 100 -Message "Updated to $NormalizedDesiredVersion" -Version $NormalizedDesiredVersion `
                         -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
                     
                     # Success is reported through ProgressReporter, not direct toast updates
