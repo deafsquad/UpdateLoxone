@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.5] - 2026-05-30 04:09:22
+### Added
+- Authoritative Miniserver update outcome detection via the Miniserver's own `/log/def.log`. Because Loxone exposes no HTTP update-status API, the polling loop now downloads `def.log` over FTP to learn the real success/failure result instead of inferring it solely from the version number:
+  - Probes every 3rd poll attempt (~30s), only once the update is in progress (or after 60s have elapsed), and only when FTP credentials are available
+  - Reads the active, actively-written log in ASCII mode (binary transfer 502s on the open file)
+  - Matches the Miniserver firmware's own log strings — failure markers `Update fehlgeschlagen` / `Update error file`, success marker `Update Miniserver <version> erfolgreich` — all centralized as named regex variables
+  - Filters by line timestamp against a per-run baseline (trigger time minus 3 minutes) so historical entries from prior updates are ignored
+  - On a detected failure, polling stops immediately and the real failure reason is reported via `Send-MSStatusUpdate` rather than waiting out the full timeout; a detected success marker is logged while version verification continues
+- `UpdateFailedReason` field on the Miniserver invoke-result object, carrying the authoritative failure reason read from the Miniserver's `def.log`
+
+### Changed
+- Final Miniserver failure reporting now preserves the authoritative `def.log` reason when one was captured (status `UpdateFailed_DefLog: <reason>`), instead of overwriting it with the generic version-mismatch/timeout message; the duplicate failure status update is suppressed in this case since it was already sent at detection time
+- Bumped package version to 0.8.5 in all WinGet manifest files, updated installer URL and SHA256 for the v0.8.5 MSI, and set the release date to 2026-05-30
+
 ## [0.8.4] - 2026-05-13 00:25:48
 ### Added
 - Miniserver version is now shown in toast titles after successful update (e.g., "Loxone Config 16.0.0.27", "✓ Miniserver 16.0.0.27") instead of generic "Verifying" text

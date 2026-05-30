@@ -1389,7 +1389,7 @@ try {
     Write-Log -Level WARN -Message "Failed to check parameter types (expected in PS7 parallel): $_"
 }
 
-$invokeResult = [PSCustomObject]@{ 
+$invokeResult = [PSCustomObject]@{
     VerificationSuccess = $false
     ReportedVersion = $null
     ErrorOccurredInInvoke = $false
@@ -1397,6 +1397,7 @@ $invokeResult = [PSCustomObject]@{
     CurrentState = ''
     LastUpdateStatus = ''
     LastStatusCode = ''
+    UpdateFailedReason = $null   # Authoritative failure reason read from the MS's own /log/def.log
 }
 $originalCallback = $null; $callbackChanged = $false
 $oldProgressPreference = $ProgressPreference
@@ -1731,6 +1732,16 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         $ftpVersionPrefix = ($NormalizedDesiredVersion -split '\.' | ForEach-Object { $_.PadLeft(2, '0') }) -join ''
         Write-Log -Message ("FTP download probe: version prefix '{0}', credentials: {1}" -f $ftpVersionPrefix, $(if ($ftpCredential) { 'available' } else { 'none' })) -Level DEBUG
 
+        # def.log outcome probe setup - the MS writes the authoritative update result to /log/def.log.
+        # Loxone exposes no HTTP update-status API, so this log is the source of truth for success/failure.
+        # The markers below are the MS firmware's own log strings (German + path tokens), centralized here.
+        $defLogProbeInterval = 3                                          # Every 3rd attempt (~30s)
+        $defLogBaseline = $startTime.AddMinutes(-3)                       # Ignore historical entries before this run
+        $defLogVerdictReached = $false
+        $defLogFailureRegex = 'Update fehlgeschlagen|Update error file'   # MS firmware failure markers
+        $defLogSuccessRegex = 'Update Miniserver\s+\S+\s+erfolgreich'     # MS firmware success marker
+        $defLogTsRegex = '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})'         # def.log line timestamp prefix
+
         $Attempts = 0; $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
         $LastPollStatusMessage = "Initiating..."
         $LastStageCode = ""
@@ -1817,6 +1828,56 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     Write-Log -Message ("[FTP_PROBE] Probe failed for MS {0}: {1}" -f $hostForPingInInvoke, $_.Exception.Message) -Level DEBUG
                 }
             }
+
+            # ---- def.log outcome probe (authoritative MS-side success/failure) ----
+            # Read the MS's own /log/def.log to learn the real update result and bail out early with
+            # the actual reason, instead of polling the version number until the full timeout. The active
+            # def.log is served only in ASCII mode (binary 502s on the open, actively-written file). Only
+            # lines at/after our trigger baseline count (the log holds months of prior update entries).
+            if ($null -ne $ftpCredential -and -not $defLogVerdictReached -and ($Attempts % $defLogProbeInterval -eq 0) -and `
+                ($loggedUpdatingStatus -or (((Get-Date) - $startTime).TotalSeconds -ge 60))) {
+                $defLogFailLine = $null; $defLogOkLine = $null
+                try {
+                    $dlReq = [System.Net.FtpWebRequest]::Create("ftp://${hostForPingInInvoke}/log/def.log")
+                    $dlReq.Method = [System.Net.WebRequestMethods+Ftp]::DownloadFile
+                    $dlReq.Credentials = $ftpCredential
+                    $dlReq.Timeout = 8000; $dlReq.ReadWriteTimeout = 8000
+                    $dlReq.UsePassive = $true; $dlReq.UseBinary = $false; $dlReq.KeepAlive = $false
+                    $dlResp = $dlReq.GetResponse()
+                    $dlReader = New-Object System.IO.StreamReader($dlResp.GetResponseStream())
+                    $defLogText = $dlReader.ReadToEnd()
+                    $dlReader.Close(); $dlResp.Close()
+
+                    foreach ($dl in ($defLogText -split "`n")) {
+                        if ($dl -match $defLogTsRegex) {
+                            $lineTime = [DateTime]::MinValue
+                            if ([DateTime]::TryParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$lineTime)) {
+                                if ($lineTime -ge $defLogBaseline) {
+                                    # Keep the FIRST failure line (the "Update error file ... <code>" detail line)
+                                    if (-not $defLogFailLine -and $dl -match $defLogFailureRegex) { $defLogFailLine = $dl.Trim() }
+                                    elseif (-not $defLogOkLine -and $dl -match $defLogSuccessRegex) { $defLogOkLine = $dl.Trim() }
+                                }
+                            }
+                        }
+                    }
+                } catch {
+                    Write-Log -Message ("[DEFLOG] Probe failed for MS {0}: {1}" -f $hostForPingInInvoke, $_.Exception.Message) -Level DEBUG
+                }
+
+                if ($defLogFailLine) {
+                    $defLogVerdictReached = $true
+                    $invokeResult.UpdateFailedReason = $defLogFailLine
+                    $invokeResult.CurrentState = 'Failed'
+                    $invokeResult.StatusMessage = "UpdateFailed_DefLog"
+                    Write-Log -Message ("[DEFLOG] MS {0} reported update FAILURE: {1}" -f $hostForPingInInvoke, $defLogFailLine) -Level ERROR
+                    Send-MSStatusUpdate -State 'Failed' -Progress 0 -Message ("Update failed on miniserver: {0}" -f $defLogFailLine) `
+                        -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                    break  # Authoritative failure - stop polling immediately
+                } elseif ($defLogOkLine) {
+                    Write-Log -Message ("[DEFLOG] MS {0} reported update SUCCESS marker: {1} (awaiting version verification)" -f $hostForPingInInvoke, $defLogOkLine) -Level INFO
+                }
+            }
+            # ---- end def.log outcome probe ----
 
             try {
             # Add retry logic for each poll attempt
@@ -2192,16 +2253,24 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     } # End while
     Write-Log -Message ("Polling loop ended for MS {0}. Success: {1}, Final status: {2}" -f $hostForPingInInvoke, $invokeResult.VerificationSuccess, $LastPollStatusMessage) -Level INFO
     if (-not $invokeResult.VerificationSuccess) {
-        if ($msResponsive) { $invokeResult.StatusMessage = ("VerificationFailed_Timeout_VersionMismatch_FinalReported_{0}" -f $invokeResult.ReportedVersion) }
-        else { $invokeResult.StatusMessage = "VerificationFailed_Timeout_NoResponse" }
-        Write-Log -Message ("FAILURE: MS {0} - {1}" -f $hostForPingInInvoke, $invokeResult.StatusMessage) -Level ERROR
-        
-        # Add failure status update (REAL-TIME)
-        $failureMsg = if ($msResponsive) { "Update timeout - version mismatch" } else { "No response from miniserver" }
-        Send-MSStatusUpdate -State 'Failed' -Progress 0 -Message $failureMsg `
-            -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
-        
-        # Failure is reported through ProgressReporter, not direct toast updates
+        if ($invokeResult.UpdateFailedReason) {
+            # Authoritative failure already captured from the MS's own def.log - preserve the real
+            # reason instead of the generic version-mismatch timeout. Failed status already sent at
+            # detection time, so don't double-send here.
+            $invokeResult.StatusMessage = ("UpdateFailed_DefLog: {0}" -f $invokeResult.UpdateFailedReason)
+            Write-Log -Message ("FAILURE: MS {0} - MS def.log reported: {1}" -f $hostForPingInInvoke, $invokeResult.UpdateFailedReason) -Level ERROR
+        } else {
+            if ($msResponsive) { $invokeResult.StatusMessage = ("VerificationFailed_Timeout_VersionMismatch_FinalReported_{0}" -f $invokeResult.ReportedVersion) }
+            else { $invokeResult.StatusMessage = "VerificationFailed_Timeout_NoResponse" }
+            Write-Log -Message ("FAILURE: MS {0} - {1}" -f $hostForPingInInvoke, $invokeResult.StatusMessage) -Level ERROR
+
+            # Add failure status update (REAL-TIME)
+            $failureMsg = if ($msResponsive) { "Update timeout - version mismatch" } else { "No response from miniserver" }
+            Send-MSStatusUpdate -State 'Failed' -Progress 0 -Message $failureMsg `
+                -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+
+            # Failure is reported through ProgressReporter, not direct toast updates
+        }
     }
 
     # Add collected status updates to the result
