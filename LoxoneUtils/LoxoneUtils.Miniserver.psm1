@@ -1741,6 +1741,16 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         $defLogFailureRegex = 'Update fehlgeschlagen|Update error file'   # MS firmware failure markers
         $defLogSuccessRegex = 'Update Miniserver\s+\S+\s+erfolgreich'     # MS firmware success marker
         $defLogTsRegex = '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})'         # def.log line timestamp prefix
+        # Crash-reboot failmode (observed 2026-06-10, dying SD card): MS logs 'Start Auto Update', then
+        # reboots WITHOUT the commanded 'Reboot Loxone Miniserver' marker and without any outcome marker,
+        # coming back on the old version. A bare boot line post-baseline with no command marker = crash.
+        $defLogCmdRebootRegex = ';Reboot Loxone Miniserver'               # Commanded (legitimate) reboot marker
+        $defLogBootRegex = ';PRG Reboot\s+\S+'                            # Boot line (logged on every startup)
+        $defLogStartRegex = ';Start Auto Update'                          # Trigger registered on the MS
+        $defLogStartSeen = $false
+        $defLogStartTime = [DateTime]::MaxValue                           # Set when 'Start Auto Update' is found
+        $defLogStartWarned = $false
+        $defLogCrashCandidate = $null                                     # Two-probe confirmation state
 
         $Attempts = 0; $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
         $LastPollStatusMessage = "Initiating..."
@@ -1837,6 +1847,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             if ($null -ne $ftpCredential -and -not $defLogVerdictReached -and ($Attempts % $defLogProbeInterval -eq 0) -and `
                 ($loggedUpdatingStatus -or (((Get-Date) - $startTime).TotalSeconds -ge 60))) {
                 $defLogFailLine = $null; $defLogOkLine = $null
+                $defLogCmdRebootSeen = $false; $defLogLastBootLine = $null; $defLogProbeOk = $false
                 try {
                     $dlReq = [System.Net.FtpWebRequest]::Create("ftp://${hostForPingInInvoke}/log/def.log")
                     $dlReq.Method = [System.Net.WebRequestMethods+Ftp]::DownloadFile
@@ -1847,6 +1858,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     $dlReader = New-Object System.IO.StreamReader($dlResp.GetResponseStream())
                     $defLogText = $dlReader.ReadToEnd()
                     $dlReader.Close(); $dlResp.Close()
+                    $defLogProbeOk = $true
 
                     foreach ($dl in ($defLogText -split "`n")) {
                         if ($dl -match $defLogTsRegex) {
@@ -1856,6 +1868,13 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                                     # Keep the FIRST failure line (the "Update error file ... <code>" detail line)
                                     if (-not $defLogFailLine -and $dl -match $defLogFailureRegex) { $defLogFailLine = $dl.Trim() }
                                     elseif (-not $defLogOkLine -and $dl -match $defLogSuccessRegex) { $defLogOkLine = $dl.Trim() }
+                                    if (-not $defLogStartSeen -and $dl -match $defLogStartRegex) { $defLogStartSeen = $true; $defLogStartTime = $lineTime }
+                                    # Reboot/boot markers only count AFTER the MS registered our trigger -
+                                    # a reboot that happened pre-run (inside the baseline window) is not a crash
+                                    if ($defLogStartSeen -and $lineTime -ge $defLogStartTime) {
+                                        if (-not $defLogCmdRebootSeen -and $dl -match $defLogCmdRebootRegex) { $defLogCmdRebootSeen = $true }
+                                        if ($dl -match $defLogBootRegex) { $defLogLastBootLine = $dl.Trim() }
+                                    }
                                 }
                             }
                         }
@@ -1875,6 +1894,30 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     break  # Authoritative failure - stop polling immediately
                 } elseif ($defLogOkLine) {
                     Write-Log -Message ("[DEFLOG] MS {0} reported update SUCCESS marker: {1} (awaiting version verification)" -f $hostForPingInInvoke, $defLogOkLine) -Level INFO
+                } elseif ($defLogProbeOk -and $defLogLastBootLine -and -not $defLogCmdRebootSeen) {
+                    # Boot line post-baseline with NO commanded-reboot marker and NO outcome markers:
+                    # the MS rebooted on its own mid-update (crash/watchdog) and the update died silently.
+                    # Confirm across two consecutive probes (~30s apart) so a probe racing the reboot
+                    # can't fire a false verdict while the MS is still mid-install.
+                    if ($defLogCrashCandidate -eq $defLogLastBootLine) {
+                        $defLogVerdictReached = $true
+                        $invokeResult.UpdateFailedReason = ("Miniserver rebooted unexpectedly during update without installing (def.log boot: {0})" -f $defLogLastBootLine)
+                        $invokeResult.CurrentState = 'Failed'
+                        $invokeResult.StatusMessage = "UpdateFailed_CrashReboot"
+                        Write-Log -Message ("[DEFLOG] MS {0} CRASH-REBOOT detected: rebooted without command or install markers. Boot line: {1}" -f $hostForPingInInvoke, $defLogLastBootLine) -Level ERROR
+                        Send-MSStatusUpdate -State 'Failed' -Progress 0 -Message "Update aborted: miniserver rebooted without installing (possible SD card/crash)" `
+                            -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                        break  # Update is dead - stop polling immediately
+                    } else {
+                        $defLogCrashCandidate = $defLogLastBootLine
+                        Write-Log -Message ("[DEFLOG] MS {0} uncommanded reboot detected during update (boot: {1}) - confirming on next probe" -f $hostForPingInInvoke, $defLogLastBootLine) -Level WARN
+                    }
+                }
+
+                # Trigger was ACKed over HTTP but the MS never logged 'Start Auto Update' - warn once
+                if ($defLogProbeOk -and -not $defLogStartSeen -and -not $defLogStartWarned -and (((Get-Date) - $startTime).TotalSeconds -ge 180)) {
+                    $defLogStartWarned = $true
+                    Write-Log -Message ("[DEFLOG] MS {0} ACKed the autoupdate trigger but def.log shows no 'Start Auto Update' after 3 minutes - update routine may not have started" -f $hostForPingInInvoke) -Level WARN
                 }
             }
             # ---- end def.log outcome probe ----
@@ -2205,34 +2248,37 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             }
             catch {
             $CaughtCatchError = $_
-            # Check if this is an HTTP error that contains a 503 status
-            if ($CaughtCatchError.Exception.Message -match '503' -or $CaughtCatchError.Exception.Message -match 'Service Unavailable' -or $CaughtCatchError.Exception.Message -match 'Miniserver Updating') {
-                # This is likely a 503 error during update
+            # Only a 503 whose body/message says 'Miniserver Updating' proves an update is running.
+            # A bare 503 'Service Unavailable' also happens when the MS is merely rebooting or busy
+            # (observed 2026-06-10: a crash-reboot's 503 faked the Updating phase and disabled the
+            # FTP download probe via $loggedUpdatingStatus) - so don't treat it as update progress.
+            if ($CaughtCatchError.Exception.Message -match 'Miniserver Updating') {
                 $invokeResult.StatusMessage = "Polling_MS_Updating_503"
                 $LastPollStatusMessage = "Updating (503)"
-                
-                # Try to extract status from error message
-                $statusMessage = "Update in progress"
-                if ($CaughtCatchError.Exception.Message -match 'Miniserver Updating') {
-                    $statusMessage = "Miniserver updating"
-                }
-                
+                $statusMessage = "Miniserver updating"
+
                 # Track as updating state
                 $invokeResult.CurrentState = 'Updating'
                 $invokeResult.LastUpdateStatus = $statusMessage
-                
+
                 Write-Log -Level INFO -Message ("MS {0} returned 503 during poll #{1}: {2}" -f $hostForPingInInvoke, $Attempts, $CaughtCatchError.Exception.Message)
-                
+
                 # Log status change if needed and send real-time update
                 if (-not $loggedUpdatingStatus) {
                     Write-Log -Level INFO -Message ("MS {0} initial update status detected via 503 error" -f $hostForPingInInvoke)
                     $loggedUpdatingStatus = $true
                     $script:LastStatusMessage = $statusMessage
-                    
+
                     # Add status update for 503 (updating) (REAL-TIME)
                     Send-MSStatusUpdate -State 'Updating' -Progress 45 -Message $statusMessage `
                         -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
                 }
+            } elseif ($CaughtCatchError.Exception.Message -match '503' -or $CaughtCatchError.Exception.Message -match 'Service Unavailable') {
+                # Bare 503 without update indication: MS busy or rebooting. Keep current state and
+                # keep the FTP download probe alive so a later download can still be detected.
+                $invokeResult.StatusMessage = "Polling_MS_503_NoUpdateIndication"
+                $LastPollStatusMessage = "Busy (503)"
+                Write-Log -Level INFO -Message ("MS {0} returned 503 WITHOUT update indication during poll #{1} (busy or rebooting, not assuming update): {2}" -f $hostForPingInInvoke, $Attempts, $CaughtCatchError.Exception.Message)
             } else {
                 # Regular connection/parse error - likely rebooting if we had 503s before
                 $invokeResult.StatusMessage = ("Polling_Unreachable_Or_ParseError: {0}" -f $CaughtCatchError.Exception.Message.Split([Environment]::NewLine)[0])

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.6] - 2026-06-10 02:12:55
+
+### Added
+- Crash-reboot detection during Miniserver firmware updates: the def.log probe now tracks the `Start Auto Update`, commanded-reboot (`Reboot Loxone Miniserver`), and boot (`PRG Reboot`) markers. A boot line appearing after the update trigger without a commanded-reboot marker and without any outcome marker is treated as an uncommanded crash-reboot (e.g. dying SD card); the verdict is confirmed across two consecutive probes (~30s apart) before the update is failed with status `UpdateFailed_CrashReboot` and polling stops immediately.
+- One-time warning when the Miniserver acknowledges the autoupdate trigger over HTTP but def.log shows no `Start Auto Update` entry after 3 minutes, indicating the update routine may never have started.
+
+### Fixed
+- A bare HTTP 503 (`Service Unavailable`) during Miniserver polling is no longer assumed to mean an update is in progress. Only a 503 whose message contains `Miniserver Updating` now marks the update phase; other 503s (Miniserver busy or rebooting) are logged as `Polling_MS_503_NoUpdateIndication` and keep the FTP download probe alive. Previously a crash-reboot's 503 faked the "Updating" state and disabled the download probe.
+
+### Changed
+- Bumped winget manifests (`deafsquad.UpdateLoxone`) to version 0.8.6 with the new installer URL, SHA256, and release date 2026-06-10.
+
 ## [0.8.5] - 2026-05-30 04:09:22
 ### Added
 - Authoritative Miniserver update outcome detection via the Miniserver's own `/log/def.log`. Because Loxone exposes no HTTP update-status API, the polling loop now downloads `def.log` over FTP to learn the real success/failure result instead of inferring it solely from the version number:
