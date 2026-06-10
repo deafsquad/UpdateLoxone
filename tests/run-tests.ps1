@@ -1964,6 +1964,24 @@ function Invoke-TestsParallel {
                     }
                 }
 
+                # Worker process died without producing a result (transient flake - the file itself
+                # passes in isolation). Retry once synchronously before recording a Process Error.
+                if (-not $jsonResult) {
+                    Write-TestLog "  WARN $($j.TestFile) - no result from worker, retrying once synchronously..." -Color Yellow
+                    $retryFile = $parallelFiles | Where-Object { $_.Name -eq $j.TestFile } | Select-Object -First 1
+                    if ($retryFile) {
+                        $retryText = (& powershell.exe -NoProfile -NoLogo -File $helperScript -TestFile $retryFile.FullName -Verbosity $Verbosity 2>&1) -join "`n"
+                        if ($retryText -match '###RESULT_JSON###\s*(.+?)\s*###END_RESULT_JSON###') {
+                            try {
+                                $jsonResult = $Matches[1] | ConvertFrom-Json
+                                Write-TestLog "  RETRY OK $($j.TestFile) - worker flake recovered" -Color Green
+                            } catch {
+                                Write-TestLog "  Retry result parse failed for $($j.TestFile): $_" -Color Red
+                            }
+                        }
+                    }
+                }
+
                 $fileResult = $null
                 if ($jsonResult) {
                     $status = if ($jsonResult.Failed -gt 0) { "FAIL" } elseif ($jsonResult.Passed -gt 0) { "PASS" } else { "SKIP" }
@@ -2042,6 +2060,20 @@ function Invoke-TestsParallel {
                     $jsonResult = $Matches[1] | ConvertFrom-Json
                 } catch {
                     Write-TestLog "  Failed to parse result for $($file.Name): $_" -Color Red
+                }
+            }
+
+            # Worker process died without producing a result (transient flake) - retry once
+            if (-not $jsonResult) {
+                Write-TestLog "  WARN $($file.Name) - no result from worker, retrying once..." -Color Yellow
+                $retryText = (& powershell.exe -NoProfile -NoLogo -File $helperScript -TestFile $file.FullName -Verbosity $Verbosity 2>&1) -join "`n"
+                if ($retryText -match '###RESULT_JSON###\s*(.+?)\s*###END_RESULT_JSON###') {
+                    try {
+                        $jsonResult = $Matches[1] | ConvertFrom-Json
+                        Write-TestLog "  RETRY OK $($file.Name) - worker flake recovered" -Color Green
+                    } catch {
+                        Write-TestLog "  Retry result parse failed for $($file.Name): $_" -Color Red
+                    }
                 }
             }
 

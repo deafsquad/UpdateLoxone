@@ -188,13 +188,177 @@ function Get-LoxoneToastAppId {
     finally { Exit-SafeFunction }
 }
 
+function Initialize-LoxoneToastBrandingV1 {
+    # BurntToast 1.x removed -AppId; branding is decided by ToastNotificationManagerCompat, which:
+    #  - resolves the process AUMID, normalizing '\' to '/' (CommunityToolkit issue #3870 workaround)
+    #  - on FIRST touch of the type, UNCONDITIONALLY overwrites HKCU AppUserModelId DisplayName/IconUri
+    #    with branding auto-extracted from the host process (and DELETES IconUri when extraction fails,
+    #    e.g. the 335-byte blank PNGs seen on Canary builds)
+    # So the only ordering that survives: set process AUMID -> force the static init (let it clobber)
+    # -> repair the registration. The shell reads it at toast display time, so the repaired values win.
+    param([Parameter(Mandatory)][string]$AppId)
+
+    $fwdAppId = $AppId.Replace('\', '/')
+
+    # Step 1: set explicit process AUMID so the compat layer attributes toasts to the Loxone AppId.
+    # Fails harmlessly under MSIX-packaged hosts where package identity wins.
+    try {
+        if (-not ('LoxoneUtils.Toast.AppModelId' -as [type])) {
+            Add-Type -Namespace LoxoneUtils.Toast -Name AppModelId -MemberDefinition @'
+[DllImport("shell32.dll", SetLastError = true)]
+public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+'@ -ErrorAction Stop
+        }
+        $hr = [LoxoneUtils.Toast.AppModelId]::SetCurrentProcessExplicitAppUserModelID($fwdAppId)
+        Write-SafeLog -Level Debug -Message "Toast branding (1.x): SetCurrentProcessExplicitAppUserModelID('$fwdAppId') hr=$hr"
+    } catch {
+        Write-SafeLog -Level Debug -Message "Toast branding (1.x): could not set process AUMID (expected under MSIX): $($_.Exception.Message)"
+    }
+
+    # Step 2: force ToastNotificationManagerCompat's static ctor NOW so its registry clobber happens
+    # before our repair (it only runs once per process; any member touch triggers Initialize()).
+    $compatType = $null
+    try {
+        $compatType = 'Microsoft.Toolkit.Uwp.Notifications.ToastNotificationManagerCompat' -as [type]
+        if ($compatType) {
+            $null = $compatType::History
+            Write-SafeLog -Level Debug -Message "Toast branding (1.x): forced ToastNotificationManagerCompat static init"
+        } else {
+            Write-SafeLog -Level Debug -Message "Toast branding (1.x): compat type not loaded; skipping init touch"
+        }
+    } catch {
+        Write-SafeLog -Level Debug -Message "Toast branding (1.x): compat init touch failed: $($_.Exception.Message)"
+    }
+
+    # Step 2b: the compat type caches the AUMID in a private static field at FIRST touch and never
+    # re-evaluates it. In a long-lived console (script re-run in the same pwsh), that capture happened
+    # before our AUMID was set, so toasts keep the host branding forever. Override the cached field.
+    try {
+        if ($compatType) {
+            $aumidField = $compatType.GetField('_win32Aumid', ([System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static))
+            if ($aumidField) {
+                $cachedAumid = $aumidField.GetValue($null)
+                if ($cachedAumid -ne $fwdAppId) {
+                    $aumidField.SetValue($null, $fwdAppId)
+                    Write-SafeLog -Level Info -Message "Toast branding (1.x): overrode cached compat AUMID '$cachedAumid' -> '$fwdAppId'"
+                } else {
+                    Write-SafeLog -Level Debug -Message "Toast branding (1.x): cached compat AUMID already correct"
+                }
+            } else {
+                Write-SafeLog -Level Warn -Message "Toast branding (1.x): _win32Aumid field not found - toolkit internals changed; stale-process branding may persist"
+            }
+        }
+    } catch {
+        Write-SafeLog -Level Debug -Message "Toast branding (1.x): AUMID field override failed: $($_.Exception.Message)"
+    }
+
+    # Step 3: repair the AppUserModelId registration the init just clobbered. The forward-slash key
+    # name cannot be addressed via the PS registry provider ('/' parses as a path separator), so use
+    # the .NET registry API where only '\' separates key names.
+    try {
+        # Icon preference: the installed LoxoneConfig.exe's own icon (what 0.x -AppId branding showed),
+        # regenerated each run so it follows Config updates. MUST be 48x48: the shell does not render
+        # 32x32 attribution icons (verified live), so use SHDefExtractIcon with an explicit 48px size
+        # instead of Icon.ExtractAssociatedIcon (which only yields 32x32). ms.png (resized) is fallback.
+        $iconPath = $null
+        $extractedIconDir = Join-Path $env:LOCALAPPDATA 'UpdateLoxone'
+        if (-not (Test-Path $extractedIconDir)) { New-Item -ItemType Directory -Path $extractedIconDir -Force | Out-Null }
+        try {
+            $loxoneExe = $script:InstalledExePath
+            if (-not $loxoneExe) { $loxoneExe = Get-LoxoneExePath -ErrorAction SilentlyContinue }
+            if ($loxoneExe -and (Test-Path $loxoneExe)) {
+                Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+                if (-not ('LoxoneUtils.Toast.IconExtract' -as [type])) {
+                    Add-Type -Namespace LoxoneUtils.Toast -Name IconExtract -MemberDefinition @'
+[DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+public static extern int SHDefExtractIcon(string pszIconFile, int iIndex, uint uFlags, out IntPtr phiconLarge, out IntPtr phiconSmall, uint nIconSize);
+[DllImport("user32.dll")]
+public static extern bool DestroyIcon(IntPtr hIcon);
+'@ -ErrorAction Stop
+                }
+                $extractedIconPath = Join-Path $extractedIconDir 'LoxoneConfigToastIcon.png'
+                $hLarge = [IntPtr]::Zero; $hSmall = [IntPtr]::Zero
+                $rc = [LoxoneUtils.Toast.IconExtract]::SHDefExtractIcon($loxoneExe, 0, 0, [ref]$hLarge, [ref]$hSmall, 48)
+                if ($rc -eq 0 -and $hLarge -ne [IntPtr]::Zero) {
+                    try {
+                        $exeIcon = [System.Drawing.Icon]::FromHandle($hLarge)
+                        $iconBmp = $exeIcon.ToBitmap()
+                        try { $iconBmp.Save($extractedIconPath, [System.Drawing.Imaging.ImageFormat]::Png) } finally { $iconBmp.Dispose(); $exeIcon.Dispose() }
+                    } finally {
+                        [LoxoneUtils.Toast.IconExtract]::DestroyIcon($hLarge) | Out-Null
+                        if ($hSmall -ne [IntPtr]::Zero) { [LoxoneUtils.Toast.IconExtract]::DestroyIcon($hSmall) | Out-Null }
+                    }
+                    # Blank-extraction guard: broken extractions yield ~335-byte empty PNGs, while a
+                    # legitimate 48x48 icon PNG is ~1000 bytes - so reject only below 400 bytes
+                    if ((Test-Path $extractedIconPath) -and (Get-Item $extractedIconPath).Length -gt 400) {
+                        $iconPath = $extractedIconPath
+                        Write-SafeLog -Level Debug -Message "Toast branding (1.x): extracted 48px icon from '$loxoneExe' -> $extractedIconPath ($((Get-Item $extractedIconPath).Length) bytes)"
+                    } else {
+                        Write-SafeLog -Level Debug -Message "Toast branding (1.x): extracted icon too small/blank, falling back to ms.png"
+                    }
+                } else {
+                    Write-SafeLog -Level Debug -Message "Toast branding (1.x): SHDefExtractIcon failed (rc=$rc), falling back to ms.png"
+                }
+            }
+        } catch {
+            Write-SafeLog -Level Debug -Message "Toast branding (1.x): icon extraction from Config exe failed, falling back to ms.png: $($_.Exception.Message)"
+        }
+        if (-not $iconPath) {
+            # Fallback: ms.png resized to 48x48 (the shell needs exactly toast-attribution dimensions)
+            try {
+                $iconCandidate = Join-Path $PSScriptRoot '..\ms.png'
+                if (Test-Path $iconCandidate) {
+                    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+                    $fallback48 = Join-Path $extractedIconDir 'LoxoneToastIcon48.png'
+                    $srcImg = [System.Drawing.Image]::FromFile((Resolve-Path $iconCandidate).Path)
+                    try {
+                        $bmp48 = New-Object System.Drawing.Bitmap $srcImg, 48, 48
+                        try { $bmp48.Save($fallback48, [System.Drawing.Imaging.ImageFormat]::Png) } finally { $bmp48.Dispose() }
+                    } finally { $srcImg.Dispose() }
+                    $iconPath = $fallback48
+                }
+            } catch {
+                Write-SafeLog -Level Debug -Message "Toast branding (1.x): ms.png fallback resize failed: $($_.Exception.Message)"
+            }
+        }
+
+        # Recreate the key instead of updating in place: Windows pins cached branding once
+        # HasSentNotification is set, so a fresh key forces the platform to re-read our values.
+        # Preserve the toolkit's CustomActivator so actionable-toast activation keeps working.
+        $subKeyPath = "Software\Classes\AppUserModelId\$fwdAppId"
+        $existingActivator = $null
+        $existingKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($subKeyPath)
+        if ($existingKey) {
+            $existingActivator = $existingKey.GetValue('CustomActivator')
+            $existingKey.Close()
+        }
+        [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($subKeyPath, $false)
+        $regKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($subKeyPath)
+        try {
+            $regKey.SetValue('DisplayName', 'Loxone Config', [Microsoft.Win32.RegistryValueKind]::String)
+            if ($iconPath) {
+                $regKey.SetValue('IconUri', $iconPath, [Microsoft.Win32.RegistryValueKind]::String)
+                $regKey.SetValue('IconBackgroundColor', 'FFDDDDDD', [Microsoft.Win32.RegistryValueKind]::String)
+            }
+            if ($existingActivator) {
+                $regKey.SetValue('CustomActivator', $existingActivator, [Microsoft.Win32.RegistryValueKind]::String)
+            }
+        } finally {
+            $regKey.Close()
+        }
+        Write-SafeLog -Level Info -Message "Toast branding (1.x): repaired AppUserModelId '$fwdAppId' (DisplayName='Loxone Config', IconUri=$(if ($iconPath) { $iconPath } else { '<icon missing, left as-is>' }))"
+    } catch {
+        Write-SafeLog -Level Warn -Message "Toast branding (1.x): registry repair failed: $($_.Exception.Message)"
+    }
+}
+
 function Initialize-LoxoneToastAppId {
     # Exit early if suppressed
     if ($script:SuppressToastInit) {
         Write-Verbose "Initialize-LoxoneToastAppId: Suppressed by SuppressToastInit"
         return
     }
-    
+
     Enter-SafeFunction -FunctionName $MyInvocation.MyCommand.Name -FilePath $MyInvocation.MyCommand.Definition -LineNumber $MyInvocation.ScriptLineNumber
     try {
         $script:ResolvedToastAppId = Get-LoxoneToastAppId -PreFoundPath $script:InstalledExePath
@@ -206,6 +370,12 @@ function Initialize-LoxoneToastAppId {
             $submitHasAppId = (Get-Command Submit-BTNotification -ErrorAction SilentlyContinue).Parameters.ContainsKey('AppId')
             $updateHasAppId = (Get-Command Update-BTNotification -ErrorAction SilentlyContinue).Parameters.ContainsKey('AppId')
             Write-SafeLog -Level Info -Message "BurntToast version=$($btMod.Version) path=$($btMod.Path) | Submit-BTNotification -AppId supported: $submitHasAppId | Update-BTNotification -AppId supported: $updateHasAppId"
+
+            # BurntToast 1.x: no -AppId support -> branding must come from the AppUserModelId
+            # registration; run the touch-then-repair sequence. 0.x keeps the -AppId path.
+            if (-not $submitHasAppId -and $script:ResolvedToastAppId) {
+                Initialize-LoxoneToastBrandingV1 -AppId $script:ResolvedToastAppId
+            }
         } else {
             Write-SafeLog -Level Warn -Message "BurntToast module not loaded at Initialize-LoxoneToastAppId time"
         }

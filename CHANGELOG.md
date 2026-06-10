@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.7] - 2026-06-10 12:06:50
+
+### Added
+- Toast branding support for BurntToast 1.x via new `Initialize-LoxoneToastBrandingV1` function. BurntToast 1.x removed the `-AppId` parameter, so branding now comes from the `AppUserModelId` registration using a touch-then-repair sequence:
+  - Sets the process AUMID explicitly via `SetCurrentProcessExplicitAppUserModelID` (forward-slash normalized, harmless no-op under MSIX-packaged hosts)
+  - Forces `ToastNotificationManagerCompat`'s static initializer to run first so its unconditional registry clobber happens *before* the repair, and overrides the toolkit's privately cached `_win32Aumid` field so long-lived consoles (script re-runs in the same pwsh) pick up the correct AUMID instead of keeping the host branding
+  - Repairs the registration afterwards using the .NET registry API (the forward-slash key name can't be addressed through the PS registry provider), recreating the key to bust Windows' pinned branding cache while preserving the toolkit's `CustomActivator` value so actionable-toast activation keeps working
+- Toast attribution icon extraction from the installed `LoxoneConfig.exe` at 48x48 via `SHDefExtractIcon` (the shell does not render 32x32 attribution icons), regenerated each run so it follows Config updates, with a blank-extraction guard (rejects PNGs under 400 bytes) and a fallback that resizes `ms.png` to 48x48 when extraction fails
+- Test runner now retries a test file once synchronously when a parallel worker process dies without producing a result (transient flake), in both the ThreadJob and process-based execution paths, instead of immediately recording a Process Error; recovered runs are logged as `RETRY OK`
+
+### Changed
+- `Initialize-LoxoneToastAppId` now invokes the 1.x branding sequence automatically when the loaded BurntToast version lacks `-AppId` support on `Submit-BTNotification`; the 0.x `-AppId` path is unchanged
+- Bumped winget manifests (`deafsquad.UpdateLoxone`) to version 0.8.7 with the new installer URL and SHA256
+
 ## [0.8.6] - 2026-06-10 02:12:55
 
 ### Added
