@@ -185,11 +185,15 @@ function Invoke-MiniserverWebRequest {
     } elseif ($PSVersionTable.PSVersion.Major -ge 6 -and $Parameters.Uri -like "https://*") {
         # PowerShell 6+ with HTTPS
         # Check if we need to skip certificate validation (for self-signed certs)
-        if ([System.Net.ServicePointManager]::ServerCertificateValidationCallback -or 
+        if ([System.Net.ServicePointManager]::ServerCertificateValidationCallback -or
             $Parameters.ContainsKey('SkipCertificateCheck')) {
-            # Certificate validation is bypassed - use SkipCertificateCheck
-            $Parameters.Remove('SkipCertificateCheck') | Out-Null
-            Invoke-WebRequest @Parameters -SkipCertificateCheck
+            # Certificate validation is bypassed - use SkipCertificateCheck.
+            # Clone before removing: $Parameters is the CALLER's hashtable, reused across poll
+            # attempts - mutating it stripped the bypass after the first poll and later polls
+            # failed with RemoteCertificateNameMismatch (observed 2026-06-11 on MS 10.3.98.5).
+            $localParams = @{} + $Parameters
+            $localParams.Remove('SkipCertificateCheck') | Out-Null
+            Invoke-WebRequest @localParams -SkipCertificateCheck
         } else {
             # Normal HTTPS with valid certificates
             if ($Parameters.ContainsKey('SslProtocol')) {

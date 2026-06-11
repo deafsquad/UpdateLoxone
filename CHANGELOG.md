@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.8] - 2026-06-11 02:40:36
+
+### Fixed
+- Miniserver HTTPS polling no longer fails with `RemoteCertificateNameMismatch` after the first poll attempt when certificate validation is bypassed. `Invoke-MiniserverWebRequest` was mutating the caller's parameter hashtable when removing `SkipCertificateCheck`, stripping the bypass flag from all subsequent poll attempts that reused the same hashtable; it now operates on a local clone, preserving the caller's parameters across polls (observed on Miniserver 10.3.98.5).
+
+### Changed
+- Bumped winget package manifests to version 0.8.8 (updated installer URL, SHA256 checksum, and release date 2026-06-11).
+
 ## [0.8.7] - 2026-06-10 12:06:50
 
 ### Added
