@@ -14,20 +14,20 @@ function Get-InstalledVersion {
     if (-not $ExePath.EndsWith(".exe")) {
         $ExePath = Join-Path -Path $ExePath -ChildPath "LoxoneConfig.exe"
     }
-    if (Test-Path $ExePath) {
-        try {
+    try {
+        if (Test-Path $ExePath) {
             $version = (Get-Item $ExePath).VersionInfo.FileVersion
             $version = $version.Trim()
             Write-Log -Message "Found version of '${ExePath}': ${version}" -Level INFO
             return $version
-        } catch {
-            Write-Log -Message "Error retrieving version from '${ExePath}': ${($_.Exception.Message)}" -Level WARN
-		   Return $null
         }
-    }
-    else {
-        Write-Log -Message "Installed application not found at '${ExePath}'." -Level WARN
-		Return $null
+        else {
+            Write-Log -Message "Installed application not found at '${ExePath}'." -Level WARN
+            return $null
+        }
+    } catch {
+        Write-Log -Message "Error retrieving version from '${ExePath}': $($_.Exception.Message)" -Level WARN
+        return $null
     } finally {
         Exit-Function
     }

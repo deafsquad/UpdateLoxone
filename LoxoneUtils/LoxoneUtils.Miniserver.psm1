@@ -1402,6 +1402,7 @@ $invokeResult = [PSCustomObject]@{
     LastUpdateStatus = ''
     LastStatusCode = ''
     UpdateFailedReason = $null   # Authoritative failure reason read from the MS's own /log/def.log
+    TriggerFailReason = $null    # Why the autoupdate trigger was rejected (XML Code != 200)
 }
 $originalCallback = $null; $callbackChanged = $false
 $oldProgressPreference = $ProgressPreference
@@ -1561,6 +1562,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
 
             # Verify trigger response - check HTTP status and XML Code attribute
             $triggerVerified = $false
+            $updateAlreadyInProgress = $false
             $triggerFailReason = ""
             if (-not $triggerResponse) {
                 $triggerFailReason = "No response received from Miniserver"
@@ -1574,6 +1576,11 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     $xmlCode = $Matches[1]
                     if ($xmlCode -eq '200') {
                         $triggerVerified = $true
+                    } elseif ($xmlCode -eq '503' -and $triggerResponse.Content -match '(?i)already downloading|updating') {
+                        # The MS is already mid-update (e.g. still in flight from a previous run -
+                        # observed 2026-07-03: Gen1 download phase outlived our timeout, restart run
+                        # got 'Update already downloading'). Not a failure: monitor the existing update.
+                        $updateAlreadyInProgress = $true
                     } else {
                         $triggerFailReason = "Miniserver returned Code=$xmlCode (expected 200)"
                     }
@@ -1607,38 +1614,65 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                 # Mark trigger as successful
                 $triggerSuccess = $true
                 Write-Log -Message ("Trigger attempt {0} succeeded for MS {1}" -f $triggerAttempt, $hostForPingInInvoke) -Level DEBUG
+            } elseif ($updateAlreadyInProgress) {
+                Write-Log -Message ("UPDATE ALREADY IN PROGRESS on '{0}' (Miniserver response: {1}). Monitoring the existing update instead of re-triggering." -f $hostForPingInInvoke, ($triggerResponse.Content -replace '\s+', ' ').Trim()) -Level INFO
+                $invokeResult.StatusMessage = "UpdateAlreadyInProgress_Monitoring"
+
+                Send-MSStatusUpdate -State 'Updating' -Progress 30 -Message "Update already in progress - monitoring" `
+                    -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+
+                # Initialize status tracking variables for polling
+                $script:LastLoggedStatus = $null
+                $script:LastStatusMessage = $null
+
+                # Proceed to the polling/verification loop like a normal accepted trigger
+                $triggerSuccess = $true
             } else {
                 Write-Log -Message ("UPDATE COMMAND REJECTED/FAILED for MS {0}: {1}" -f $hostForPingInInvoke, $triggerFailReason) -Level WARN
                 $invokeResult.StatusMessage = "UpdateTriggerFailed"
                 $invokeResult.TriggerFailReason = $triggerFailReason
+                # Route through the retry catch below so $lastTriggerError is set and the retry delay applies
+                throw $triggerFailReason
             }
-            
+
         } catch {
             $CaughtError = $_
-            $lastTriggerError = $CaughtError
-            Write-Log -Message ("Trigger attempt {0}/{1} failed for '{2}': {3}" -f $triggerAttempt, $maxTriggerAttempts, $hostForPingInInvoke, $CaughtError.Exception.Message) -Level WARN
-            
-            # If not the last attempt, wait before retrying
-            if ($triggerAttempt -lt $maxTriggerAttempts) {
-                $retryDelay = 2 * $triggerAttempt  # Progressive delay: 2s, 4s, 6s
-                Write-Log -Message ("Waiting {0} seconds before retry..." -f $retryDelay) -Level DEBUG
-                Start-Sleep -Seconds $retryDelay
+            if ($CaughtError.Exception.Message -match '(?i)503' -and $CaughtError.Exception.Message -match '(?i)already downloading|miniserver updating') {
+                # Raw HTTP 503 'Miniserver Updating' thrown by the web request itself - the MS is
+                # already installing/downloading an update. Same treatment: monitor, don't fail.
+                Write-Log -Message ("UPDATE ALREADY IN PROGRESS on '{0}' (HTTP 503 at trigger: {1}). Monitoring the existing update instead of re-triggering." -f $hostForPingInInvoke, $CaughtError.Exception.Message.Split([Environment]::NewLine)[0]) -Level INFO
+                $invokeResult.StatusMessage = "UpdateAlreadyInProgress_Monitoring"
+
+                Send-MSStatusUpdate -State 'Updating' -Progress 30 -Message "Update already in progress - monitoring" `
+                    -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+
+                $script:LastLoggedStatus = $null
+                $script:LastStatusMessage = $null
+                $triggerSuccess = $true
+            } else {
+                $lastTriggerError = $CaughtError
+                Write-Log -Message ("Trigger attempt {0}/{1} failed for '{2}': {3}" -f $triggerAttempt, $maxTriggerAttempts, $hostForPingInInvoke, $CaughtError.Exception.Message) -Level WARN
+
+                # If not the last attempt, wait before retrying
+                if ($triggerAttempt -lt $maxTriggerAttempts) {
+                    $retryDelay = 2 * $triggerAttempt  # Progressive delay: 2s, 4s, 6s
+                    Write-Log -Message ("Waiting {0} seconds before retry..." -f $retryDelay) -Level DEBUG
+                    Start-Sleep -Seconds $retryDelay
+                }
             }
         }
     }  # End of retry while loop
-    } catch {
-        # Catch for the outer try block at line 1398
-        $triggerError = $_
-        Write-Log -Message ("Failed to trigger update for MS {0}: {1}" -f $hostForPingInInvoke, $triggerError) -Level ERROR
-        $invokeResult.StatusMessage = "Failed to trigger update: $triggerError"
-        $invokeResult.Success = $false
-    }
 
     # Check if trigger was successful after all attempts
     if (-not $triggerSuccess) {
         $invokeResult.ErrorOccurredInInvoke = $true
-        $invokeResult.StatusMessage = ("Error_TriggeringUpdate: {0}" -f $lastTriggerError.Exception.Message.Split([Environment]::NewLine)[0])
-        Write-Log -Message ("All {0} trigger attempts failed for '{1}': {2}" -f $maxTriggerAttempts, $hostForPingInInvoke, $lastTriggerError.Exception.Message) -Level ERROR
+        $lastTriggerMessage = if ($lastTriggerError) { $lastTriggerError.Exception.Message } else { 'Unknown trigger failure' }
+        $invokeResult.StatusMessage = ("Error_TriggeringUpdate: {0}" -f $lastTriggerMessage.Split([Environment]::NewLine)[0])
+        Write-Log -Message ("All {0} trigger attempts failed for '{1}': {2}" -f $maxTriggerAttempts, $hostForPingInInvoke, $lastTriggerMessage) -Level ERROR
+
+        # Report the definitive trigger failure so the worker doesn't show a stale phase
+        Send-MSStatusUpdate -State 'Failed' -Progress 0 -Message ("Update trigger failed: {0}" -f $lastTriggerMessage.Split([Environment]::NewLine)[0]) `
+            -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
     }
 
     if (-not $invokeResult.ErrorOccurredInInvoke) {
@@ -1732,6 +1766,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         $ftpPreviousTotalSize = [long]0
         $ftpDownloadDetected = $false
         $ftpTimeoutExtended = $false
+        $ftpProbeFailureLogged = $false   # First probe failure logs at INFO so a blind probe is visible
         # Convert version "16.3.3.11" → prefix "16030311" for matching .upd filenames
         $ftpVersionPrefix = ($NormalizedDesiredVersion -split '\.' | ForEach-Object { $_.PadLeft(2, '0') }) -join ''
         Write-Log -Message ("FTP download probe: version prefix '{0}', credentials: {1}" -f $ftpVersionPrefix, $(if ($ftpCredential) { 'available' } else { 'none' })) -Level DEBUG
@@ -1755,6 +1790,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         $defLogStartTime = [DateTime]::MaxValue                           # Set when 'Start Auto Update' is found
         $defLogStartWarned = $false
         $defLogCrashCandidate = $null                                     # Two-probe confirmation state
+        $defLogProbeFailureLogged = $false                                # First probe failure logs at INFO
 
         $Attempts = 0; $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
         $LastPollStatusMessage = "Initiating..."
@@ -1792,7 +1828,8 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     $ftpRequest = [System.Net.FtpWebRequest]::Create($ftpListUri)
                     $ftpRequest.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectoryDetails
                     $ftpRequest.Credentials = $ftpCredential
-                    $ftpRequest.Timeout = 5000
+                    # 10s: a Gen1 mid-download answers FTP very slowly (5s timed out all probes on 2026-07-03)
+                    $ftpRequest.Timeout = 10000
                     $ftpRequest.UsePassive = $true
 
                     $ftpResponse = $ftpRequest.GetResponse()
@@ -1839,7 +1876,11 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                         $ftpPreviousTotalSize = $currentTotalSize
                     }
                 } catch {
-                    Write-Log -Message ("[FTP_PROBE] Probe failed for MS {0}: {1}" -f $hostForPingInInvoke, $_.Exception.Message) -Level DEBUG
+                    # First failure at INFO: without this, a permanently failing probe (e.g. Gen1 FTP
+                    # unresponsive while busy downloading, observed 2026-07-03 on .210) is invisible.
+                    $ftpProbeFailLevel = if ($ftpProbeFailureLogged) { 'DEBUG' } else { 'INFO' }
+                    $ftpProbeFailureLogged = $true
+                    Write-Log -Message ("[FTP_PROBE] Probe failed for MS {0}: {1}" -f $hostForPingInInvoke, $_.Exception.Message) -Level $ftpProbeFailLevel
                 }
             }
 
@@ -1856,7 +1897,9 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     $dlReq = [System.Net.FtpWebRequest]::Create("ftp://${hostForPingInInvoke}/log/def.log")
                     $dlReq.Method = [System.Net.WebRequestMethods+Ftp]::DownloadFile
                     $dlReq.Credentials = $ftpCredential
-                    $dlReq.Timeout = 8000; $dlReq.ReadWriteTimeout = 8000
+                    # 15s: def.log can exceed 1 MB and a busy Gen1 serves ASCII FTP slowly (8s starved
+                    # every probe on 2026-07-03, leaving the outcome detection blind for that MS)
+                    $dlReq.Timeout = 15000; $dlReq.ReadWriteTimeout = 15000
                     $dlReq.UsePassive = $true; $dlReq.UseBinary = $false; $dlReq.KeepAlive = $false
                     $dlResp = $dlReq.GetResponse()
                     $dlReader = New-Object System.IO.StreamReader($dlResp.GetResponseStream())
@@ -1872,7 +1915,11 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                                     # Keep the FIRST failure line (the "Update error file ... <code>" detail line)
                                     if (-not $defLogFailLine -and $dl -match $defLogFailureRegex) { $defLogFailLine = $dl.Trim() }
                                     elseif (-not $defLogOkLine -and $dl -match $defLogSuccessRegex) { $defLogOkLine = $dl.Trim() }
-                                    if (-not $defLogStartSeen -and $dl -match $defLogStartRegex) { $defLogStartSeen = $true; $defLogStartTime = $lineTime }
+                                    if (-not $defLogStartSeen -and $dl -match $defLogStartRegex) {
+                                        $defLogStartSeen = $true; $defLogStartTime = $lineTime
+                                        # Positive confirmation the probe pipeline works AND the MS registered our trigger
+                                        Write-Log -Message ("[DEFLOG] MS {0} registered the update trigger: {1}" -f $hostForPingInInvoke, $dl.Trim()) -Level INFO
+                                    }
                                     # Reboot/boot markers only count AFTER the MS registered our trigger -
                                     # a reboot that happened pre-run (inside the baseline window) is not a crash
                                     if ($defLogStartSeen -and $lineTime -ge $defLogStartTime) {
@@ -1884,7 +1931,11 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                         }
                     }
                 } catch {
-                    Write-Log -Message ("[DEFLOG] Probe failed for MS {0}: {1}" -f $hostForPingInInvoke, $_.Exception.Message) -Level DEBUG
+                    # First failure at INFO: a blind def.log probe means no authoritative outcome
+                    # detection for this MS - that must be visible in the run log (see 2026-07-03 .210).
+                    $defLogProbeFailLevel = if ($defLogProbeFailureLogged) { 'DEBUG' } else { 'INFO' }
+                    $defLogProbeFailureLogged = $true
+                    Write-Log -Message ("[DEFLOG] Probe failed for MS {0}: {1}" -f $hostForPingInInvoke, $_.Exception.Message) -Level $defLogProbeFailLevel
                 }
 
                 if ($defLogFailLine) {
@@ -2322,6 +2373,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
             # Failure is reported through ProgressReporter, not direct toast updates
         }
     }
+    } # End of polling block (only entered when the trigger succeeded / update was in progress)
 
     # Add collected status updates to the result
     $invokeResult | Add-Member -NotePropertyName 'StatusUpdates' -NotePropertyValue $statusUpdates -Force
