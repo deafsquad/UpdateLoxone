@@ -782,7 +782,22 @@ function Limit-LocalReleaseArchives {
         $archivesToRemove = $archives | Select-Object -Skip $KeepCount
         foreach ($archiveToRemove in $archivesToRemove) {
             Write-Host "Removing old local archive: $($archiveToRemove.FullName)"
-            Remove-Item -Path $archiveToRemove.FullName -Force
+            try {
+                Remove-Item -Path $archiveToRemove.FullName -Force -ErrorAction Stop
+            } catch {
+                # Observed 2026-07-03 (v0.7.9.msi): Remove-Item under pwsh denied with 'Access
+                # to the path is denied' while a classic delete succeeded moments later (AV/filter
+                # quirk). Retry via cmd, and never let rotation housekeeping abort the release
+                # pipeline - the script runs with $ErrorActionPreference = 'Stop' and the Winget
+                # submission comes after this.
+                Start-Sleep -Seconds 2
+                cmd /c del /f "$($archiveToRemove.FullName)" 2>$null | Out-Null
+                if (Test-Path -LiteralPath $archiveToRemove.FullName) {
+                    Write-Warning "Could not remove old archive '$($archiveToRemove.FullName)': $($_.Exception.Message). Leaving it in place."
+                } else {
+                    Write-Host "Removed via fallback delete after initial failure."
+                }
+            }
         }
     } else {
         Write-Host "Fewer than or equal to $KeepCount local archives found, or no archives found. No rotation needed."
@@ -2033,16 +2048,24 @@ END_CHANGELOG
             
             Write-Host "`nUpdating CHANGELOG.md with comprehensive AI analysis..." -ForegroundColor Yellow
             
-            # Replace the Unreleased section completely in the FULL changelog
-            if ($fullChangelogContent -match '(?s)(.*?)(## \[Unreleased\][^#]*?)(## \[\d)') {
-                # Found Unreleased section followed by a version
-                $before = $matches[1]
-                $after = $matches[3]
-                $updatedChangelog = $before + $newChangelogSection + "`n`n" + $after
-            } elseif ($fullChangelogContent -match '(?s)(.*?)(## \[Unreleased\].*)$') {
-                # Found Unreleased section at the end
-                $before = $matches[1]
-                $updatedChangelog = $before + $newChangelogSection
+            # Replace the Unreleased section completely in the FULL changelog.
+            # NOTE: deliberately IndexOf-based. The previous '(?s)(.*?)(## \[Unreleased\]...)'
+            # regexes went quadratic when NO Unreleased section existed (first run after a
+            # release consumes it): on the 132KB changelog the no-match scan ran for minutes
+            # and looked like a hang (observed 2026-07-03 during the v0.9.0 release).
+            $unreleasedIdx = $fullChangelogContent.IndexOf('## [Unreleased]')
+            if ($unreleasedIdx -ge 0) {
+                $before = $fullChangelogContent.Substring(0, $unreleasedIdx)
+                $searchFrom = $unreleasedIdx + '## [Unreleased]'.Length
+                $nextVersionHeader = [regex]::Match($fullChangelogContent.Substring($searchFrom), '(?m)^## \[\d')
+                if ($nextVersionHeader.Success) {
+                    # Found Unreleased section followed by a version - splice the new section in between
+                    $after = $fullChangelogContent.Substring($searchFrom + $nextVersionHeader.Index)
+                    $updatedChangelog = $before + $newChangelogSection + "`n`n" + $after
+                } else {
+                    # Found Unreleased section at the end
+                    $updatedChangelog = $before + $newChangelogSection
+                }
             } else {
                 # No Unreleased section found, add it after the header
                 $updatedChangelog = $fullChangelogContent -replace '(# Changelog.*?(?:\r?\n){2,})', "`$1$newChangelogSection`n`n"

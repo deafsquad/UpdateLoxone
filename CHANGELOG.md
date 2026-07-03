@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0] - 2026-07-03 19:26:18
+
+### Fixed
+- Local release-archive rotation in `publish_new_release.ps1` (`Limit-LocalReleaseArchives`) no longer aborts the release pipeline when deleting an old archive fails. `Remove-Item` under pwsh was observed (2026-07-03, v0.7.9.msi) failing with `Access to the path is denied` due to an AV/filter driver quirk while a classic delete succeeded moments later; since the script runs with `$ErrorActionPreference = 'Stop'` and the winget submission happens after rotation, this housekeeping error killed the whole release. The deletion is now wrapped in try/catch: on failure it waits 2 seconds, retries via `cmd /c del /f` as a fallback, and if the file still exists it logs a warning and leaves the archive in place instead of throwing
+
+### Changed
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.0 with the new installer URL and SHA256 checksum for the v0.9.0 MSI
+
 ## [0.8.9] - 2026-07-03 19:07:16
 
 ### Added
@@ -17,6 +25,14 @@
 - A Miniserver trigger rejection (XML Code != 200) is now routed through the retry loop like a thrown error, so `$lastTriggerError` is set and the progressive retry delay (2s/4s/6s) applies; the final-failure path also guards against a null `$lastTriggerError` (falling back to `Unknown trigger failure`) instead of crashing when building the `Error_TriggeringUpdate` status message
 - Removed the outer catch that swallowed trigger errors outside the retry loop and overwrote the status message with a generic failure; trigger errors are now handled exclusively inside the retry loop, and the polling/verification block is only entered when the trigger succeeded or an update was already in progress
 - `Get-InstalledVersion` error logging now actually includes the exception message — the previous `${(# Changelog
+
+## [0.9.0] - 2026-07-03 19:26:18
+
+### Fixed
+- Local release-archive rotation in `publish_new_release.ps1` (`Limit-LocalReleaseArchives`) no longer aborts the release pipeline when deleting an old archive fails. `Remove-Item` under pwsh was observed (2026-07-03, v0.7.9.msi) failing with `Access to the path is denied` due to an AV/filter driver quirk while a classic delete succeeded moments later; since the script runs with `$ErrorActionPreference = 'Stop'` and the winget submission happens after rotation, this housekeeping error killed the whole release. The deletion is now wrapped in try/catch: on failure it waits 2 seconds, retries via `cmd /c del /f` as a fallback, and if the file still exists it logs a warning and leaves the archive in place instead of throwing
+
+### Changed
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.0 with the new installer URL and SHA256 checksum for the v0.9.0 MSI
 
 ## [0.8.8] - 2026-06-11 02:40:36
 
