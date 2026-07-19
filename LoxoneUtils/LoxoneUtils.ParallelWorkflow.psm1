@@ -2927,6 +2927,28 @@ function Start-MiniserverWorker {
     return $job
 }
 
+# Monotonicity decision for Miniserver status updates. Extracted so the guard is unit-testable.
+# Returns $true if the update should be applied, $false if it must be ignored because it would
+# drag the MS backwards - a stale or REPLAYED update (the worker re-enqueues its full status
+# history at job end) landing after a newer one. Rules:
+#   1. Terminal is sticky: once an IP is Completed/Failed/UpToDate, ignore any non-terminal update.
+#   2. Timestamp guard: ignore an update strictly older than the newest already applied for that IP.
+# Timeless updates (no Timestamp) bypass rule 2 and rely on rule 1.
+function Test-ShouldApplyMSStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [hashtable]$Tracker,
+        [Parameter(Mandatory = $true)] [string]$IP,
+        [Parameter(Mandatory = $true)] [string]$State,
+        [Parameter(Mandatory = $false)] $Timestamp = $null
+    )
+    $terminalStates = @('Completed', 'Complete', 'Failed', 'UpToDate')
+    $isTerminalIncoming = $terminalStates -contains $State
+    if ($Tracker.TerminalIPs.ContainsKey($IP) -and -not $isTerminalIncoming) { return $false }
+    if ($Timestamp -and $Tracker.LastTsByIP.ContainsKey($IP) -and ($Timestamp -lt $Tracker.LastTsByIP[$IP])) { return $false }
+    return $true
+}
+
 function Watch-DirectThreadJobs {
     param(
         [array]$WorkerJobs,
@@ -2969,6 +2991,8 @@ function Watch-DirectThreadJobs {
         CompletionList = @()  # Array of @{IP="x.x.x.x"; Status="✓/✗"; Time="00:00"; StartTime=DateTime}
         ProgressByIP = @{}    # Hashtable tracking each MS's progress percentage: @{IP1 = 30; IP2 = 75; IP3 = 100}
         TotalMS = 0           # Total number of Miniservers being updated
+        LastTsByIP = @{}      # Newest status Timestamp applied per IP - rejects stale/replayed updates
+        TerminalIPs = @{}     # IPs that reached Completed/Failed/UpToDate - sticky, never regress to an earlier phase
     }
     
     # Monitor ThreadJobs
@@ -3065,7 +3089,27 @@ function Watch-DirectThreadJobs {
                     if ($progressMsg.Type -eq 'Miniserver' -and $progressMsg.IP) {
                         $msIP = $progressMsg.IP
                         $msState = $progressMsg.State
-                        
+
+                        # --- Monotonicity guard (2026-07-17): a finished MS must not be dragged back to an
+                        # earlier phase by a stale or REPLAYED status update. The worker re-enqueues its
+                        # FULL status history at job end (see ~line 2696), and the block below removes the IP
+                        # from every bucket and re-adds it to whatever state the message carries - so without
+                        # this guard a replayed 'Downloading' processed after 'Completed' lands the MS back in
+                        # Downloading and the display walks backwards (observed 2026-07-17 on 192.168.178.2).
+                        $terminalStates = @('Completed', 'Complete', 'Failed', 'UpToDate')
+                        $msIsTerminalIncoming = $terminalStates -contains $msState
+                        if (-not (Test-ShouldApplyMSStatus -Tracker $msStatusTracker -IP $msIP -State $msState -Timestamp $progressMsg.Timestamp)) {
+                            Write-Log "[Watch-DirectThreadJobs] Ignoring out-of-order '$msState' update for $msIP (would regress a finished/newer state)" -Level "DEBUG"
+                            continue
+                        }
+                        # Update accepted - record its timestamp (keep the newest) and terminal stickiness
+                        if ($progressMsg.Timestamp) {
+                            if (-not $msStatusTracker.LastTsByIP.ContainsKey($msIP) -or ($progressMsg.Timestamp -gt $msStatusTracker.LastTsByIP[$msIP])) {
+                                $msStatusTracker.LastTsByIP[$msIP] = $progressMsg.Timestamp
+                            }
+                        }
+                        if ($msIsTerminalIncoming) { $msStatusTracker.TerminalIPs[$msIP] = $true }
+
                         # Remove MS from all status arrays
                         foreach ($status in @('Connecting', 'Downloading', 'Updating', 'Installing', 'Rebooting', 'Verifying', 'UpToDate', 'Completed', 'Failed')) {
                             $msStatusTracker.$status = @($msStatusTracker.$status | Where-Object { $_ -ne $msIP })

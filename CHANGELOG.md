@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.1] - 2026-07-19 21:02:37
+
+### Added
+- Stall detection for Miniserver firmware updates: a Miniserver can ACK the autoupdate trigger and log `Start Auto Update` yet never actually install — no install-begin marker (`Update Miniserver <path>.upd`) ever appears in def.log, it never enters the Updating (503) state, and it stays on the old firmware until the 25-minute version timeout expires (observed 2026-07-17 on 192.168.2.210, which burned the full 25 minutes). The def.log probe now tracks the install-begin marker (distinct from the `...erfolgreich` success line) and, once a 10-minute grace period after `Start Auto Update` passes with no install activity, declares the update stalled with status `UpdateFailed_Stalled`, reports the failure via `Send-MSStatusUpdate`, and stops polling immediately. The verdict uses two-probe confirmation so a just-started install clears a false stall candidate on the next probe, and the grace period is measured against the local clock (recorded when the marker is first seen) rather than the Miniserver's clock, which can skew
+- `Test-ShouldApplyMSStatus` function in `LoxoneUtils.ParallelWorkflow`, extracting the Miniserver status monotonicity decision into a unit-testable helper: terminal states (`Completed`/`Complete`/`Failed`/`UpToDate`) are sticky per IP, and updates strictly older than the newest already-applied timestamp for that IP are rejected; timeless updates bypass the timestamp rule and rely on terminal stickiness alone
+
+### Fixed
+- A finished Miniserver is no longer dragged back to an earlier phase in the parallel status display by stale or replayed status updates. The worker re-enqueues its full status history at job end, and `Watch-DirectThreadJobs` removes the IP from every status bucket before re-adding it to whatever state the message carries — so a replayed `Downloading` processed after `Completed` landed the MS back in Downloading and the display walked backwards (observed 2026-07-17 on 192.168.178.2). The watcher now runs every incoming Miniserver status through `Test-ShouldApplyMSStatus`, ignores out-of-order updates with a DEBUG log line, and records the newest applied timestamp and terminal stickiness per IP
+
+### Changed
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.1 with the new installer URL, SHA256 checksum, and release date 2026-07-19
+
 ## [0.9.0] - 2026-07-03 19:26:18
 
 ### Fixed
@@ -25,6 +37,18 @@
 - A Miniserver trigger rejection (XML Code != 200) is now routed through the retry loop like a thrown error, so `$lastTriggerError` is set and the progressive retry delay (2s/4s/6s) applies; the final-failure path also guards against a null `$lastTriggerError` (falling back to `Unknown trigger failure`) instead of crashing when building the `Error_TriggeringUpdate` status message
 - Removed the outer catch that swallowed trigger errors outside the retry loop and overwrote the status message with a generic failure; trigger errors are now handled exclusively inside the retry loop, and the polling/verification block is only entered when the trigger succeeded or an update was already in progress
 - `Get-InstalledVersion` error logging now actually includes the exception message — the previous `${(# Changelog
+
+## [0.9.1] - 2026-07-19 21:02:37
+
+### Added
+- Stall detection for Miniserver firmware updates: a Miniserver can ACK the autoupdate trigger and log `Start Auto Update` yet never actually install — no install-begin marker (`Update Miniserver <path>.upd`) ever appears in def.log, it never enters the Updating (503) state, and it stays on the old firmware until the 25-minute version timeout expires (observed 2026-07-17 on 192.168.2.210, which burned the full 25 minutes). The def.log probe now tracks the install-begin marker (distinct from the `...erfolgreich` success line) and, once a 10-minute grace period after `Start Auto Update` passes with no install activity, declares the update stalled with status `UpdateFailed_Stalled`, reports the failure via `Send-MSStatusUpdate`, and stops polling immediately. The verdict uses two-probe confirmation so a just-started install clears a false stall candidate on the next probe, and the grace period is measured against the local clock (recorded when the marker is first seen) rather than the Miniserver's clock, which can skew
+- `Test-ShouldApplyMSStatus` function in `LoxoneUtils.ParallelWorkflow`, extracting the Miniserver status monotonicity decision into a unit-testable helper: terminal states (`Completed`/`Complete`/`Failed`/`UpToDate`) are sticky per IP, and updates strictly older than the newest already-applied timestamp for that IP are rejected; timeless updates bypass the timestamp rule and rely on terminal stickiness alone
+
+### Fixed
+- A finished Miniserver is no longer dragged back to an earlier phase in the parallel status display by stale or replayed status updates. The worker re-enqueues its full status history at job end, and `Watch-DirectThreadJobs` removes the IP from every status bucket before re-adding it to whatever state the message carries — so a replayed `Downloading` processed after `Completed` landed the MS back in Downloading and the display walked backwards (observed 2026-07-17 on 192.168.178.2). The watcher now runs every incoming Miniserver status through `Test-ShouldApplyMSStatus`, ignores out-of-order updates with a DEBUG log line, and records the newest applied timestamp and terminal stickiness per IP
+
+### Changed
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.1 with the new installer URL, SHA256 checksum, and release date 2026-07-19
 
 ## [0.9.0] - 2026-07-03 19:26:18
 

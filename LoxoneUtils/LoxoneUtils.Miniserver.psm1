@@ -1787,10 +1787,18 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         $defLogBootRegex = ';PRG Reboot\s+\S+'                            # Boot line (logged on every startup)
         $defLogStartRegex = ';Start Auto Update'                          # Trigger registered on the MS
         $defLogStartSeen = $false
-        $defLogStartTime = [DateTime]::MaxValue                           # Set when 'Start Auto Update' is found
+        $defLogStartTime = [DateTime]::MaxValue                           # Set when 'Start Auto Update' is found (MS clock)
+        $defLogStartSeenLocalTime = $null                                 # Local clock when we first saw it (MS clock can skew)
         $defLogStartWarned = $false
         $defLogCrashCandidate = $null                                     # Two-probe confirmation state
         $defLogProbeFailureLogged = $false                                # First probe failure logs at INFO
+        # Stall failmode (observed 2026-07-17, MS 192.168.2.210): the MS ACKs the trigger and logs
+        # 'Start Auto Update' but never actually installs - the install-begin line below never appears,
+        # it never returns 503, and it stays on the old firmware until the 25-min version timeout.
+        $defLogInstallBeginRegex = 'Update Miniserver\s+\S+\.upd'         # Install actually began (distinct from the '...erfolgreich' success line)
+        $defLogInstallSeen = $false
+        $defLogStallGraceSeconds = 600                                    # 10 min: comfortably past normal install-begin latency (~3 min observed)
+        $defLogStallCandidate = $false                                    # Two-probe confirmation state
 
         $Attempts = 0; $MaxAttempts = [Math]::Floor($timeout.TotalSeconds / 10)
         $LastPollStatusMessage = "Initiating..."
@@ -1916,10 +1924,13 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                                     if (-not $defLogFailLine -and $dl -match $defLogFailureRegex) { $defLogFailLine = $dl.Trim() }
                                     elseif (-not $defLogOkLine -and $dl -match $defLogSuccessRegex) { $defLogOkLine = $dl.Trim() }
                                     if (-not $defLogStartSeen -and $dl -match $defLogStartRegex) {
-                                        $defLogStartSeen = $true; $defLogStartTime = $lineTime
+                                        $defLogStartSeen = $true; $defLogStartTime = $lineTime; $defLogStartSeenLocalTime = Get-Date
                                         # Positive confirmation the probe pipeline works AND the MS registered our trigger
                                         Write-Log -Message ("[DEFLOG] MS {0} registered the update trigger: {1}" -f $hostForPingInInvoke, $dl.Trim()) -Level INFO
                                     }
+                                    # Install-begin marker ('Update Miniserver <path>.upd', NOT the '...erfolgreich' success line):
+                                    # proves the MS actually started applying the update, distinguishing a real (slow) update from a stall.
+                                    if (-not $defLogInstallSeen -and $dl -match $defLogInstallBeginRegex -and $dl -notmatch 'erfolgreich') { $defLogInstallSeen = $true }
                                     # Reboot/boot markers only count AFTER the MS registered our trigger -
                                     # a reboot that happened pre-run (inside the baseline window) is not a crash
                                     if ($defLogStartSeen -and $lineTime -ge $defLogStartTime) {
@@ -1973,6 +1984,34 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                 if ($defLogProbeOk -and -not $defLogStartSeen -and -not $defLogStartWarned -and (((Get-Date) - $startTime).TotalSeconds -ge 180)) {
                     $defLogStartWarned = $true
                     Write-Log -Message ("[DEFLOG] MS {0} ACKed the autoupdate trigger but def.log shows no 'Start Auto Update' after 3 minutes - update routine may not have started" -f $hostForPingInInvoke) -Level WARN
+                }
+
+                # ---- Stall failmode: 'Start Auto Update' logged, but the update never actually began ----
+                # The MS registered the trigger yet never wrote an install-begin marker, never entered the
+                # Updating (503) state, and stays on the old firmware. Previously only the 25-min version
+                # timeout caught this (observed 2026-07-17 on 192.168.2.210, which burned the full 25 min).
+                # Declare it early once the grace period passes; two-probe confirmation lets a just-started
+                # install clear a false candidate on the next probe.
+                if (-not $defLogVerdictReached -and $defLogProbeOk -and $defLogStartSeen -and `
+                    -not $defLogInstallSeen -and -not $loggedUpdatingStatus -and $null -ne $defLogStartSeenLocalTime -and `
+                    (((Get-Date) - $defLogStartSeenLocalTime).TotalSeconds -ge $defLogStallGraceSeconds)) {
+                    if ($defLogStallCandidate) {
+                        $defLogVerdictReached = $true
+                        $invokeResult.UpdateFailedReason = ("Miniserver accepted the update trigger but never began installing (no install-begin marker in def.log and never entered the Updating state after {0:N0} min; still on the old firmware)" -f ($defLogStallGraceSeconds / 60))
+                        $invokeResult.CurrentState = 'Failed'
+                        $invokeResult.StatusMessage = "UpdateFailed_Stalled"
+                        Write-Log -Message ("[DEFLOG] MS {0} STALLED: 'Start Auto Update' was logged but there is no install-begin marker and it never entered Updating after {1:N0} min - the update never started" -f $hostForPingInInvoke, ($defLogStallGraceSeconds / 60)) -Level ERROR
+                        Send-MSStatusUpdate -State 'Failed' -Progress 0 -Message "Update stalled: miniserver never started installing (still on old firmware)" `
+                            -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
+                        break  # Update never started - stop polling immediately
+                    } else {
+                        $defLogStallCandidate = $true
+                        Write-Log -Message ("[DEFLOG] MS {0} possible stall: 'Start Auto Update' logged but no install activity after {1:N0} min - confirming on next probe" -f $hostForPingInInvoke, ($defLogStallGraceSeconds / 60)) -Level WARN
+                    }
+                } elseif ($defLogStallCandidate -and ($defLogInstallSeen -or $loggedUpdatingStatus)) {
+                    # A prior probe flagged a possible stall, but the MS has since started installing - clear it.
+                    $defLogStallCandidate = $false
+                    Write-Log -Message ("[DEFLOG] MS {0} stall candidate cleared - install activity detected" -f $hostForPingInInvoke) -Level INFO
                 }
             }
             # ---- end def.log outcome probe ----
