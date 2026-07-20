@@ -1339,7 +1339,9 @@ param(
     [Parameter()]$PasswordForAuthHeader = $null, # Manually parsed password (can be SecureString or plain text)
     [Parameter()][switch]$SkipCertificateCheck,
     [Parameter()][scriptblock]$ProgressReporter = $null,
-    [Parameter()][System.Collections.Concurrent.ConcurrentQueue[hashtable]]$ProgressQueue = $null # REAL-TIME status updates
+    [Parameter()][System.Collections.Concurrent.ConcurrentQueue[hashtable]]$ProgressQueue = $null, # REAL-TIME status updates
+    [Parameter()][long]$ExpectedUpdSizeGen1 = 0, # Expected firmware .upd size (Gen1, from update XML) for x/y download progress
+    [Parameter()][long]$ExpectedUpdSizeGen2 = 0  # Expected firmware .upd size (Gen2, from update XML) for x/y download progress
 )
 # Immediate defensive check for PS7 parallel context issues
 if ($null -eq $MSUri) {
@@ -1767,6 +1769,14 @@ try { # Main try for ProgressPreference and SSL Callback restoration
         $ftpDownloadDetected = $false
         $ftpTimeoutExtended = $false
         $ftpProbeFailureLogged = $false   # First probe failure logs at INFO so a blind probe is visible
+        # Expected final .upd size for x/y (pct%) download progress. The scheme is the generation
+        # hint (Gen2 requires HTTPS; Gen1-Grey is HTTP-only) - and it self-corrects: if the observed
+        # size ever exceeds the Gen1 firmware size, this must be a Gen2 downloading the bigger image.
+        $ftpExpectedFinalSize = if ($schemeInInvoke -eq 'https') { $ExpectedUpdSizeGen2 } else { $ExpectedUpdSizeGen1 }
+        # First observed sample = baseline for the average download rate / ETA (the download began
+        # before we first saw it, so rate is computed over the observed window only)
+        $ftpFirstSampleTime = $null
+        $ftpFirstSampleSize = [long]0
         # Convert version "16.3.3.11" → prefix "16030311" for matching .upd filenames
         $ftpVersionPrefix = ($NormalizedDesiredVersion -split '\.' | ForEach-Object { $_.PadLeft(2, '0') }) -join ''
         Write-Log -Message ("FTP download probe: version prefix '{0}', credentials: {1}" -f $ftpVersionPrefix, $(if ($ftpCredential) { 'available' } else { 'none' })) -Level DEBUG
@@ -1858,11 +1868,50 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                     if ($currentFileCount -gt 0) {
                         $isGrowing = ($currentFileCount -gt $ftpPreviousFileCount) -or ($currentTotalSize -gt $ftpPreviousTotalSize)
 
+                        # Self-correct the generation guess: observed size beyond the Gen1 image = Gen2
+                        if ($ExpectedUpdSizeGen2 -gt 0 -and $ftpExpectedFinalSize -gt 0 -and `
+                            $currentTotalSize -gt $ftpExpectedFinalSize -and $ExpectedUpdSizeGen2 -gt $ftpExpectedFinalSize) {
+                            Write-Log -Message ("[FTP_PROBE] MS {0} download exceeded the Gen1 firmware size - switching expected size to Gen2 ({1:N1} MB)" -f $hostForPingInInvoke, ($ExpectedUpdSizeGen2 / 1MB)) -Level DEBUG
+                            $ftpExpectedFinalSize = $ExpectedUpdSizeGen2
+                        }
+
+                        # x/y (pct%) when the expected final size is known, absolute size otherwise
+                        if ($ftpExpectedFinalSize -gt 0) {
+                            $ftpPct = [Math]::Min(100, [int][Math]::Round(($currentTotalSize / $ftpExpectedFinalSize) * 100))
+                            $ftpSizeText = ("{0:N0}/{1:N0} MB, {2}%" -f ($currentTotalSize / 1MB), ($ftpExpectedFinalSize / 1MB), $ftpPct)
+                            # Scale toast progress 20-35 with download percentage (stays below Updating=45)
+                            $ftpProgressValue = 20 + [int][Math]::Floor($ftpPct * 0.15)
+                        } else {
+                            $ftpPct = $null
+                            $ftpSizeText = ("{0:N0} MB" -f ($currentTotalSize / 1MB))
+                            $ftpProgressValue = 25
+                        }
+
+                        # Average download rate over the observed window + estimated time remaining
+                        if ($null -eq $ftpFirstSampleTime) {
+                            # First sighting of the download - start the rate baseline here
+                            $ftpFirstSampleTime = Get-Date
+                            $ftpFirstSampleSize = $currentTotalSize
+                        } elseif ($currentTotalSize -gt $ftpFirstSampleSize) {
+                            $ftpObservedSeconds = ((Get-Date) - $ftpFirstSampleTime).TotalSeconds
+                            if ($ftpObservedSeconds -ge 5) {
+                                $ftpRateBps = ($currentTotalSize - $ftpFirstSampleSize) / $ftpObservedSeconds
+                                $ftpRateText = if ($ftpRateBps -ge 999KB) { "{0:N1} MB/s" -f ($ftpRateBps / 1MB) } else { "{0:N0} KB/s" -f ($ftpRateBps / 1KB) }
+                                $ftpSizeText += ", $ftpRateText"
+                                if ($ftpExpectedFinalSize -gt 0 -and $ftpPct -lt 100 -and $ftpRateBps -gt 0) {
+                                    $ftpEtaSeconds = ($ftpExpectedFinalSize - $currentTotalSize) / $ftpRateBps
+                                    $ftpEtaText = if ($ftpEtaSeconds -lt 90) { "~{0}s left" -f [int][Math]::Round($ftpEtaSeconds) }
+                                                  else { "~{0} min left" -f [int][Math]::Ceiling($ftpEtaSeconds / 60) }
+                                    $ftpSizeText += ", $ftpEtaText"
+                                }
+                            }
+                        }
+
                         if (-not $ftpDownloadDetected) {
                             $ftpDownloadDetected = $true
-                            Write-Log -Message ("[FTP_PROBE] Download detected for MS {0}: {1} files, {2:N1} MB" -f $hostForPingInInvoke, $currentFileCount, ($currentTotalSize / 1MB)) -Level INFO
+                            Write-Log -Message ("[FTP_PROBE] Download detected for MS {0}: {1} files, {2}" -f $hostForPingInInvoke, $currentFileCount, $ftpSizeText) -Level INFO
 
-                            Send-MSStatusUpdate -State 'Downloading' -Progress 20 -Message ("Downloading firmware ({0} files, {1:N0} MB)" -f $currentFileCount, [Math]::Round($currentTotalSize / 1MB)) `
+                            Send-MSStatusUpdate -State 'Downloading' -Progress $(if ($ftpExpectedFinalSize -gt 0) { $ftpProgressValue } else { 20 }) -Message ("Downloading firmware ({0} files, {1})" -f $currentFileCount, $ftpSizeText) `
                                 -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
 
                             # Extend timeout to 25 minutes for slow downloads
@@ -1874,9 +1923,9 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                             }
                         } elseif ($isGrowing) {
                             $sizeDiffMB = [Math]::Round(($currentTotalSize - $ftpPreviousTotalSize) / 1MB, 1)
-                            Write-Log -Message ("[FTP_PROBE] Download progressing for MS {0}: {1} files, {2:N1} MB (+{3} MB)" -f $hostForPingInInvoke, $currentFileCount, ($currentTotalSize / 1MB), $sizeDiffMB) -Level INFO
+                            Write-Log -Message ("[FTP_PROBE] Download progressing for MS {0}: {1} files, {2} (+{3} MB)" -f $hostForPingInInvoke, $currentFileCount, $ftpSizeText, $sizeDiffMB) -Level INFO
 
-                            Send-MSStatusUpdate -State 'Downloading' -Progress 25 -Message ("Downloading firmware ({0} files, {1:N0} MB)" -f $currentFileCount, [Math]::Round($currentTotalSize / 1MB)) `
+                            Send-MSStatusUpdate -State 'Downloading' -Progress $ftpProgressValue -Message ("Downloading firmware ({0} files, {1})" -f $currentFileCount, $ftpSizeText) `
                                 -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
                         }
 

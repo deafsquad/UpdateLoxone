@@ -2666,10 +2666,14 @@ function Start-MiniserverWorker {
                                 # Capture to local variable to avoid scope issues with nested function calls
                                 $progressQueueForUpdate = $Pipeline.ProgressQueue
 
+                                # Expected firmware .upd sizes (from update XML) for x/y download progress
+                                $fwSizeGen1 = if ($ms.FirmwareSizeGen1) { [long]$ms.FirmwareSizeGen1 } else { 0L }
+                                $fwSizeGen2 = if ($ms.FirmwareSizeGen2) { [long]$ms.FirmwareSizeGen2 } else { 0L }
+
                                 if (-not $EnforceSSL) {
-                                    $updateResult = Invoke-MSUpdate -MSUri $updateUri -NormalizedDesiredVersion $targetVersion -UsernameForAuthHeader $usernameForAuth -PasswordForAuthHeader $passwordForAuth -SkipCertificateCheck -ProgressQueue $progressQueueForUpdate
+                                    $updateResult = Invoke-MSUpdate -MSUri $updateUri -NormalizedDesiredVersion $targetVersion -UsernameForAuthHeader $usernameForAuth -PasswordForAuthHeader $passwordForAuth -SkipCertificateCheck -ProgressQueue $progressQueueForUpdate -ExpectedUpdSizeGen1 $fwSizeGen1 -ExpectedUpdSizeGen2 $fwSizeGen2
                                 } else {
-                                    $updateResult = Invoke-MSUpdate -MSUri $updateUri -NormalizedDesiredVersion $targetVersion -UsernameForAuthHeader $usernameForAuth -PasswordForAuthHeader $passwordForAuth -ProgressQueue $progressQueueForUpdate
+                                    $updateResult = Invoke-MSUpdate -MSUri $updateUri -NormalizedDesiredVersion $targetVersion -UsernameForAuthHeader $usernameForAuth -PasswordForAuthHeader $passwordForAuth -ProgressQueue $progressQueueForUpdate -ExpectedUpdSizeGen1 $fwSizeGen1 -ExpectedUpdSizeGen2 $fwSizeGen2
                                 }
 
                                 # Debug logging for StatusUpdates

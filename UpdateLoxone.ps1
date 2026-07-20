@@ -1616,6 +1616,8 @@ try {
                 Credential = $msEntry.Credential
                 UpdateLevel = $prerequisites.MSUpdateLevel
                 TargetVersion = $prerequisites.MSTargetVersion  # Add target version for MS worker
+                FirmwareSizeGen1 = $prerequisites.MSFirmwareSizeGen1  # Expected .upd size for x/y download progress
+                FirmwareSizeGen2 = $prerequisites.MSFirmwareSizeGen2
             }
         }
     }
@@ -1726,6 +1728,8 @@ try {
                             TargetVersion = $msTarget.TargetVersion
                             CurrentVersion = $msTarget.InitialVersion  # Pass pre-checked version to avoid re-checking
                             OriginalEntry = if ($msEntry -is [string]) { $msEntry } elseif ($msEntry -and $msEntry.Url) { $msEntry.Url } else { $null }  # Pass entry for fallback
+                            FirmwareSizeGen1 = $prerequisites.MSFirmwareSizeGen1  # Expected .upd size for x/y download progress
+                            FirmwareSizeGen2 = $prerequisites.MSFirmwareSizeGen2
                         }
                         
                         $workflowDefinition.MiniserverUpdates += $msUpdate

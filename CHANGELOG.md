@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.2] - 2026-07-21 01:11:56
+
+### Added
+- Percentage-based x/y download progress for Miniserver firmware downloads. The FTP download probe previously only reported the absolute size observed so far ("57 MB"), giving no sense of completion. `Get-LoxoneUpdateData` now also parses the expected firmware `.upd` sizes from the update XML — `<update type='ms2'>` for Gen2 and `<update type='ms'>` for Gen1, reading the `Filesize` of the selected channel node (`LatestRelease` for Public, otherwise the channel name) — into new `MSFirmwareSizeGen1`/`MSFirmwareSizeGen2` result fields. The sizes are threaded through `Get-LoxoneUpdatePrerequisites`, the workflow definitions in `UpdateLoxone.ps1` (as `FirmwareSizeGen1`/`FirmwareSizeGen2` on each Miniserver update entry), and `Start-MiniserverWorker` into two new `Invoke-MSUpdate` parameters, `-ExpectedUpdSizeGen1` and `-ExpectedUpdSizeGen2`. With a known expected size, the probe's log lines and `Send-MSStatusUpdate` messages show "x/y MB, pct%", and the toast progress value scales from 20 to 35 with the download percentage (staying below the Updating phase at 45) instead of sitting at a fixed 20/25
+- Average download rate and estimated time remaining in the firmware download progress. The first observed directory-listing sample becomes the rate baseline (the download starts before the probe first sees it, so the rate is computed over the observed window only); once at least 5 seconds of samples exist, the status text appends the rate ("x.x MB/s" or "x KB/s") and, when the expected size is known, an ETA ("~Ns left" under 90 seconds, "~N min left" above)
+- Self-correcting generation guess for the expected firmware size: the probe initially picks Gen2 or Gen1 size from the connection scheme (Gen2 requires HTTPS, Gen1-Grey is HTTP-only), and if the observed download ever exceeds the Gen1 image size it switches the expected size to the larger Gen2 image, logging the correction at DEBUG
+
+### Changed
+- When the firmware `Filesize` cannot be read from the update XML (missing node or unparsable value), the download progress gracefully falls back to reporting the absolute downloaded size only, with a DEBUG/WARN log line explaining why
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.2 with the new installer URL, SHA256 checksum, and release date 2026-07-21
+
 ## [0.9.1] - 2026-07-19 21:02:37
 
 ### Added
@@ -37,6 +48,17 @@
 - A Miniserver trigger rejection (XML Code != 200) is now routed through the retry loop like a thrown error, so `$lastTriggerError` is set and the progressive retry delay (2s/4s/6s) applies; the final-failure path also guards against a null `$lastTriggerError` (falling back to `Unknown trigger failure`) instead of crashing when building the `Error_TriggeringUpdate` status message
 - Removed the outer catch that swallowed trigger errors outside the retry loop and overwrote the status message with a generic failure; trigger errors are now handled exclusively inside the retry loop, and the polling/verification block is only entered when the trigger succeeded or an update was already in progress
 - `Get-InstalledVersion` error logging now actually includes the exception message — the previous `${(# Changelog
+
+## [0.9.2] - 2026-07-21 01:11:56
+
+### Added
+- Percentage-based x/y download progress for Miniserver firmware downloads. The FTP download probe previously only reported the absolute size observed so far ("57 MB"), giving no sense of completion. `Get-LoxoneUpdateData` now also parses the expected firmware `.upd` sizes from the update XML — `<update type='ms2'>` for Gen2 and `<update type='ms'>` for Gen1, reading the `Filesize` of the selected channel node (`LatestRelease` for Public, otherwise the channel name) — into new `MSFirmwareSizeGen1`/`MSFirmwareSizeGen2` result fields. The sizes are threaded through `Get-LoxoneUpdatePrerequisites`, the workflow definitions in `UpdateLoxone.ps1` (as `FirmwareSizeGen1`/`FirmwareSizeGen2` on each Miniserver update entry), and `Start-MiniserverWorker` into two new `Invoke-MSUpdate` parameters, `-ExpectedUpdSizeGen1` and `-ExpectedUpdSizeGen2`. With a known expected size, the probe's log lines and `Send-MSStatusUpdate` messages show "x/y MB, pct%", and the toast progress value scales from 20 to 35 with the download percentage (staying below the Updating phase at 45) instead of sitting at a fixed 20/25
+- Average download rate and estimated time remaining in the firmware download progress. The first observed directory-listing sample becomes the rate baseline (the download starts before the probe first sees it, so the rate is computed over the observed window only); once at least 5 seconds of samples exist, the status text appends the rate ("x.x MB/s" or "x KB/s") and, when the expected size is known, an ETA ("~Ns left" under 90 seconds, "~N min left" above)
+- Self-correcting generation guess for the expected firmware size: the probe initially picks Gen2 or Gen1 size from the connection scheme (Gen2 requires HTTPS, Gen1-Grey is HTTP-only), and if the observed download ever exceeds the Gen1 image size it switches the expected size to the larger Gen2 image, logging the correction at DEBUG
+
+### Changed
+- When the firmware `Filesize` cannot be read from the update XML (missing node or unparsable value), the download progress gracefully falls back to reporting the absolute downloaded size only, with a DEBUG/WARN log line explaining why
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.2 with the new installer URL, SHA256 checksum, and release date 2026-07-21
 
 ## [0.9.1] - 2026-07-19 21:02:37
 

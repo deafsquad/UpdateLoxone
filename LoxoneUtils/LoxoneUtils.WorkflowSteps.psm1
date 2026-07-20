@@ -509,6 +509,8 @@ function Get-LoxoneUpdatePrerequisites {
         AppExpectedCRC                  = $null
         AppInstallerFileName            = "LoxoneWindowsSetup.exe" # Default, may be overridden by Get-LoxoneUpdateData
         SelectedAppChannelName          = $null
+        MSFirmwareSizeGen1              = 0L   # Expected MS firmware .upd size (Gen1) for download x/y progress
+        MSFirmwareSizeGen2              = 0L   # Expected MS firmware .upd size (Gen2) for download x/y progress
     }
 
     try {
@@ -581,6 +583,8 @@ $configChannelActual = if ($WorkflowContext.Params.ContainsKey('Channel')) {
         $result.ConfigZipUrl                  = $updateData.ConfigZipUrl
         $result.ConfigExpectedZipSize         = $updateData.ConfigExpectedZipSize
         $result.ConfigExpectedCRC             = $updateData.ConfigExpectedCRC
+        $result.MSFirmwareSizeGen1            = $updateData.MSFirmwareSizeGen1
+        $result.MSFirmwareSizeGen2            = $updateData.MSFirmwareSizeGen2
         
         # Debug logging
         Write-Log -Message "($FunctionName) Setting ConfigZipUrl from updateData: '$($updateData.ConfigZipUrl)' -> result.ConfigZipUrl: '$($result.ConfigZipUrl)'" -Level DEBUG

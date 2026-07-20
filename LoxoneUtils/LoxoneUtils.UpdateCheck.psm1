@@ -44,6 +44,8 @@ function Get-LoxoneUpdateData {
         AppExpectedCRC          = $null
         AppExpectedSize         = 0L
         SelectedAppChannelName  = $null
+        MSFirmwareSizeGen1      = 0L   # Expected .upd Filesize for Gen1 Miniservers (XML node type='ms')
+        MSFirmwareSizeGen2      = 0L   # Expected .upd Filesize for Gen2 Miniservers (XML node type='ms2')
         Error                   = $null
     }
 
@@ -97,6 +99,30 @@ function Get-LoxoneUpdateData {
             $result.Error = "Failed to convert Config version string '$rawConfigVersion': $($_.Exception.Message)"
             Write-Log -Message $result.Error -Level ERROR
             # Continue to App check if possible, but mark error
+        }
+
+        # --- Miniserver Firmware Expected Sizes (for x/y download progress) ---
+        # The MS firmware .upd entries live in <update type='ms2'> (Gen2) and <update type='ms'>
+        # (Gen1/LoxLIVE) with channel children LatestRelease/Beta/Test carrying Filesize. The MS
+        # downloads the firmware itself; knowing the final size lets the FTP probe show x/y MB (pct%).
+        try {
+            $fwChannelChild = if ($ConfigChannel -eq 'Public') { 'LatestRelease' } else { $ConfigChannel }
+            foreach ($fwGen in @(
+                @{ Type = 'ms2'; Property = 'MSFirmwareSizeGen2'; Label = 'Gen2' },
+                @{ Type = 'ms';  Property = 'MSFirmwareSizeGen1'; Label = 'Gen1' }
+            )) {
+                $fwBaseNode = $updateXml.SelectSingleNode("/Miniserversoftware/update[@type='$($fwGen.Type)']")
+                $fwChannelNode = if ($fwBaseNode) { $fwBaseNode.SelectSingleNode($fwChannelChild) } else { $null }
+                $fwSize = 0L
+                if ($fwChannelNode -and ([long]::TryParse($fwChannelNode.Filesize, [ref]$fwSize)) -and $fwSize -gt 0) {
+                    $result.($fwGen.Property) = $fwSize
+                    Write-Log -Message "[MS] $($fwGen.Label) firmware (Channel: $fwChannelChild): Version=$($fwChannelNode.Version), Filesize=$fwSize B ($([Math]::Round($fwSize / 1MB, 1)) MB)" -Level INFO
+                } else {
+                    Write-Log -Message "[MS] Could not read $($fwGen.Label) firmware Filesize for channel '$fwChannelChild' from XML - download progress will show absolute size only." -Level DEBUG
+                }
+            }
+        } catch {
+            Write-Log -Message "[MS] Failed to parse Miniserver firmware sizes from XML: $($_.Exception.Message). Download progress will show absolute size only." -Level WARN
         }
 
         # --- Loxone for Windows (App) Update Info ---
