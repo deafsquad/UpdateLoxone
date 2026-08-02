@@ -13,6 +13,37 @@ function Format-Bytes {
         return "$Bytes bytes"
     }
 }
+
+# Normalize a CRC32 hex string to canonical 8-char uppercase form.
+# Get-CRC32 returns ToString("X8") (always zero-padded to 8), but Loxone's updatecheck.xml
+# strips leading zeros - e.g. the App InternalV2 channel publishes crc32="404699" for a file
+# whose real CRC is 00404699. 8 of 136 crc32 attributes in the live XML are short like this.
+# Returns $null when the value is absent or not valid hex (caller then falls back to raw compare).
+function ConvertTo-NormalizedCRC32 {
+    [CmdletBinding()]
+    param([Parameter()][AllowNull()][AllowEmptyString()]$Crc)
+    if ($null -eq $Crc) { return $null }
+    $text = ([string]$Crc).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    if ($text -notmatch '^[0-9a-fA-F]{1,8}$') { return $null }
+    return $text.PadLeft(8, '0').ToUpperInvariant()
+}
+
+# Compare two CRC32 values by VALUE, not by string form, so zero-padding differences don't
+# reject a perfectly good download (observed 2026-08-02: expected '404699' vs actual '00404699'
+# failed both attempts and aborted the App update). Falls back to a trimmed case-insensitive
+# string compare if either side isn't parseable hex.
+function Test-CRC32Match {
+    [CmdletBinding()]
+    param(
+        [Parameter()][AllowNull()][AllowEmptyString()]$ActualCRC,
+        [Parameter()][AllowNull()][AllowEmptyString()]$ExpectedCRC
+    )
+    $normActual = ConvertTo-NormalizedCRC32 $ActualCRC
+    $normExpected = ConvertTo-NormalizedCRC32 $ExpectedCRC
+    if ($normActual -and $normExpected) { return ($normActual -eq $normExpected) }
+    return ([string]::Compare(([string]$ActualCRC).Trim(), ([string]$ExpectedCRC).Trim(), [System.StringComparison]::OrdinalIgnoreCase) -eq 0)
+}
 #endregion Helper Functions
 
 #region Unified Download Function
@@ -69,45 +100,14 @@ function Invoke-LoxoneDownload {
                     Write-Log -Level DEBUG -Message "Checking CRC32..."
                     try {
                         $localCRC32 = Get-CRC32 -InputFile $DestinationPath
-                        # --- BEGIN DETAILED CRC DEBUG ---
-                        Write-Log -Level DEBUG -Message "CRC DEBUG: PRE-DOWNLOAD CHECK"
-                        Write-Log -Level DEBUG -Message "CRC DEBUG: Raw localCRC32: '$localCRC32'"
-                        Write-Log -Level DEBUG -Message "CRC DEBUG: Raw ExpectedCRC32: '$ExpectedCRC32'"
-                        try { Write-Log -Level DEBUG -Message "CRC DEBUG: Type localCRC32: $($localCRC32.GetType().FullName)" } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Type localCRC32: Error getting type" }
-                        try { Write-Log -Level DEBUG -Message "CRC DEBUG: Type ExpectedCRC32: $($ExpectedCRC32.GetType().FullName)" } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Type ExpectedCRC32: Error getting type" }
-                        try { Write-Log -Level DEBUG -Message "CRC DEBUG: Length localCRC32: $($localCRC32.Length)" } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Length localCRC32: Error getting length" }
-                        try { Write-Log -Level DEBUG -Message "CRC DEBUG: Length ExpectedCRC32: $($ExpectedCRC32.Length)" } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Length ExpectedCRC32: Error getting length" }
-                        
-                        $processedLocalCRC_pre = "??"
-                        $processedExpectedCRC_pre = "??"
-                        try { $processedLocalCRC_pre = ([string]$localCRC32).Trim() } catch { $processedLocalCRC_pre = "ERROR Processing localCRC32: $($_.Exception.Message)"}
-                        try { $processedExpectedCRC_pre = ([string]$ExpectedCRC32).Trim() } catch { $processedExpectedCRC_pre = "ERROR Processing ExpectedCRC32: $($_.Exception.Message)"}
-                        Write-Log -Level DEBUG -Message "CRC DEBUG: Processed localCRC32 (pre-dl): '$processedLocalCRC_pre'"
-                        Write-Log -Level DEBUG -Message "CRC DEBUG: Processed ExpectedCRC32 (pre-dl): '$processedExpectedCRC_pre'"
-
-                        # Normalize CRC strings: If calculated is 8 chars starting with '0' and expected is 7 chars, strip leading '0'.
-                        if ($processedLocalCRC_pre.Length -eq 8 -and $processedLocalCRC_pre.StartsWith('0') -and $processedExpectedCRC_pre.Length -eq 7) {
-                            Write-Log -Level DEBUG -Message "CRC DEBUG: Normalizing (pre-dl) local CRC '$processedLocalCRC_pre' to '$($processedLocalCRC_pre.Substring(1))' due to length difference and leading zero."
-                            $processedLocalCRC_pre = $processedLocalCRC_pre.Substring(1)
-                        }
-
-                        try {
-                            $localRawBytes_pre = [System.Text.Encoding]::UTF8.GetBytes($localCRC32)
-                            Write-Log -Level DEBUG -Message "CRC DEBUG: localCRC32 Raw Bytes (UTF8, pre-dl): $($localRawBytes_pre -join ',')"
-                            $localProcessedBytes_pre = [System.Text.Encoding]::UTF8.GetBytes($processedLocalCRC_pre)
-                            Write-Log -Level DEBUG -Message "CRC DEBUG: localCRC32 Processed Bytes (UTF8, pre-dl): $($localProcessedBytes_pre -join ',')"
-                        } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Error getting bytes for localCRC32 (pre-dl): $($_.Exception.Message)"}
-                        try {
-                            $expectedRawBytes_pre = [System.Text.Encoding]::UTF8.GetBytes($ExpectedCRC32)
-                            Write-Log -Level DEBUG -Message "CRC DEBUG: ExpectedCRC32 Raw Bytes (UTF8, pre-dl): $($expectedRawBytes_pre -join ',')"
-                            $expectedProcessedBytes_pre = [System.Text.Encoding]::UTF8.GetBytes($processedExpectedCRC_pre)
-                            Write-Log -Level DEBUG -Message "CRC DEBUG: ExpectedCRC32 Processed Bytes (UTF8, pre-dl): $($expectedProcessedBytes_pre -join ',')"
-                        } catch { Write-Log -Level DEBUG -Message "CRC DEBUG: Error getting bytes for ExpectedCRC32 (pre-dl): $($_.Exception.Message)"}
-                        # --- END DETAILED CRC DEBUG ---
-                        if ([string]::Compare($processedLocalCRC_pre, $processedExpectedCRC_pre, [System.StringComparison]::OrdinalIgnoreCase) -ne 0) {
+                        # Value-based comparison (tolerates Loxone's zero-stripped XML values)
+                        $normLocalPre = ConvertTo-NormalizedCRC32 $localCRC32
+                        $normExpectedPre = ConvertTo-NormalizedCRC32 $ExpectedCRC32
+                        Write-Log -Level DEBUG -Message "CRC PRE-DOWNLOAD: actual '$localCRC32' (normalized '$normLocalPre') vs expected '$ExpectedCRC32' (normalized '$normExpectedPre')"
+                        if (-not (Test-CRC32Match -ActualCRC $localCRC32 -ExpectedCRC $ExpectedCRC32)) {
                             $crcMatch = $false
-                            Write-Log -Level WARN -Message "CRC mismatch ($localCRC32 vs $ExpectedCRC32). Re-downloading."
-                        } else { Write-Log -Level DEBUG -Message "CRC matches." }
+                            Write-Log -Level WARN -Message "CRC mismatch for existing file '$DestinationPath': actual $localCRC32 (normalized $normLocalPre) vs expected $ExpectedCRC32 (normalized $normExpectedPre). Re-downloading."
+                        } else { Write-Log -Level DEBUG -Message "CRC matches (normalized $normLocalPre)." }
                     } catch {
                         $crcMatch = $false
                         Write-Log -Level WARN -Message "Error calculating CRC: $($_.Exception.Message). Assuming mismatch."
@@ -147,6 +147,7 @@ function Invoke-LoxoneDownload {
         if ($needsDownload) {
             $totalAttempts = $MaxRetries + 1
             $overallDownloadSuccess = $false # Flag for final status after loop
+            $lastFailureReason = "unknown"   # Carried into the final error so the cause isn't lost
 
             for ($attempt = 1; $attempt -le $totalAttempts; $attempt++) {
                 Write-Log -Message "Attempting download ($attempt/$totalAttempts) from '$($Url.AbsoluteUri)' to '$DestinationPath'..." -Level INFO
@@ -498,47 +499,20 @@ function Invoke-LoxoneDownload {
                                 Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: About to call Get-CRC32 for $DestinationPath"
                                 $localCRC32 = Get-CRC32 -InputFile $DestinationPath
                                 Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Get-CRC32 call completed. Raw localCRC32 is '$localCRC32'"
-                                # --- BEGIN DETAILED CRC DEBUG ---
-                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: POST-DOWNLOAD CHECK"
-                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Raw localCRC32: '$localCRC32'"
-                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Raw ExpectedCRC32: '$ExpectedCRC32'"
-                                try { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Type localCRC32: $($localCRC32.GetType().FullName)" } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Type localCRC32: Error getting type" }
-                                try { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Type ExpectedCRC32: $($ExpectedCRC32.GetType().FullName)" } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Type ExpectedCRC32: Error getting type" }
-                                try { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Length localCRC32: $($localCRC32.Length)" } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Length localCRC32: Error getting length" }
-                                try { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Length ExpectedCRC32: $($ExpectedCRC32.Length)" } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Length ExpectedCRC32: Error getting length" }
-                                
-                                $processedLocalCRC_post = "??"
-                                $processedExpectedCRC_post = "??"
-                                try { $processedLocalCRC_post = ([string]$localCRC32).Trim() } catch { $processedLocalCRC_post = "ERROR Processing localCRC32: $($_.Exception.Message)"}
-                                try { $processedExpectedCRC_post = ([string]$ExpectedCRC32).Trim() } catch { $processedExpectedCRC_post = "ERROR Processing ExpectedCRC32: $($_.Exception.Message)"}
-                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Processed localCRC32: '$processedLocalCRC_post'"
-                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Processed ExpectedCRC32: '$processedExpectedCRC_post'"
-
-                                # Normalize CRC strings: If calculated is 8 chars starting with '0' and expected is 7 chars, strip leading '0'.
-                                if ($processedLocalCRC_post.Length -eq 8 -and $processedLocalCRC_post.StartsWith('0') -and $processedExpectedCRC_post.Length -eq 7) {
-                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Normalizing local CRC '$processedLocalCRC_post' to '$($processedLocalCRC_post.Substring(1))' due to length difference and leading zero."
-                                    $processedLocalCRC_post = $processedLocalCRC_post.Substring(1)
-                                }
-
-                                try {
-                                    $localRawBytes_post = [System.Text.Encoding]::UTF8.GetBytes($localCRC32)
-                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: localCRC32 Raw Bytes (UTF8): $($localRawBytes_post -join ',')"
-                                    $localProcessedBytes_post = [System.Text.Encoding]::UTF8.GetBytes($processedLocalCRC_post)
-                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: localCRC32 Processed Bytes (UTF8): $($localProcessedBytes_post -join ',')"
-                                } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Error getting bytes for localCRC32: $($_.Exception.Message)"}
-                                try {
-                                    $expectedRawBytes_post = [System.Text.Encoding]::UTF8.GetBytes($ExpectedCRC32)
-                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: ExpectedCRC32 Raw Bytes (UTF8): $($expectedRawBytes_post -join ',')"
-                                    $expectedProcessedBytes_post = [System.Text.Encoding]::UTF8.GetBytes($processedExpectedCRC_post)
-                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: ExpectedCRC32 Processed Bytes (UTF8): $($expectedProcessedBytes_post -join ',')"
-                                } catch { Write-Log -Level DEBUG -Message "$($ActivityName): CRC DEBUG: Error getting bytes for ExpectedCRC32: $($_.Exception.Message)"}
-                                # --- END DETAILED CRC DEBUG ---
-                                if ([string]::Compare($processedLocalCRC_post, $processedExpectedCRC_post, [System.StringComparison]::OrdinalIgnoreCase) -ne 0) { 
-                                    $crcVerified = $false 
-                                    Write-Log -Level ERROR -Message "$($ActivityName): CRC mismatch ($localCRC32 vs $ExpectedCRC32)."
-                                } else { 
-                                    $crcVerified = $true 
-                                    Write-Log -Level DEBUG -Message "$($ActivityName): CRC matches." 
+                                # Value-based comparison (tolerates Loxone's zero-stripped XML values)
+                                $normLocalPost = ConvertTo-NormalizedCRC32 $localCRC32
+                                $normExpectedPost = ConvertTo-NormalizedCRC32 $ExpectedCRC32
+                                Write-Log -Level DEBUG -Message "$($ActivityName): CRC POST-DOWNLOAD: actual '$localCRC32' (normalized '$normLocalPost') vs expected '$ExpectedCRC32' (normalized '$normExpectedPost')"
+                                if (-not (Test-CRC32Match -ActualCRC $localCRC32 -ExpectedCRC $ExpectedCRC32)) {
+                                    $crcVerified = $false
+                                    Write-Log -Level ERROR -Message "$($ActivityName): CRC mismatch - actual $localCRC32 (normalized $normLocalPost) vs expected $ExpectedCRC32 (normalized $normExpectedPost). File: '$DestinationPath' ($downloadedFileSize bytes), Source: $Url"
+                                } else {
+                                    $crcVerified = $true
+                                    if ($normLocalPost -and (([string]$ExpectedCRC32).Trim() -ne $normLocalPost)) {
+                                        Write-Log -Level DEBUG -Message "$($ActivityName): CRC matches by value ($normLocalPost); the published value '$ExpectedCRC32' differs only in zero-padding."
+                                    } else {
+                                        Write-Log -Level DEBUG -Message "$($ActivityName): CRC matches."
+                                    }
                                 }
                             } else { Write-Log -Level DEBUG -Message "$($ActivityName): No ExpectedCRC32 provided, skipping CRC verification." }
 
@@ -576,15 +550,17 @@ function Invoke-LoxoneDownload {
                         }
                     } 
 
-                } catch { 
+                } catch {
                     Write-Log -Message "$($ActivityName): Download attempt $attempt failed: $($_.Exception.Message)" -Level ERROR
-                    $attemptFailed = $true 
+                    $attemptFailed = $true
+                    # Keep the concrete reason so the final error isn't a bare "download failed"
+                    $lastFailureReason = $_.Exception.Message
 
                     if ($_.Exception.Message -match "Download cancelled by user") {
                         throw $_
                     }
                 }
-                
+
                 if ($currentAttemptSuccess) {
                     $overallDownloadSuccess = $true
                     break
@@ -592,8 +568,9 @@ function Invoke-LoxoneDownload {
                     Write-Log -Message "$($ActivityName): Download or verification failed on attempt $attempt. Waiting 5 seconds before retry..." -Level INFO
                     Start-Sleep -Seconds 5
                 } elseif ($attemptFailed -and $attempt -ge $totalAttempts) {
-                     Write-Log -Message "$($ActivityName): Maximum download/verification attempts reached. Download failed." -Level ERROR
-                     throw "$($ActivityName): Download and verification failed after $totalAttempts attempts."
+                     # Log the full context once, at ERROR, so a failed download is diagnosable without DEBUG
+                     Write-Log -Message "$($ActivityName): Maximum download/verification attempts reached ($totalAttempts). Last reason: $lastFailureReason | Source: $Url | Destination: '$DestinationPath' | Expected size: $ExpectedFilesize, Expected CRC32: '$ExpectedCRC32' (normalized '$(ConvertTo-NormalizedCRC32 $ExpectedCRC32)')" -Level ERROR
+                     throw "$($ActivityName): Download and verification failed after $totalAttempts attempts. Last reason: $lastFailureReason"
                 }
 
             } 

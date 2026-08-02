@@ -1386,7 +1386,12 @@ function Start-ComponentWorker {
                         RestartRequired = [bool]$installResult.RestartRequired
                     })
                 } else {
-                    throw "Download failed for $Component"
+                    # Invoke-LoxoneDownload logs the concrete reason (CRC/size/network) at ERROR but
+                    # only returns $false, so restate the inputs here - otherwise the worker error is
+                    # a dead end ("Download failed for App") with no way back to the cause.
+                    $failDetail = "URL: $($UpdateInfo.Url), Expected size: $($UpdateInfo.FileSize), Expected CRC32: '$($UpdateInfo.ExpectedCRC32)', Destination: '$outputPath'"
+                    Write-WorkerLog -LogQueue $Pipeline.LogQueue -WorkerName "$Component Download Worker" -Message "$Component download failed - see the preceding 'Downloading $Component' ERROR entries for the reason. $failDetail" -Level "ERROR"
+                    throw "Download failed for $Component ($failDetail)"
                 }
             } else {
                 # Fallback simulation for testing

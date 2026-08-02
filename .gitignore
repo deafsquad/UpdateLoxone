@@ -35,3 +35,5 @@ tests/Helpers/temp/*
 !tests/Helpers/temp/.gitkeep
 
 # Keep this .gitignore file
+# Local post-update hook: machine-specific, and may point at a private repo
+post-update-hook.ps1

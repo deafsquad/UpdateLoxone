@@ -8,8 +8,13 @@
 
 # --- Debugging Start ---
 # Define log file path FIRST
-$scriptErrorLogDir = "C:\temp"
-$LogFilePath = "C:\Users\deafs_iutw2w3\UpdateLoxone\UpdateLoxone_deafs_iutw2w3_20250414_004234.log" #Join-Path $scriptErrorLogDir "toast_chat_error.log"
+$scriptErrorLogDir = Join-Path $env:TEMP 'UpdateLoxone'
+# The -LogFilePath parameter is honoured. It used to be overwritten unconditionally with an
+# absolute path to one developer's machine and one 2025-04-14 log file, so the parameter was
+# dead and the script only ever read that one file - on any other machine, nothing at all.
+if (-not $LogFilePath) {
+    $LogFilePath = Join-Path $scriptErrorLogDir 'toast_chat_error.log'
+}
 # Ensure directory exists
 if (-not (Test-Path $scriptErrorLogDir)) { New-Item -Path $scriptErrorLogDir -ItemType Directory -Force | Out-Null }
 # Log received parameters and set name

@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- `publish_new_release.ps1` built the installer from absolute paths into one developer's home directory, so the MSI could only ever be produced on that one machine. Sources are now resolved from `$script:RepoRoot`, captured at script scope because the installer content is a script block invoked by the WiX helper, where `$PSScriptRoot` can resolve to that module instead of to this file
+- `Send-GoogleChat.ps1` overwrote its own `-LogFilePath` parameter with an absolute path to a single 2025-04-14 log file, so the parameter was dead and the script read that one file or nothing at all. The parameter is now honoured, defaulting to `$env:TEMP\UpdateLoxone\toast_chat_error.log`
+
+### Changed
+- The post-update step is now a **generic hook** rather than an integration with one specific tool. `UpdateLoxone.ps1` resolves a hook script - `-PostUpdateHook <path>`, else `$env:UPDATELOXONE_POST_UPDATE_HOOK`, else `post-update-hook.ps1` beside the script - runs it, streams whatever it prints into the log, and reports its exit code. No hook configured, or a configured one missing, is a normal state and logs a single INFO line. This script is the only thing that knows a Miniserver firmware just changed, so it is the right place to trigger downstream work; *what* that work is belongs to the operator, not to this repository. No absolute path is baked in, and `post-update-hook.ps1` is gitignored because it is machine-specific by nature
+- Hook output is **streamed** rather than collected. Assigning a child's output to a variable and logging it after it exits means a long-running hook writes nothing while it works and then dumps every line stamped with the end time - the log claimed a 17-minute step took one second, and while it ran there was no way to tell work from a wedge. Lines are logged as they arrive. `ERROR`, `FAILED`, `Traceback` and `Exception` lines log at WARN and are never demoted to DEBUG, so a failure is diagnosable from the log without re-running anything
+- Progress reporting is opportunistic and format-agnostic: any hook line containing `N/M` drives `Write-Progress` for an interactive run and a throttled ASCII bar into the log for a scheduled one, where `Write-Progress` is invisible. The final tick always logs, since a bar that stops short of 100% reads as an abort. A hook that emits no such line simply gets no bar
+
+
+## [0.9.3] - 2026-08-02 14:55:30
+
+### Fixed
+- CRC32 verification no longer rejects a valid download because of zero-padding. `Get-CRC32` returns `ToString("X8")` (always 8 chars, zero-padded), but Loxone's `updatecheck.xml` strips leading zeros — the App `InternalV2` channel publishes `crc32="404699"` for a file whose real CRC is `00404699`, and 8 of the 136 `crc32` attributes in the live XML are short like this. The previous normalization only handled one specific shape (calculated 8 chars starting with `0` vs expected exactly 7 chars), so an expected value short by two or more digits still fell through to a raw string compare and mismatched; observed 2026-08-02, where `404699` vs `00404699` failed both download attempts and aborted the App update. Comparison is now by value via two new helpers in `LoxoneUtils.Network`: `ConvertTo-NormalizedCRC32` (validates `^[0-9a-fA-F]{1,8}, left-pads to 8, uppercases; returns `$null` for absent/non-hex input) and `Test-CRC32Match`, which compares the normalized forms and falls back to a trimmed case-insensitive string compare when either side isn't parseable hex. Both the pre-download (existing-file) and post-download checks use it
+
+### Added
+- The last concrete failure reason is now carried through `Invoke-LoxoneDownload`'s retry loop (`$lastFailureReason`) and included in both the final ERROR log line and the thrown exception, instead of the previous bare `Download and verification failed after N attempts`
+
+### Changed
+- A definitively failed download now logs its full context once at ERROR — last failure reason, source URL, destination path, expected size, and expected CRC32 with its normalized form — so the cause is diagnosable without re-running at DEBUG level
+- The CRC mismatch messages now name the file, its byte size, the source URL, and both the raw and normalized CRC values on each side, rather than just `CRC mismatch (a vs b)`
+- Replaced the two ~30-line `CRC DEBUG` blocks (type/length/UTF-8-byte dumps of both CRC strings, pre- and post-download) with a single DEBUG line reporting actual and expected values with their normalized forms. When a download verifies only because of normalization, a DEBUG line records that the published value differs from the computed one in zero-padding alone
+- `Start-ComponentWorker` in `LoxoneUtils.ParallelWorkflow` no longer throws a dead-end `Download failed for App`. `Invoke-LoxoneDownload` logs the concrete reason at ERROR but only returns `$false`, so the worker now restates the inputs — URL, expected size, expected CRC32, destination — in both a `Write-WorkerLog` ERROR entry pointing at the preceding download errors and in the thrown exception message
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.3 with the new installer URL, SHA256 checksum, and release date 2026-08-02
+
 ## [0.9.2] - 2026-07-21 01:11:56
 
 ### Added
@@ -48,6 +75,70 @@
 - A Miniserver trigger rejection (XML Code != 200) is now routed through the retry loop like a thrown error, so `$lastTriggerError` is set and the progressive retry delay (2s/4s/6s) applies; the final-failure path also guards against a null `$lastTriggerError` (falling back to `Unknown trigger failure`) instead of crashing when building the `Error_TriggeringUpdate` status message
 - Removed the outer catch that swallowed trigger errors outside the retry loop and overwrote the status message with a generic failure; trigger errors are now handled exclusively inside the retry loop, and the polling/verification block is only entered when the trigger succeeded or an update was already in progress
 - `Get-InstalledVersion` error logging now actually includes the exception message — the previous `${(# Changelog
+
+## [0.9.3] - 2026-08-02 14:55:30
+
+### Fixed
+- CRC32 verification no longer rejects a valid download because of zero-padding. `Get-CRC32` returns `ToString("X8")` (always 8 chars, zero-padded), but Loxone's `updatecheck.xml` strips leading zeros — the App `InternalV2` channel publishes `crc32="404699"` for a file whose real CRC is `00404699`, and 8 of the 136 `crc32` attributes in the live XML are short like this. The previous normalization only handled one specific shape (calculated 8 chars starting with `0` vs expected exactly 7 chars), so an expected value short by two or more digits still fell through to a raw string compare and mismatched; observed 2026-08-02, where `404699` vs `00404699` failed both download attempts and aborted the App update. Comparison is now by value via two new helpers in `LoxoneUtils.Network`: `ConvertTo-NormalizedCRC32` (validates `^[0-9a-fA-F]{1,8}# Changelog
+
+## [0.9.2] - 2026-07-21 01:11:56
+
+### Added
+- Percentage-based x/y download progress for Miniserver firmware downloads. The FTP download probe previously only reported the absolute size observed so far ("57 MB"), giving no sense of completion. `Get-LoxoneUpdateData` now also parses the expected firmware `.upd` sizes from the update XML — `<update type='ms2'>` for Gen2 and `<update type='ms'>` for Gen1, reading the `Filesize` of the selected channel node (`LatestRelease` for Public, otherwise the channel name) — into new `MSFirmwareSizeGen1`/`MSFirmwareSizeGen2` result fields. The sizes are threaded through `Get-LoxoneUpdatePrerequisites`, the workflow definitions in `UpdateLoxone.ps1` (as `FirmwareSizeGen1`/`FirmwareSizeGen2` on each Miniserver update entry), and `Start-MiniserverWorker` into two new `Invoke-MSUpdate` parameters, `-ExpectedUpdSizeGen1` and `-ExpectedUpdSizeGen2`. With a known expected size, the probe's log lines and `Send-MSStatusUpdate` messages show "x/y MB, pct%", and the toast progress value scales from 20 to 35 with the download percentage (staying below the Updating phase at 45) instead of sitting at a fixed 20/25
+- Average download rate and estimated time remaining in the firmware download progress. The first observed directory-listing sample becomes the rate baseline (the download starts before the probe first sees it, so the rate is computed over the observed window only); once at least 5 seconds of samples exist, the status text appends the rate ("x.x MB/s" or "x KB/s") and, when the expected size is known, an ETA ("~Ns left" under 90 seconds, "~N min left" above)
+- Self-correcting generation guess for the expected firmware size: the probe initially picks Gen2 or Gen1 size from the connection scheme (Gen2 requires HTTPS, Gen1-Grey is HTTP-only), and if the observed download ever exceeds the Gen1 image size it switches the expected size to the larger Gen2 image, logging the correction at DEBUG
+
+### Changed
+- When the firmware `Filesize` cannot be read from the update XML (missing node or unparsable value), the download progress gracefully falls back to reporting the absolute downloaded size only, with a DEBUG/WARN log line explaining why
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.2 with the new installer URL, SHA256 checksum, and release date 2026-07-21
+
+## [0.9.1] - 2026-07-19 21:02:37
+
+### Added
+- Stall detection for Miniserver firmware updates: a Miniserver can ACK the autoupdate trigger and log `Start Auto Update` yet never actually install — no install-begin marker (`Update Miniserver <path>.upd`) ever appears in def.log, it never enters the Updating (503) state, and it stays on the old firmware until the 25-minute version timeout expires (observed 2026-07-17 on 192.168.2.210, which burned the full 25 minutes). The def.log probe now tracks the install-begin marker (distinct from the `...erfolgreich` success line) and, once a 10-minute grace period after `Start Auto Update` passes with no install activity, declares the update stalled with status `UpdateFailed_Stalled`, reports the failure via `Send-MSStatusUpdate`, and stops polling immediately. The verdict uses two-probe confirmation so a just-started install clears a false stall candidate on the next probe, and the grace period is measured against the local clock (recorded when the marker is first seen) rather than the Miniserver's clock, which can skew
+- `Test-ShouldApplyMSStatus` function in `LoxoneUtils.ParallelWorkflow`, extracting the Miniserver status monotonicity decision into a unit-testable helper: terminal states (`Completed`/`Complete`/`Failed`/`UpToDate`) are sticky per IP, and updates strictly older than the newest already-applied timestamp for that IP are rejected; timeless updates bypass the timestamp rule and rely on terminal stickiness alone
+
+### Fixed
+- A finished Miniserver is no longer dragged back to an earlier phase in the parallel status display by stale or replayed status updates. The worker re-enqueues its full status history at job end, and `Watch-DirectThreadJobs` removes the IP from every status bucket before re-adding it to whatever state the message carries — so a replayed `Downloading` processed after `Completed` landed the MS back in Downloading and the display walked backwards (observed 2026-07-17 on 192.168.178.2). The watcher now runs every incoming Miniserver status through `Test-ShouldApplyMSStatus`, ignores out-of-order updates with a DEBUG log line, and records the newest applied timestamp and terminal stickiness per IP
+
+### Changed
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.1 with the new installer URL, SHA256 checksum, and release date 2026-07-19
+
+## [0.9.0] - 2026-07-03 19:26:18
+
+### Fixed
+- Local release-archive rotation in `publish_new_release.ps1` (`Limit-LocalReleaseArchives`) no longer aborts the release pipeline when deleting an old archive fails. `Remove-Item` under pwsh was observed (2026-07-03, v0.7.9.msi) failing with `Access to the path is denied` due to an AV/filter driver quirk while a classic delete succeeded moments later; since the script runs with `$ErrorActionPreference = 'Stop'` and the winget submission happens after rotation, this housekeeping error killed the whole release. The deletion is now wrapped in try/catch: on failure it waits 2 seconds, retries via `cmd /c del /f` as a fallback, and if the file still exists it logs a warning and leaves the archive in place instead of throwing
+
+### Changed
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.0 with the new installer URL and SHA256 checksum for the v0.9.0 MSI
+
+## [0.8.9] - 2026-07-03 19:07:16
+
+### Added
+- "Update already in progress" detection when triggering a Miniserver autoupdate: if the Miniserver rejects the trigger with XML `Code=503` and a body containing `already downloading`/`updating`, or the trigger request itself throws a raw HTTP 503 `Miniserver Updating` error, this is no longer treated as a failure. The run now reports status `UpdateAlreadyInProgress_Monitoring` and proceeds into the normal polling/verification loop to monitor the existing update (observed 2026-07-03: a Gen1's download phase outlived the previous run's timeout, and the restart run got `Update already downloading`)
+- `TriggerFailReason` field on the Miniserver invoke-result object, carrying the reason the autoupdate trigger was rejected (XML Code != 200)
+- Positive confirmation logging when the def.log probe finds the `Start Auto Update` marker: an INFO line `[DEFLOG] MS <host> registered the update trigger` now proves both that the probe pipeline works and that the Miniserver registered the trigger
+- Definitive trigger failure (all retry attempts exhausted) now sends a `Failed` state via `Send-MSStatusUpdate`, so the parallel worker no longer shows a stale phase after the trigger was rejected
+
+### Changed
+- FTP probe timeouts raised for busy Gen1 Miniservers, which answer FTP very slowly while mid-download (5s/8s starved every probe on 2026-07-03, leaving outcome detection blind): the update-file directory-listing probe timeout increased from 5s to 10s, and the def.log download timeout from 8s to 15s (def.log can exceed 1 MB over ASCII FTP)
+- The first failure of the FTP download probe and of the def.log probe is now logged at INFO instead of DEBUG, so a permanently failing (blind) probe is visible in the run log; subsequent failures stay at DEBUG
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.8.9 with the new installer URL, SHA256 checksum, and release date 2026-07-03
+
+### Fixed
+- A Miniserver trigger rejection (XML Code != 200) is now routed through the retry loop like a thrown error, so `$lastTriggerError` is set and the progressive retry delay (2s/4s/6s) applies; the final-failure path also guards against a null `$lastTriggerError` (falling back to `Unknown trigger failure`) instead of crashing when building the `Error_TriggeringUpdate` status message
+- Removed the outer catch that swallowed trigger errors outside the retry loop and overwrote the status message with a generic failure; trigger errors are now handled exclusively inside the retry loop, and the polling/verification block is only entered when the trigger succeeded or an update was already in progress
+- `Get-InstalledVersion` error logging now actually includes the exception message — the previous `${(, left-pads to 8, uppercases; returns `$null` for absent/non-hex input) and `Test-CRC32Match`, which compares the normalized forms and falls back to a trimmed case-insensitive string compare when either side isn't parseable hex. Both the pre-download (existing-file) and post-download checks use it
+
+### Added
+- The last concrete failure reason is now carried through `Invoke-LoxoneDownload`'s retry loop (`$lastFailureReason`) and included in both the final ERROR log line and the thrown exception, instead of the previous bare `Download and verification failed after N attempts`
+
+### Changed
+- A definitively failed download now logs its full context once at ERROR — last failure reason, source URL, destination path, expected size, and expected CRC32 with its normalized form — so the cause is diagnosable without re-running at DEBUG level
+- The CRC mismatch messages now name the file, its byte size, the source URL, and both the raw and normalized CRC values on each side, rather than just `CRC mismatch (a vs b)`
+- Replaced the two ~30-line `CRC DEBUG` blocks (type/length/UTF-8-byte dumps of both CRC strings, pre- and post-download) with a single DEBUG line reporting actual and expected values with their normalized forms. When a download verifies only because of normalization, a DEBUG line records that the published value differs from the computed one in zero-padding alone
+- `Start-ComponentWorker` in `LoxoneUtils.ParallelWorkflow` no longer throws a dead-end `Download failed for App`. `Invoke-LoxoneDownload` logs the concrete reason at ERROR but only returns `$false`, so the worker now restates the inputs — URL, expected size, expected CRC32, destination — in both a `Write-WorkerLog` ERROR entry pointing at the preceding download errors and in the thrown exception message
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.3 with the new installer URL, SHA256 checksum, and release date 2026-08-02
 
 ## [0.9.2] - 2026-07-21 01:11:56
 

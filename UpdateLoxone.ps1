@@ -86,7 +86,10 @@ param(
     [switch]$TestMonitor, # Test Monitor functionality only (no update performed)
     [int]$TestMonitorDurationSeconds = 120, # How long to run Monitor in test mode
     [switch]$KeepMonitorRunning, # Don't stop Monitor automatically (for manual testing)
-    [switch]$MonitorDiscoveryMode # Enable extended .lxmon path discovery
+    [switch]$MonitorDiscoveryMode, # Enable extended .lxmon path discovery
+    [switch]$SkipPostUpdateHook, # Skip the post-update hook that runs after the MS updates
+    [string]$PostUpdateHook, # Path to the post-update hook script (default: post-update-hook.ps1 beside this script, or $env:UPDATELOXONE_POST_UPDATE_HOOK)
+    [switch]$VerboseHook # Log EVERY line the hook prints at INFO, not just the notable ones
 )
 # XML Signature Verification Function removed - Test showed it's not feasible with current structure
 
@@ -2839,6 +2842,128 @@ if (-not $script:ErrorOccurred) {
 } elseif ($script:ErrorOccurred) {
     Write-Log -Message "(UpdateLoxone.ps1) 'finally' block executing after an error was caught. Error toast should have been displayed by catch block." -Level INFO
 }
+
+# ---------------------------------------------------------------------------
+# Post-update hook. This script is the only thing that knows a Miniserver firmware
+# just changed, so anything that has to react to that belongs here - but WHAT reacts
+# is none of this script's business. It runs one hook script, streams whatever the
+# hook prints into the log, and reports the exit code. No hook configured, or the
+# configured one missing, is a normal state: log it and carry on.
+#
+# It must never turn a successful update into a failed one: own try/catch, and
+# $script:ErrorOccurred is deliberately not touched.
+function Invoke-PostUpdateHook {
+    <#
+      Runs the hook and logs it AS IT SPEAKS.
+
+      Collecting output into a variable and logging it afterwards means a long-running
+      hook writes nothing at all while it works and then dumps every line stamped with
+      the END time - the log claims minutes of work happened in one second, and while it
+      runs there is no way to tell work from a wedge. Piping into ForEach-Object logs
+      each line as it arrives; $LASTEXITCODE is still the child's once the pipeline
+      drains.
+
+      Progress is opportunistic and format-agnostic: any line containing "N/M" is
+      treated as a progress tick. That drives Write-Progress for an interactive run and a
+      throttled ASCII bar into the LOG for a scheduled one, where Write-Progress is
+      invisible. A hook that never emits such a line simply gets no bar.
+
+      Returns the hook's exit code.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$AllVerbose
+    )
+
+    # Lines worth surfacing at INFO without knowing what the hook does. Deliberately
+    # generic: outcome words, not vocabulary from any particular tool.
+    $notable = 'ERROR|FAIL|WARN|Traceback|Exception|DONE|SKIP|abort|complete|finished|updated|rebuilt|recovered|no changes|in sync'
+    $lastTick = [datetime]::MinValue
+    $pct      = 0
+    $activity = 'Post-update hook'
+
+    try {
+        # Out-Null so the RETURN VALUE is the exit code and nothing else. Write-Log here
+        # writes to the host and the log file and emits nothing, but this function returns
+        # a value the caller branches on, and that must not depend on the logging
+        # implementation staying silent - swap in a logger that emits and $hookRc silently
+        # becomes an array of log lines that is never equal to 0.
+        & $Path 2>&1 | ForEach-Object {
+            $t = ([string]$_).TrimEnd()
+            if (-not $t) { return }
+
+            if ($t -match '(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)') {
+                $done  = [int]$Matches[1]
+                $total = [int]$Matches[2]
+                if ($total -gt 0 -and $done -le $total) {
+                    $pct = [Math]::Min(100, [int](100 * $done / $total))
+                    try {
+                        Write-Progress -Id 77 -Activity $activity -Status "$done / $total" -PercentComplete $pct
+                    } catch { }
+                    # The LAST tick always logs: throttling swallowed it in testing, and a
+                    # bar that stops short of 100% reads as an abort.
+                    if ($done -ge $total -or ((Get-Date) - $lastTick).TotalSeconds -ge 30) {
+                        $lastTick = Get-Date
+                        $bar = if (Get-Command Get-ProgressBar -ErrorAction SilentlyContinue) {
+                            Get-ProgressBar -Progress $pct -Width 24
+                        } else {
+                            '[' + ('#' * [int]($pct * 24 / 100)).PadRight(24, '.') + "] $pct%"
+                        }
+                        Write-Log -Message "(UpdateLoxone.ps1) hook: $bar $t" -Level INFO
+                    } else {
+                        Write-Log -Message "(UpdateLoxone.ps1) hook: $t" -Level DEBUG
+                    }
+                    return
+                }
+            }
+
+            # Failures are never demoted to DEBUG - the point is that whoever reads this
+            # log afterwards can see what went wrong without re-running anything.
+            if ($t -match 'ERROR|FAILED|Traceback|Exception') {
+                Write-Log -Message "(UpdateLoxone.ps1) hook: $t" -Level WARN
+            } elseif ($AllVerbose -or $t -match $notable) {
+                Write-Log -Message "(UpdateLoxone.ps1) hook: $t" -Level INFO
+            } else {
+                Write-Log -Message "(UpdateLoxone.ps1) hook: $t" -Level DEBUG
+            }
+        } | Out-Null
+        return $LASTEXITCODE
+    } finally {
+        try { Write-Progress -Id 77 -Activity $activity -Completed } catch { }
+    }
+}
+
+if (-not $SkipPostUpdateHook) {
+    try {
+        # Explicit parameter wins, then the environment, then a file beside this script.
+        # No absolute path is baked in: what the hook does and where it lives are the
+        # operator's business, not this repository's.
+        $hookPath = if ($PostUpdateHook) { $PostUpdateHook }
+                    elseif ($env:UPDATELOXONE_POST_UPDATE_HOOK) { $env:UPDATELOXONE_POST_UPDATE_HOOK }
+                    else { Join-Path $PSScriptRoot 'post-update-hook.ps1' }
+
+        if (-not (Test-Path $hookPath)) {
+            # Absence is the normal case for anyone who has not configured one.
+            Write-Log -Message "(UpdateLoxone.ps1) no post-update hook at '$hookPath' - nothing to run. Set -PostUpdateHook <path> or \$env:UPDATELOXONE_POST_UPDATE_HOOK to enable one." -Level INFO
+        } else {
+            Write-Log -Message "(UpdateLoxone.ps1) running post-update hook: $hookPath" -Level INFO
+            $hookStart = Get-Date
+            $hookRc = Invoke-PostUpdateHook -Path $hookPath -AllVerbose:$VerboseHook
+            $hookMin = '{0:F1}' -f ((Get-Date) - $hookStart).TotalMinutes
+            if ($hookRc -eq 0) {
+                Write-Log -Message "(UpdateLoxone.ps1) post-update hook finished in $hookMin min" -Level INFO
+            } else {
+                Write-Log -Message "(UpdateLoxone.ps1) post-update hook reported a problem (exit $hookRc) after $hookMin min - see the hook: lines above. The update itself is unaffected." -Level WARN
+            }
+        }
+    } catch {
+        Write-Log -Message "(UpdateLoxone.ps1) post-update hook errored: $($_.Exception.Message) - update itself is unaffected" -Level WARN
+        Write-Log -Message "(UpdateLoxone.ps1) hook: $($_.ScriptStackTrace)" -Level DEBUG
+    }
+} else {
+    Write-Log -Message '(UpdateLoxone.ps1) post-update hook skipped (-SkipPostUpdateHook)' -Level INFO
+}
+# ---------------------------------------------------------------------------
 
 <# Fix Loxone App shortcut icons - DISABLED: handled inside Install-LoxoneAppUpdate (WorkflowSteps)
 # Fix Loxone App shortcut icons if App was installed

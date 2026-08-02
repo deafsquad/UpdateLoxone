@@ -149,6 +149,12 @@ if ($SubmitToWinget.IsPresent -and ([string]::IsNullOrWhiteSpace($WingetPkgsRepo
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# The repository root. Captured at script scope because the installer content below is a
+# SCRIPT BLOCK invoked by the WiX helper, where $PSScriptRoot can resolve to that module
+# rather than to this file. Those paths were previously absolute into one developer's home
+# directory, so the installer could only ever be built on that one machine.
+$script:RepoRoot = $PSScriptRoot
+
 # --- State Management Functions ---
 $script:StateFile = Join-Path $PSScriptRoot ".release-progress"
 
@@ -1470,30 +1476,30 @@ if (-not ($script:IsResuming -and $script:ResumeState.ContainsKey("msi_created")
             New-InstallerDirectory -PredefinedDirectory "ProgramFilesFolder" -Content {
                 New-InstallerDirectory -DirectoryName "UpdateLoxone" -Id "INSTALLFOLDER" -Content {
                     # Main script - using literal path with ID for shortcut
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\UpdateLoxone.ps1" -Id "MainScript"
-                    
+                    New-InstallerFile -Source (Join-Path $script:RepoRoot "UpdateLoxone.ps1") -Id "MainScript"
+
                     # Modules
                     New-InstallerDirectory -DirectoryName "LoxoneUtils" -Content {
-                        $modDir = "C:\Users\deafs_iutw2w3\UpdateLoxone\LoxoneUtils"
+                        $modDir = Join-Path $script:RepoRoot "LoxoneUtils"
                         Get-ChildItem $modDir -Filter "*.ps*" -File | ForEach-Object {
                             New-InstallerFile -Source $_.FullName
                         }
                     }
-                    
+
                     # Assets
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\ms.png"
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\ok.png"
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\nok.png"
-                    
+                    New-InstallerFile -Source (Join-Path $script:RepoRoot "ms.png")
+                    New-InstallerFile -Source (Join-Path $script:RepoRoot "ok.png")
+                    New-InstallerFile -Source (Join-Path $script:RepoRoot "nok.png")
+
                     # Documentation
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\README.md"
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\CHANGELOG.md"
-                    
+                    New-InstallerFile -Source (Join-Path $script:RepoRoot "README.md")
+                    New-InstallerFile -Source (Join-Path $script:RepoRoot "CHANGELOG.md")
+
                     # Example configuration
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\UpdateLoxoneMSList.txt.example"
-                    
+                    New-InstallerFile -Source (Join-Path $script:RepoRoot "UpdateLoxoneMSList.txt.example")
+
                     # Google Chat script
-                    New-InstallerFile -Source "C:\Users\deafs_iutw2w3\UpdateLoxone\Send-GoogleChat.ps1"
+                    New-InstallerFile -Source (Join-Path $script:RepoRoot "Send-GoogleChat.ps1")
                 }
             }
             
