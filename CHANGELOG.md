@@ -1,12 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.4] - 2026-08-02 16:21:49
 
 ### Fixed
 - `publish_new_release.ps1` built the installer from absolute paths into one developer's home directory, so the MSI could only ever be produced on that one machine. Sources are now resolved from `$script:RepoRoot`, captured at script scope because the installer content is a script block invoked by the WiX helper, where `$PSScriptRoot` can resolve to that module instead of to this file
-- `Send-GoogleChat.ps1` overwrote its own `-LogFilePath` parameter with an absolute path to a single 2025-04-14 log file, so the parameter was dead and the script read that one file or nothing at all. The parameter is now honoured, defaulting to `$env:TEMP\UpdateLoxone\toast_chat_error.log`
+- `Send-GoogleChat.ps1` no longer swallows `-Message`. It used to overwrite its own `-LogFilePath` parameter with an absolute path to a single 2025-04-14 log file, so the parameter was dead and the script read that one file or, on any other machine, nothing at all. Replacing that with a *default* under `$env:TEMP` did not fix it — the dispatch takes the log-file branch whenever `$LogFilePath` is non-empty, so **any** default leaves the `-Message` branch unreachable and turns `-Message "hello"` into `Error: Log file not found`. `$LogFilePath` is now left exactly as the caller passed it, including empty, because emptiness is what selects the message branch
 
 ### Changed
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.4 with the new installer URL and SHA256 checksum for the v0.9.4 MSI
+- The three winget manifests are now written with a UTF-8 BOM, matching what the release tooling emits
 - The post-update step is now a **generic hook** rather than an integration with one specific tool. `UpdateLoxone.ps1` resolves a hook script - `-PostUpdateHook <path>`, else `$env:UPDATELOXONE_POST_UPDATE_HOOK`, else `post-update-hook.ps1` beside the script - runs it, streams whatever it prints into the log, and reports its exit code. No hook configured, or a configured one missing, is a normal state and logs a single INFO line. This script is the only thing that knows a Miniserver firmware just changed, so it is the right place to trigger downstream work; *what* that work is belongs to the operator, not to this repository. No absolute path is baked in, and `post-update-hook.ps1` is gitignored because it is machine-specific by nature
 - Hook output is **streamed** rather than collected. Assigning a child's output to a variable and logging it after it exits means a long-running hook writes nothing while it works and then dumps every line stamped with the end time - the log claimed a 17-minute step took one second, and while it ran there was no way to tell work from a wedge. Lines are logged as they arrive. `ERROR`, `FAILED`, `Traceback` and `Exception` lines log at WARN and are never demoted to DEBUG, so a failure is diagnosable from the log without re-running anything
 - Progress reporting is opportunistic and format-agnostic: any hook line containing `N/M` drives `Write-Progress` for an interactive run and a throttled ASCII bar into the log for a scheduled one, where `Write-Progress` is invisible. The final tick always logs, since a bar that stops short of 100% reads as an abort. A hook that emits no such line simply gets no bar

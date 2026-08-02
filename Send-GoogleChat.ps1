@@ -9,12 +9,16 @@
 # --- Debugging Start ---
 # Define log file path FIRST
 $scriptErrorLogDir = Join-Path $env:TEMP 'UpdateLoxone'
-# The -LogFilePath parameter is honoured. It used to be overwritten unconditionally with an
-# absolute path to one developer's machine and one 2025-04-14 log file, so the parameter was
-# dead and the script only ever read that one file - on any other machine, nothing at all.
-if (-not $LogFilePath) {
-    $LogFilePath = Join-Path $scriptErrorLogDir 'toast_chat_error.log'
-}
+# $LogFilePath is left exactly as the caller passed it - INCLUDING empty.
+#
+# It used to be overwritten unconditionally with an absolute path to one developer's machine
+# and one 2025-04-14 log file, so the parameter was dead and the script only ever read that
+# file - on any other machine, nothing at all.
+#
+# Defaulting it to a path under TEMP does not fix that, it re-creates it: the dispatch below
+# takes the log-file branch whenever $LogFilePath is non-empty, so ANY default makes
+# -Message unreachable and turns `-Message "hello"` into "Error: Log file not found".
+# Emptiness is what selects the -Message branch, so emptiness has to survive.
 # Ensure directory exists
 if (-not (Test-Path $scriptErrorLogDir)) { New-Item -Path $scriptErrorLogDir -ItemType Directory -Force | Out-Null }
 # Log received parameters and set name
