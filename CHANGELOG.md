@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.6] - 2026-09-22 12:36:19
+### Added
+- **The test suite is now actually in the repository.** 70 files under `tests/` that existed on the developer machine but were never committed are now tracked (see the `.gitignore` fix under Fixed). At v0.9.5 the tree held 18 files in `tests/Unit`, 5 in `tests/Integration` and 3 in `tests/Helpers`; a fresh clone could not run the suite that `CLAUDE.md` and the 0.9.3–0.9.5 changelog entries describe. Newly tracked:
+  - Unit tests referenced by earlier releases but missing from the tree: `LoxoneUtils.MSDebugCapture.Tests.ps1`, `LoxoneUtils.SyntaxInvariants.Tests.ps1`, `LoxoneUtils.ParallelWorkflow.StatusMonotonicity.Tests.ps1`, `LoxoneUtils.Network.CRC32.Tests.ps1`
+  - Coverage, Real, Working and TestMocks variants for the remaining modules: CertificateHelper, ConsoleProgress, ErrorHandling, Installation, Logging, Miniserver (incl. `WebRequest`), MiniserverCache, MiniserverGeneration, MiniserverHardware, Monitor, Network, NetworkCore, ParallelWorkflow (Coverage, Mocking, Real, Workers, ThreadJobMocks, TestMocks), ProgressReporter, RunAsUser, ScheduledTask, System, TestCoverage, ThreadSafe, Toast, UpdateCheck, Utility (Coverage, QuickWin), WorkflowSteps (Coverage, Real, GlobalMocks)
+  - Mock-infrastructure self-checks: `Verify-MockInfrastructure.Tests.ps1`, `Verify-MockInfrastructure-Simple.Tests.ps1`, `Verify-MockLoading.Tests.ps1`, `LoadAllMocks.ps1`, `Mock-Toast-NoMutex-ForTests.ps1`, `test-mocks-simple.ps1`, `test-with-mocks.ps1`
+  - Integration tests: `LoxoneUtils.LiveMiniserver.Tests.ps1`, `LoxoneUtils.ParallelWorkflow.Integration.Tests.ps1`, `ParallelWorkflow.VirtualUpdate.Tests.ps1`
+  - Test helpers used by `run-tests.ps1`: toast suppression (`Block-AllToastNotifications`, `Block-ToastModule-Init`, `Block-WindowsToastAPI`, `Create-FakeBurntToast`, `Disable-WindowsNotifications`, `Mock-ToastNotifications`, `Patch-ToastModule`), environment setup (`Initialize-MockEnvironment`, `Initialize-ModuleMocks`, `Initialize-TestMode-Early`), `LiveProgress` (toast progress for `-LiveProgress`), `Optimize-TestFile`, `Skip-SlowTests`
+  - `tests/TestResults/README.md` describing the coverage reports written there
+
+### Changed
+- Bumped winget package manifests (`deafsquad.UpdateLoxone`) to version 0.9.6 with the new installer URL and SHA256 checksum for the v0.9.6 MSI
+
+### Fixed
+- **`.gitignore` silently dropped every new file under `tests/Unit`, `tests/Integration` and `tests/Helpers`.** The ignore file starts with `*` and re-includes `!tests/` and `!*.ps1`, but `*` also matches the *subdirectories* of `tests/`, and git cannot re-include a file whose parent directory is excluded, so the `!*.ps1` rule never reached them. Found 2026-09-22 when four test files named in the 0.9.5 changelog turned out to be absent from the tree; on inspection 70 files were affected. The test subdirectories are now re-included explicitly (`!tests/*/`), and `tests/archive-*/`, `tests/.claude/` and `tests/Fixtures/` are excluded on purpose so the widened rule does not pull in scratch and fixture data
+
 ## [0.9.5] - 2026-09-22 12:30:50
 
 ### Added

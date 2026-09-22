@@ -25,6 +25,14 @@ CLAUDE.md
 CLAUDE.local.md
 
 # Test folder specific rules
+# `*` above also matches the SUBDIRECTORIES of tests/, and git cannot re-include a file whose parent
+# directory is excluded - so every new file under tests/Unit etc. was silently ignored and the
+# `!*.ps1` rule never reached it (found 2026-09-22: four test files missing from the tree).
+# Re-include the test subdirectories themselves; the file rules above then apply inside them.
+!tests/*/
+tests/archive-*/
+tests/.claude/
+tests/Fixtures/
 # Keep the folder structure but ignore contents
 tests/temp/*
 !tests/temp/.gitkeep
