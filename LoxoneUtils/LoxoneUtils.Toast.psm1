@@ -188,6 +188,24 @@ function Get-LoxoneToastAppId {
     finally { Exit-SafeFunction }
 }
 
+function Test-LoxoneHostIsPackaged {
+    # MSIX/Store-packaged hosts (e.g. winget's PowerShell Preview) carry package identity, and Windows
+    # attributes their toasts to that package no matter what AUMID/registry we set - verified again
+    # 2026-09-02 with BurntToast 1.1.0: MSIX pwsh = PowerShell symbol, ZIP pwsh / powershell.exe = Loxone.
+    try {
+        if (-not ('LoxoneUtils.Toast.PackageIdentity' -as [type])) {
+            Add-Type -Namespace LoxoneUtils.Toast -Name PackageIdentity -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+public static extern int GetCurrentPackageFullName(ref uint packageFullNameLength, System.Text.StringBuilder packageFullName);
+'@ -ErrorAction Stop
+        }
+        $len = [uint32]0; $sb = New-Object System.Text.StringBuilder 1024
+        $rc = [LoxoneUtils.Toast.PackageIdentity]::GetCurrentPackageFullName([ref]$len, $sb)
+        # 15700 = APPMODEL_ERROR_NO_PACKAGE; 0 (name returned) or 122 (buffer too small) both mean identity
+        return ($rc -ne 15700)
+    } catch { return $false }
+}
+
 function Initialize-LoxoneToastBrandingV1 {
     # BurntToast 1.x removed -AppId; branding is decided by ToastNotificationManagerCompat, which:
     #  - resolves the process AUMID, normalizing '\' to '/' (CommunityToolkit issue #3870 workaround)
@@ -364,16 +382,19 @@ function Initialize-LoxoneToastAppId {
         $script:ResolvedToastAppId = Get-LoxoneToastAppId -PreFoundPath $script:InstalledExePath
         Write-SafeLog -Level Debug -Message "Resolved Toast AppId: '$($script:ResolvedToastAppId | Out-String)'"
 
-        # Log BurntToast version + AppId-param availability so we can diagnose toast issues from log files
+        # Single path (2026-09-02): BurntToast 1.x only. Branding always comes from the AppUserModelId
+        # registration (touch-then-repair), never from the removed 0.x -AppId parameter.
         $btMod = Get-Module -Name BurntToast -ErrorAction SilentlyContinue
         if ($btMod) {
-            $submitHasAppId = (Get-Command Submit-BTNotification -ErrorAction SilentlyContinue).Parameters.ContainsKey('AppId')
-            $updateHasAppId = (Get-Command Update-BTNotification -ErrorAction SilentlyContinue).Parameters.ContainsKey('AppId')
-            Write-SafeLog -Level Info -Message "BurntToast version=$($btMod.Version) path=$($btMod.Path) | Submit-BTNotification -AppId supported: $submitHasAppId | Update-BTNotification -AppId supported: $updateHasAppId"
-
-            # BurntToast 1.x: no -AppId support -> branding must come from the AppUserModelId
-            # registration; run the touch-then-repair sequence. 0.x keeps the -AppId path.
-            if (-not $submitHasAppId -and $script:ResolvedToastAppId) {
+            $hostExe = try { [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { '<unknown>' }
+            $hostPackaged = Test-LoxoneHostIsPackaged
+            Write-SafeLog -Level Info -Message "BurntToast version=$($btMod.Version) path=$($btMod.Path) | host=$hostExe | packaged=$hostPackaged"
+            if ($btMod.Version -lt [version]'1.0.0') {
+                Write-SafeLog -Level Warn -Message "BurntToast $($btMod.Version) is below the supported 1.0 - toasts will show without Loxone branding. Update with: Install-Module BurntToast -MinimumVersion 1.0.0 -Force"
+            } elseif ($hostPackaged) {
+                Write-SafeLog -Level Warn -Message "Toast host is MSIX/Store-packaged: Windows attributes its toasts to the package (PowerShell symbol); Loxone branding is impossible in this process. Run from an unpackaged PowerShell (MSI/ZIP pwsh or powershell.exe) to get the Loxone symbol."
+                if ($script:ResolvedToastAppId) { Initialize-LoxoneToastBrandingV1 -AppId $script:ResolvedToastAppId }   # harmless; keeps the registration fresh for unpackaged runs
+            } elseif ($script:ResolvedToastAppId) {
                 Initialize-LoxoneToastBrandingV1 -AppId $script:ResolvedToastAppId
             }
         } else {
@@ -1241,11 +1262,6 @@ function Initialize-Toast {
             ErrorAction      = 'Stop'
         }
 
-        # BurntToast 0.x supports -AppId; 1.x removed it. Pass only when accepted.
-        if ($script:ResolvedToastAppId -and (Get-Command Submit-BTNotification).Parameters.ContainsKey('AppId')) {
-            $params.AppId = $script:ResolvedToastAppId
-        }
-
         # Submit notification with scenario
         Submit-BTNotification @params
         $Global:PersistentToastInitialized = $true
@@ -1274,11 +1290,6 @@ function Update-Toast {
             UniqueIdentifier = $Global:PersistentToastId
             DataBinding      = $Global:PersistentToastData
             ErrorAction      = 'Stop'
-        }
-
-        # BurntToast 0.x supports -AppId; 1.x removed it. Pass only when accepted.
-        if ($script:ResolvedToastAppId -and (Get-Command Update-BTNotification).Parameters.ContainsKey('AppId')) {
-            $params.AppId = $script:ResolvedToastAppId
         }
 
         Update-BTNotification @params
@@ -1379,11 +1390,6 @@ function Show-FinalStatusToast {
             Content          = $content
             UniqueIdentifier = $toastId
             ErrorAction      = 'Stop'
-        }
-
-        # BurntToast 0.x supports -AppId; 1.x removed it. Pass only when accepted.
-        if ($script:ResolvedToastAppId -and (Get-Command Submit-BTNotification).Parameters.ContainsKey('AppId')) {
-            $params.AppId = $script:ResolvedToastAppId
         }
 
         Submit-BTNotification @params

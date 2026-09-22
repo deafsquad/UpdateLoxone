@@ -1762,7 +1762,8 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
                             
                             # Update shortcut properties
                             $shortcut.TargetPath = $exePath
-                            $shortcut.Arguments = "--disable-gpu --disable-software-rasterizer"
+                            # cleared: --disable-gpu forced the app to software-render
+                            $shortcut.Arguments = ""
                             $shortcut.WorkingDirectory = Split-Path $exePath -Parent
                             $shortcut.IconLocation = "$exePath,0"
                             $shortcut.Description = "Loxone Smart Home App"
@@ -1803,7 +1804,8 @@ Write-Log -Message "($FunctionName) INVOKE-INSTALLLOXONEAPP: Logging before Upda
                                 Write-Log -Message "($FunctionName) Current desktop IconLocation: '$($desktop.IconLocation)'" -Level DEBUG
                                 
                                 $desktop.TargetPath = $exePath
-                                $desktop.Arguments = "--disable-gpu --disable-software-rasterizer"
+                                # cleared: --disable-gpu forced the app to software-render
+                                $desktop.Arguments = ""
                                 $desktop.WorkingDirectory = Split-Path $exePath -Parent
                                 $desktop.IconLocation = "$exePath,0"
                                 $desktop.Description = "Loxone Smart Home App"

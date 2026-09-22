@@ -54,7 +54,8 @@ NestedModules = @(
     '.\LoxoneUtils.NetworkCore.psm1',
     '.\LoxoneUtils.MiniserverHardware.psm1',
     '.\LoxoneUtils.MiniserverGeneration.psm1',
-    '.\LoxoneUtils.Monitor.psm1'
+    '.\LoxoneUtils.Monitor.psm1',
+    '.\LoxoneUtils.MSDebugCapture.psm1'
 )
 # Functions to export from this module
     FunctionsToExport = @(
@@ -227,7 +228,21 @@ NestedModules = @(
         'Get-LocalIPAddress',
         'Find-LxmonFiles',
         'Watch-MonitorLogs',
-        'Remove-OldMonitorLogs'
+        'Remove-OldMonitorLogs',
+
+        # LoxoneUtils.MSDebugCapture.psm1
+        'Get-MSDebugListenerIP',
+        'ConvertTo-MSDebugLines',
+        'Invoke-MSDebugApi',
+        'Get-MSDebugRightHint',
+        'Request-MSDebugStream',
+        'Get-MSDebugCaptureSummary',
+        'Enable-MSDebugStream',
+        'Disable-MSDebugStream',
+        'Get-MSExtendedLogging',
+        'Set-MSExtendedLogging',
+        'Start-MSDebugCapture',
+        'Stop-MSDebugCapture'
     )
 # Cmdlets to export from this module
 CmdletsToExport = @() # Explicitly export no cmdlets

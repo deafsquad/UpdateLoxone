@@ -1652,7 +1652,31 @@ if ($script:IsResuming -and $script:ResumeState.ContainsKey("manifests_created")
         # Clear the manifests state to force re-creation
         $script:ResumeState.Remove("manifests_created")
     } else {
-        Write-Host "Manifests were already created in previous run, skipping..." -ForegroundColor Green
+        # BUG 4 - THE MANIFEST HASH MUST MATCH THE ARTIFACT BEING UPLOADED, EVERY RUN.
+        # The v0.9.4 resume skipped manifest regeneration, so
+        # deafsquad.UpdateLoxone.installer.yaml still carried the DRY RUN's InstallerSha256
+        # (2A6B394D..) while the real MSI hashed to 3E32D531. Shipping that gives every
+        # winget user a hash-mismatch failure. It was caught by hand, by comparing the MSI
+        # on disk to the manifest before pushing - so make that comparison part of the run.
+        # The state-hash check above compares CODE; this compares the one value that must
+        # never be stale, and it is cheap.
+        # $installerManifestPath is the path this script itself writes (built at the top of
+        # this block). Do NOT re-derive it from a directory variable: the first version of
+        # this check invented $manifestOutputDir, which does not exist, so Join-Path
+        # produced a bare filename, Test-Path failed, and the check "passed" by regenerating
+        # every time - right answer, wrong reason, and it would have gone unnoticed.
+        $manifestHashOk = $false
+        if ($installerManifestPath -and (Test-Path $installerManifestPath)) {
+            $mh = Select-String -Path $installerManifestPath `
+                    -Pattern 'InstallerSha256:\s*([0-9A-Fa-f]+)' | Select-Object -First 1
+            if ($mh -and $mh.Matches[0].Groups[1].Value -eq $fileHash) { $manifestHashOk = $true }
+        }
+        if ($manifestHashOk) {
+            Write-Host "Manifests were already created in previous run, and InstallerSha256 matches the MSI - skipping..." -ForegroundColor Green
+        } else {
+            Write-Host "Manifest InstallerSha256 does NOT match the MSI being uploaded ($fileHash) - re-creating manifests." -ForegroundColor Yellow
+            $script:ResumeState.Remove("manifests_created")
+        }
     }
 }
 
@@ -2073,8 +2097,17 @@ END_CHANGELOG
                     $updatedChangelog = $before + $newChangelogSection
                 }
             } else {
-                # No Unreleased section found, add it after the header
-                $updatedChangelog = $fullChangelogContent -replace '(# Changelog.*?(?:\r?\n){2,})', "`$1$newChangelogSection`n`n"
+                # No Unreleased section found, add it after the header.
+                # BUG 3 - INSERT AFTER THE FIRST MATCH ONLY.
+                # PowerShell's -replace substitutes EVERY match. CHANGELOG.md had picked up
+                # THREE "# Changelog" headers (earlier runs spliced whole copies of the file
+                # into the middle of entries), so the release shipped with three copies of
+                # the new section until they were deduped by hand. It compounds: every
+                # future release writes N copies, N being the number of splices.
+                # [regex]::Replace with count=1 is the fix; the pattern is unchanged.
+                $rx = [regex]'(# Changelog.*?(?:\r?\n){2,})'
+                $updatedChangelog = $rx.Replace($fullChangelogContent,
+                    '$1' + $newChangelogSection + "`n`n", 1)
             }
             
             # Replace [Unreleased] with the actual version in the updated changelog
@@ -2133,23 +2166,62 @@ END_CHANGELOG
         }
     }
     
+    # BUG 1 - A HASH NO BRANCH CONTAINS IS NOT "ALREADY DONE".
+    # Recovering the interrupted v0.9.4 release: the resume path squashes by resetting
+    # master back to origin/master, then read the saved hash to decide the commit already
+    # existed. The hash was the DRY RUN's, so it logged "Using saved commit hash: a29dd58"
+    # and never committed - master sat at 21c1468 with all release content staged but
+    # UNCOMMITTED, and a29dd58 reachable only through the tag. One `git tag -d` from losing
+    # the work entirely.
+    # THE CHECK GATES THE BRANCH, it does not run inside it: flipping the state flag from
+    # within the "already committed" branch would skip the else that does the committing,
+    # and the run would proceed having committed nothing at all.
+    $savedCommitUsable = $false
+    if ($script:IsResuming -and $script:ResumeState.ContainsKey("commit_created") `
+            -and $script:ResumeState.commit_created -eq "true" `
+            -and $script:ResumeState.commit_hash) {
+        $savedHash = $script:ResumeState.commit_hash
+        git cat-file -e "$savedHash^{commit}" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            git merge-base --is-ancestor $savedHash HEAD 2>$null
+            $savedCommitUsable = ($LASTEXITCODE -eq 0)
+        }
+        if (-not $savedCommitUsable) {
+            Write-Host "Saved commit hash '$savedHash' is missing or NOT REACHABLE from HEAD - it was not created on this branch. Re-creating the release commit." -ForegroundColor Yellow
+            Set-ReleaseState -Key "commit_created" -Value "false"
+        }
+    }
+
     # Check if we've already committed
-    if ($script:IsResuming -and $script:ResumeState.ContainsKey("commit_created") -and $script:ResumeState.commit_created -eq "true") {
+    if ($savedCommitUsable) {
         Write-Host "Release commit was already created in previous run..." -ForegroundColor Green
         $releaseCommitHash = $script:ResumeState.commit_hash
-        Write-Host "Using saved commit hash: $releaseCommitHash" -ForegroundColor Gray
-        
+        Write-Host "Using saved commit hash: $releaseCommitHash (verified reachable from HEAD)" -ForegroundColor Gray
+
         # Check if it's been pushed
         if ((-not $script:ResumeState.ContainsKey("commit_pushed") -or $script:ResumeState.commit_pushed -ne "true") -and -not $DryRun) {
             Write-Host "Commit/tag not yet pushed, attempting push..." -ForegroundColor Yellow
             git push --follow-tags
-            if ($LASTEXITCODE -eq 0) {
-                Set-ReleaseState -Key "commit_pushed" -Value "true"
-                Set-ReleaseState -Key "tag_pushed" -Value "true"
-                Write-Host "Git push successful (commit and tag)." -ForegroundColor Green
-            } else {
+            if ($LASTEXITCODE -ne 0) {
                 Write-Error "Git push failed with exit code: $LASTEXITCODE"
                 Write-Error "You may need to run: git push --set-upstream origin <current-branch> --follow-tags"
+                exit 1
+            }
+            Set-ReleaseState -Key "commit_pushed" -Value "true"
+
+            # BUG 2 - DO NOT INFER SUCCESS FROM A PUSH THAT HAD NOTHING TO DO.
+            # `git push --follow-tags` returned "Everything up-to-date" (true: master had
+            # nothing new) and this logged "Git push successful (commit and tag)". The TAG
+            # was never pushed, and `gh release create` then failed with "tag v0.9.4 exists
+            # locally but has not been pushed". The message asserted something it had not
+            # checked. Push the tag EXPLICITLY and confirm it on the REMOTE.
+            git push origin "refs/tags/$tagName" 2>$null | Out-Null
+            $remoteTag = git ls-remote origin "refs/tags/$tagName" 2>$null
+            if ($remoteTag) {
+                Set-ReleaseState -Key "tag_pushed" -Value "true"
+                Write-Host "Git push successful; tag $tagName confirmed on origin." -ForegroundColor Green
+            } else {
+                Write-Error "Tag $tagName is NOT on origin after pushing - `gh release create` would fail. Push it manually: git push origin refs/tags/$tagName"
                 exit 1
             }
         }

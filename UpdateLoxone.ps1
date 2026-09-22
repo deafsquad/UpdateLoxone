@@ -89,7 +89,14 @@ param(
     [switch]$MonitorDiscoveryMode, # Enable extended .lxmon path discovery
     [switch]$SkipPostUpdateHook, # Skip the post-update hook that runs after the MS updates
     [string]$PostUpdateHook, # Path to the post-update hook script (default: post-update-hook.ps1 beside this script, or $env:UPDATELOXONE_POST_UPDATE_HOOK)
-    [switch]$VerboseHook # Log EVERY line the hook prints at INFO, not just the notable ones
+    [switch]$VerboseHook, # Log EVERY line the hook prints at INFO, not just the notable ones
+    [switch]$RunPostUpdateHook, # Run the post-update hook even when no Miniserver was updated in this run (normally it only runs after a real firmware change)
+    # OVERRIDE a FAILED precheck and run the pipeline anyway. The prechecks still RUN
+    # and still report FAIL with their expected/actual - this does not silence them,
+    # and the final summary says the run was FORCED so it cannot be mistaken for one
+    # that passed. Use when you want the update (and the post-update hook) despite the
+    # house not being in the state the precheck asks for.
+    [switch]$Force
 )
 # XML Signature Verification Function removed - Test showed it's not feasible with current structure
 
@@ -461,9 +468,11 @@ if ($script:InitialSystemInvocation) {
     $burntToastReady = $false
     $btTimeoutSec = 30
 
-    # Step 1: Install if not available
-    if (-not (Get-Module -ListAvailable -Name BurntToast)) {
-        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast not found. Installing (timeout: ${btTimeoutSec}s)..." -ForegroundColor Yellow
+    # Step 1: Install if no BurntToast 1.x is available. Single supported line since 2026-09-02:
+    # 0.x (with its -AppId parameter) is gone; branding comes from the AppUserModelId registration.
+    $btMinVersion = [version]'1.0.0'
+    if (-not (Get-Module -ListAvailable -Name BurntToast | Where-Object { $_.Version -ge $btMinVersion })) {
+        Write-Host "INFO: (UpdateLoxone.ps1) BurntToast $btMinVersion+ not found. Installing (timeout: ${btTimeoutSec}s)..." -ForegroundColor Yellow
         try {
             # Ensure NuGet provider is available (prevents interactive prompts that hang)
             if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
@@ -476,7 +485,7 @@ if ($script:InitialSystemInvocation) {
                 Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
             }
             $installJob = Start-Job -ScriptBlock {
-                Install-Module BurntToast -Scope CurrentUser -Force -Confirm:$false -SkipPublisherCheck -ErrorAction Stop
+                Install-Module BurntToast -MinimumVersion '1.0.0' -Scope CurrentUser -Force -Confirm:$false -SkipPublisherCheck -ErrorAction Stop
             }
             $completed = $installJob | Wait-Job -Timeout $btTimeoutSec
             if ($completed) {
@@ -497,29 +506,14 @@ if ($script:InitialSystemInvocation) {
     if (Get-Module -Name BurntToast) {
         $btMod = Get-Module -Name BurntToast
         Write-Host "INFO: (UpdateLoxone.ps1) BurntToast already loaded - version=$($btMod.Version), path=$($btMod.Path)" -ForegroundColor Green
+        if ($btMod.Version -lt $btMinVersion) { Write-Host "WARN: (UpdateLoxone.ps1) Loaded BurntToast $($btMod.Version) is below the supported 1.0 - Loxone toast branding needs 1.x." -ForegroundColor Yellow }
         $burntToastReady = $true
-    } elseif (Get-Module -ListAvailable -Name BurntToast) {
-        # Pick BurntToast version per host:
-        #  - PS 7+ (pwsh, often MSIX-packaged): prefer 1.x (uses ToastNotificationManagerCompat,
-        #    different code path that may behave better with WinRT under MSIX/Canary builds).
-        #  - PS 5.1 (powershell.exe, unpackaged): prefer 0.x — supports -AppId on Submit/Update-BTNotification
-        #    so toasts use Loxone Config branding.
-        # If preferred major isn't installed, fall back to whatever's available.
-        $preferredVersion = $null
+    } elseif (Get-Module -ListAvailable -Name BurntToast | Where-Object { $_.Version -ge $btMinVersion }) {
+        # Highest installed 1.x, on every PowerShell edition. (Until 2026-09-02 this preferred 0.8.5 on
+        # PS 5.1 for its -AppId parameter - a second code path that is gone now.)
         $availableVersions = @(Get-Module -ListAvailable -Name BurntToast | Sort-Object Version)
-        if ($PSVersionTable.PSVersion.Major -ge 7) {
-            $cand = $availableVersions | Where-Object { $_.Version.Major -ge 1 } | Select-Object -Last 1
-            $rationale = '1.x preferred for PS 7+ (different WinRT code path)'
-        } else {
-            $cand = $availableVersions | Where-Object { $_.Version.Major -eq 0 } | Select-Object -Last 1
-            $rationale = '0.x preferred for PS 5.1 (supports -AppId for Loxone branding)'
-        }
-        if ($cand) {
-            $preferredVersion = $cand.Version
-            Write-Host "INFO: (UpdateLoxone.ps1) PSVersion=$($PSVersionTable.PSVersion) - $rationale. Selecting BurntToast $preferredVersion (available: $(($availableVersions | ForEach-Object { $_.Version }) -join ', '))" -ForegroundColor Cyan
-        } else {
-            Write-Host "INFO: (UpdateLoxone.ps1) PSVersion=$($PSVersionTable.PSVersion) - preferred major not installed, falling back to default (latest available: $($availableVersions[-1].Version))" -ForegroundColor Yellow
-        }
+        $preferredVersion = ($availableVersions | Where-Object { $_.Version -ge $btMinVersion } | Select-Object -Last 1).Version
+        Write-Host "INFO: (UpdateLoxone.ps1) PSVersion=$($PSVersionTable.PSVersion) - selecting BurntToast $preferredVersion (available: $(($availableVersions | ForEach-Object { $_.Version }) -join ', '))" -ForegroundColor Cyan
         Write-Host "INFO: (UpdateLoxone.ps1) Importing BurntToast (timeout: ${btTimeoutSec}s)..." -ForegroundColor Cyan
         try {
             # Ensure ThreadJob module is available (PS7+ built-in, PS5.1 needs module)
@@ -570,7 +564,7 @@ if ($script:InitialSystemInvocation) {
             Write-Host "WARN: (UpdateLoxone.ps1) BurntToast import failed: $($_.Exception.Message)" -ForegroundColor Yellow
         }
     } else {
-        Write-Host "WARN: (UpdateLoxone.ps1) BurntToast module not available after install attempt." -ForegroundColor Yellow
+        Write-Host "WARN: (UpdateLoxone.ps1) BurntToast $btMinVersion+ not available after install attempt." -ForegroundColor Yellow
     }
 
     if (-not $burntToastReady) {
@@ -993,9 +987,11 @@ try {
     Write-Log -Message "Error during thread cleanup: $_. Continuing anyway..." -Level WARN
 }
 
-$Global:PersistentToastInitialized = $false 
-$script:ErrorOccurred = $false 
+$Global:PersistentToastInitialized = $false
+$script:ErrorOccurred = $false
 $script:LastErrorLine = 0
+$script:MSDebugCaptureOutcomes = @()      # one @{IP;Enabled;Rearmed;Reason} per Miniserver that went through Invoke-MSUpdate
+$script:MSDebugCaptureSummary = $null     # Get-MSDebugCaptureSummary result, appended to the final summary/toast
 
 $scriptGlobalState = [pscustomobject]@{
     CurrentWeight    = 0
@@ -1771,8 +1767,20 @@ try {
                         Write-Log -Message "(UpdateLoxone.ps1) Precheck [$status] $($r.Check): $($r.Description)$detail" -Level INFO
                     }
 
-                    if (-not $precheckResult.Passed) {
-                        Write-Log -Message "(UpdateLoxone.ps1) Prechecks FAILED. Config + MS updates blocked. App update will proceed." -Level WARN
+                    if (-not $precheckResult.Passed -and $Force) {
+                        # OVERRIDDEN, NOT SILENCED. The checks ran, they failed, and the log
+                        # says so - then says plainly that it is proceeding anyway. A -Force
+                        # that suppressed the FAIL would make the log lie about the state of
+                        # the house, which is worse than no gate at all.
+                        Write-Log -Message "(UpdateLoxone.ps1) Prechecks FAILED but -Force was given - PROCEEDING ANYWAY. Config + MS updates are NOT blocked." -Level WARN
+                        foreach ($f in ($precheckResult.Results | Where-Object { -not $_.Passed })) {
+                            Write-Log -Message "(UpdateLoxone.ps1)   OVERRIDDEN: $($f.Check) - $($f.Description) (expected: $($f.Expected), actual: $($f.Actual))" -Level WARN
+                        }
+                        $script:PrechecksForced = $true
+                        $script:PrecheckFailureSummary = $precheckResult.FailureSummary
+                    }
+                    elseif (-not $precheckResult.Passed) {
+                        Write-Log -Message "(UpdateLoxone.ps1) Prechecks FAILED. Config + MS updates blocked. App update will proceed. Re-run with -Force to override." -Level WARN
                         $script:PrechecksFailed = $true
                         $script:PrecheckFailureSummary = $precheckResult.FailureSummary
 
@@ -1982,7 +1990,13 @@ try {
             if ($msResult.Stage -eq 'Complete' -and $msTarget.Status -eq 'ErrorConnecting') {
                 Write-Log -Message "MS $($msResult.IP) was previously unreachable but succeeded in parallel workflow" -Level INFO
             }
-            
+
+            # Debug-stream capture outcome of this Miniserver (only present when Invoke-MSUpdate ran, i.e. an
+            # update was attempted). Collected for the run summary - see the MS debug capture block below.
+            if ($msResult.ContainsKey('DebugCapture') -and $msResult.DebugCapture) {
+                $script:MSDebugCaptureOutcomes += $msResult.DebugCapture
+            }
+
             if ($msResult.Success) {
                 # Check if it was already up to date or actually updated
                 if ($msResult.Status -eq "AlreadyCurrent") {
@@ -2035,7 +2049,18 @@ try {
             }
             } # End foreach msResultPair
         } # End miniserver results processing
-        
+
+        # MS debug capture coverage - LOUD, not an INFO line at 02:09. The 2026-09-22 upgrade captured
+        # one of three Miniservers (two answered Code 403) and nobody knew until the next morning.
+        # One line per run, WARN when any box was not captured, and the same text goes into the final
+        # summary/toast (see the finally block). Only Miniservers that went through Invoke-MSUpdate count.
+        if ($script:MSDebugCaptureOutcomes.Count -gt 0) {
+            $script:MSDebugCaptureSummary = Get-MSDebugCaptureSummary -Outcomes $script:MSDebugCaptureOutcomes
+            $rearmed = @($script:MSDebugCaptureOutcomes | Where-Object { $_.Rearmed -eq $true } | ForEach-Object { $_.IP })
+            $coverageText = "$($script:MSDebugCaptureSummary.Text)" + $(if ($rearmed.Count -gt 0) { "`n  re-armed after restart: $($rearmed -join ', ')" } else { '' })
+            Write-Log -Message "[MSDEBUG] $coverageText" -Level $(if ($script:MSDebugCaptureSummary.AllCovered) { 'INFO' } else { 'WARN' })
+        }
+
         Write-Log -Message "Parallel workflow completed. Success: $($parallelResult.Success), Duration: $([Math]::Round($parallelResult.TotalDuration, 1))s" -Level INFO
         
         if (-not $parallelResult.Success) {
@@ -2821,6 +2846,17 @@ if (-not $script:ErrorOccurred) {
     if ($script:PrechecksFailed -and $script:PrecheckFailureSummary) {
         $finalMessageText += "`n⛔ Blocked: $($script:PrecheckFailureSummary)"
     }
+    # A FORCED RUN MUST NOT READ LIKE A CLEAN ONE. Same contract as the WARN above: the
+    # precheck really did fail, and the summary a person actually reads has to say so.
+    elseif ($script:PrechecksForced -and $script:PrecheckFailureSummary) {
+        $finalMessageText += "`n⚠️ FORCED past failed precheck: $($script:PrecheckFailureSummary)"
+    }
+
+    # MS debug capture coverage: a refused capture is stated where a person actually reads, with the fix.
+    if ($script:MSDebugCaptureSummary) {
+        $icon = if ($script:MSDebugCaptureSummary.AllCovered) { '📡' } else { '⚠️' }
+        $finalMessageText += "`n$icon " + ($script:MSDebugCaptureSummary.Lines -join "`n")
+    }
 
     Write-Log -Message "Final Summary (Success/No Error):`n$finalMessageText" -Level INFO
     if (Get-Command Show-FinalStatusToast -ErrorAction SilentlyContinue) {
@@ -2919,10 +2955,25 @@ function Invoke-PostUpdateHook {
 
             # Failures are never demoted to DEBUG - the point is that whoever reads this
             # log afterwards can see what went wrong without re-running anything.
+            # CARRY THE REST OF THE SENTENCE. $notable matches PER LINE and the hook's
+            # tools write multi-line prose, so a match on the first line logged a clause
+            # with no predicate and demoted the rest to DEBUG. Seen in a real run:
+            #   hook: the 81 TEXT comparisons are all against the EMPTY STRING - the only
+            #         failure they can
+            # ...and the next INFO line was something else entirely. loxq was fixed to
+            # PRINT the whole sentence; this filter was re-truncating it one layer out.
+            # A trailing ':' counts as unfinished because it promises the list that
+            # follows. Bounded at 3 so a runaway cannot flood the log at INFO.
+            $unfinished = { param($x) $x = $x.TrimEnd(); $x -and ($x[-1] -notin '.', '!', '?') }
             if ($t -match 'ERROR|FAILED|Traceback|Exception') {
                 Write-Log -Message "(UpdateLoxone.ps1) hook: $t" -Level WARN
+                $script:HookCarry = if (& $unfinished $t) { 3 } else { 0 }
             } elseif ($AllVerbose -or $t -match $notable) {
                 Write-Log -Message "(UpdateLoxone.ps1) hook: $t" -Level INFO
+                $script:HookCarry = if (& $unfinished $t) { 3 } else { 0 }
+            } elseif ($script:HookCarry -gt 0) {
+                Write-Log -Message "(UpdateLoxone.ps1) hook: $t" -Level INFO
+                $script:HookCarry = if (& $unfinished $t) { $script:HookCarry - 1 } else { 0 }
             } else {
                 Write-Log -Message "(UpdateLoxone.ps1) hook: $t" -Level DEBUG
             }
@@ -2933,7 +2984,26 @@ function Invoke-PostUpdateHook {
     }
 }
 
-if (-not $SkipPostUpdateHook) {
+# Fence (2026-09-02): the hook exists to react to a Miniserver firmware that JUST CHANGED, so it only
+# runs when this run actually updated at least one Miniserver. A run that finds every Miniserver
+# already on the target build (or fails to update any) has nothing for the hook to react to, and
+# re-running it every time was pure cost. -Force (prechecks overridden, update wanted regardless)
+# and -RunPostUpdateHook (explicit) bypass the fence; -SkipPostUpdateHook still wins over both.
+$msUpdatedThisRun = @($UpdateTargetsInfo | Where-Object {
+    $_.Type -eq 'Miniserver' -and $_.UpdatePerformed -eq $true -and "$($_.Status)" -like 'UpdateSuccessful*'
+})
+$msAlreadyCurrent = @($UpdateTargetsInfo | Where-Object { $_.Type -eq 'Miniserver' -and $_.UpdatePerformed -ne $true }).Count
+$hookWanted = ($msUpdatedThisRun.Count -gt 0) -or $Force -or $RunPostUpdateHook
+if ($SkipPostUpdateHook) {
+    Write-Log -Message '(UpdateLoxone.ps1) post-update hook skipped (-SkipPostUpdateHook)' -Level INFO
+} elseif (-not $hookWanted) {
+    Write-Log -Message "(UpdateLoxone.ps1) post-update hook skipped: no Miniserver firmware changed in this run ($msAlreadyCurrent already current / not updated). Use -RunPostUpdateHook to run it anyway." -Level INFO
+} else {
+    if ($msUpdatedThisRun.Count -gt 0) {
+        Write-Log -Message "(UpdateLoxone.ps1) post-update hook wanted: $($msUpdatedThisRun.Count) Miniserver(s) updated this run ($(($msUpdatedThisRun | ForEach-Object { "$($_.Name) -> $($_.VersionAfterUpdate)" }) -join ', '))" -Level INFO
+    } else {
+        Write-Log -Message "(UpdateLoxone.ps1) post-update hook wanted by $(if ($Force) { '-Force' } else { '-RunPostUpdateHook' }) although no Miniserver changed in this run" -Level INFO
+    }
     try {
         # Explicit parameter wins, then the environment, then a file beside this script.
         # No absolute path is baked in: what the hook does and where it lives are the
@@ -2960,8 +3030,6 @@ if (-not $SkipPostUpdateHook) {
         Write-Log -Message "(UpdateLoxone.ps1) post-update hook errored: $($_.Exception.Message) - update itself is unaffected" -Level WARN
         Write-Log -Message "(UpdateLoxone.ps1) hook: $($_.ScriptStackTrace)" -Level DEBUG
     }
-} else {
-    Write-Log -Message '(UpdateLoxone.ps1) post-update hook skipped (-SkipPostUpdateHook)' -Level INFO
 }
 # ---------------------------------------------------------------------------
 

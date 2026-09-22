@@ -262,6 +262,8 @@ function Get-MiniserverVersion {
 
     $msIP = $null; $versionUri = $null; $credential = $null
     $originalCallback = $null; $callbackChanged = $false
+# Debug-stream capture state (see LoxoneUtils.MSDebugCapture.psm1). Restored/disabled in the finally.
+$debugStreamActive = $false; $debugStreamRearmed = $false; $debugFlagOld = $null; $debugFlagChanged = $false; $debugListenerIP = $null
     $oldProgressPreference = $ProgressPreference
 
     try {
@@ -1007,6 +1009,9 @@ Then, re-run this script.
     # Re-throw the original exception object to preserve its type and details for the caller (Update-MS)
     throw $CaughtError
 } finally {
+    # (The debug-capture teardown that used to sit here belonged to Invoke-MSUpdate - the
+    #  function that actually arms the stream - and has moved to its finally. It referenced
+    #  $schemeInInvoke etc., which do not exist in this scope, so it could never have run.)
     $ProgressPreference = $oldProgressPreference
     if ($callbackChanged) {
         Clear-CertificateValidationBypass
@@ -1341,7 +1346,8 @@ param(
     [Parameter()][scriptblock]$ProgressReporter = $null,
     [Parameter()][System.Collections.Concurrent.ConcurrentQueue[hashtable]]$ProgressQueue = $null, # REAL-TIME status updates
     [Parameter()][long]$ExpectedUpdSizeGen1 = 0, # Expected firmware .upd size (Gen1, from update XML) for x/y download progress
-    [Parameter()][long]$ExpectedUpdSizeGen2 = 0  # Expected firmware .upd size (Gen2, from update XML) for x/y download progress
+    [Parameter()][long]$ExpectedUpdSizeGen2 = 0, # Expected firmware .upd size (Gen2, from update XML) for x/y download progress
+    [Parameter()][switch]$CaptureDebugStream     # A run-wide UDP :7777 listener is up: enable this MS's debug stream (+ extended logging flag) for the update
 )
 # Immediate defensive check for PS7 parallel context issues
 if ($null -eq $MSUri) {
@@ -1405,6 +1411,10 @@ $invokeResult = [PSCustomObject]@{
     LastStatusCode = ''
     UpdateFailedReason = $null   # Authoritative failure reason read from the MS's own /log/def.log
     TriggerFailReason = $null    # Why the autoupdate trigger was rejected (XML Code != 200)
+    # Debug-stream capture outcome for THIS Miniserver, surfaced in the final run summary
+    # (Get-MSDebugCaptureSummary): Enabled = the MS streamed to our listener for this update,
+    # Rearmed = the stream was re-enabled after the restart, Reason = why it was NOT captured.
+    DebugCapture = [pscustomobject]@{ IP = $null; Enabled = $false; Rearmed = $false; Reason = 'capture not requested (no run-wide listener)' }
 }
 $originalCallback = $null; $callbackChanged = $false
 $oldProgressPreference = $ProgressPreference
@@ -1429,6 +1439,7 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     $uriObjectForInvoke = [System.Uri]$cleanMSUri
     $hostForPingInInvoke = $uriObjectForInvoke.Host
     $schemeInInvoke = $uriObjectForInvoke.Scheme
+    $invokeResult.DebugCapture.IP = $hostForPingInInvoke
     $verificationUriBuilder = [System.UriBuilder]$cleanMSUri; $verificationUriBuilder.Path = "/dev/cfg/version"
     $verificationUriForPolling = $verificationUriBuilder.Uri.AbsoluteUri
 
@@ -1461,6 +1472,36 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     if ($SkipCertificateCheck.IsPresent) {
         $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
         Set-CertificateValidationBypass; $callbackChanged = $true
+    }
+
+    # ---- Miniserver debug-stream capture (before the trigger, so the download/install start is on the record) ----
+    # Order: remember the extended-logging flag, set it to 1, point the MS's UDP debug stream at our listener.
+    # Everything here is best effort: Code 403 means the user lacks the debug-log right and the update
+    # simply proceeds without capture. The flag is PERSISTED on the MS (self-expires after 14 days), so
+    # the finally at the end of this function restores it; the stream does not survive the restart and
+    # is re-armed once the MS answers again (see the polling loop).
+    if ($CaptureDebugStream) {
+        try {
+            $debugListenerIP = Get-MSDebugListenerIP -TargetHost $hostForPingInInvoke
+            if ($debugListenerIP) {
+                $debugArgs = @{ Scheme = $schemeInInvoke; HostName = $hostForPingInInvoke; UserName = $UsernameForAuthHeader; Password = $PasswordForAuthHeader; SkipCertificateCheck = $SkipCertificateCheck.IsPresent }
+                $debugFlagOld = Get-MSExtendedLogging @debugArgs
+                if ($null -ne $debugFlagOld -and $debugFlagOld -ne 1) {
+                    $debugFlagChanged = Set-MSExtendedLogging @debugArgs -Value 1
+                } elseif ($null -eq $debugFlagOld) {
+                    Write-Log -Level INFO -Message "[MSDEBUG] $hostForPingInInvoke extended-logging flag not readable (no right or endpoint) - capturing at the level the operator set in Config"
+                }
+                $debugRequest = Request-MSDebugStream @debugArgs -ListenerIP $debugListenerIP
+                $debugStreamActive = [bool]$debugRequest.Enabled
+                $invokeResult.DebugCapture.Enabled = $debugStreamActive
+                $invokeResult.DebugCapture.Reason = if ($debugStreamActive) { $null } else { $debugRequest.Reason }
+            } else {
+                $invokeResult.DebugCapture.Reason = 'no local route IP toward the Miniserver for the listener'
+            }
+        } catch {
+            $invokeResult.DebugCapture.Reason = "capture setup failed: $($_.Exception.Message)"
+            Write-Log -Level WARN -Message "[MSDEBUG] $hostForPingInInvoke capture setup failed: $($_.Exception.Message) - continuing without capture"
+        }
     }
 
     # Trigger update with retry logic (5 attempts to allow VPN tunnels time to establish)
@@ -2096,6 +2137,12 @@ try { # Main try for ProgressPreference and SSL Callback restoration
                             -HostForLogging $hostForLogging -ProgressQueue $ProgressQueue -StatusUpdates $statusUpdates
                     }
 
+                    # Re-arm the debug stream once: the enable does not survive the restart, and the
+                    # first version answer after 'Updating'/unreachable means the MS is back.
+                    if ($debugStreamActive -and -not $debugStreamRearmed -and ($loggedUpdatingStatus -or $script:RebootDetected)) {
+                        $debugStreamRearmed = $true
+                        try { $invokeResult.DebugCapture.Rearmed = [bool](Enable-MSDebugStream -Scheme $schemeInInvoke -HostName $hostForPingInInvoke -UserName $UsernameForAuthHeader -Password $PasswordForAuthHeader -SkipCertificateCheck:$SkipCertificateCheck -ListenerIP $debugListenerIP) } catch { }
+                    }
                     if ($normalizedVersionCurrentPoll -eq $NormalizedDesiredVersion) {
                     $invokeResult.VerificationSuccess = $true; $invokeResult.StatusMessage = "UpdateSuccessful_VersionVerified"; $LastPollStatusMessage = ("OK - Version {0}" -f $NormalizedDesiredVersion)
                     
@@ -2500,6 +2547,27 @@ try { # Main try for ProgressPreference and SSL Callback restoration
     # Return result even on error
     return $invokeResult
 } finally {
+    # ---- Debug-capture teardown. THIS function arms the stream (setup above, re-arm in the
+    # polling loop), so THIS function's finally must disarm it - every exit path, including a
+    # throw. Best effort with short timeouts: on a failure path the MS may be unreachable.
+    # It used to sit in Test-LoxoneMiniserverUpdateLevel's finally, where the flags are the
+    # module-scope $false and the *InInvoke variables do not exist, so it never ran. Measured
+    # 2026-09-04: K3 - production - had streamed ~77 datagrams/s to this workstation for 58 h
+    # after its 2026-09-02 update, and /dev/cfg/loglevel was still 1 two days later. The
+    # "stream dies with the next restart" comfort is false for the copy the polling loop
+    # RE-ARMS after that restart - which is exactly the one that leaked.
+    if ($debugFlagChanged -or $debugStreamActive) {
+        try {
+            $dbgArgs = @{ Scheme = $schemeInInvoke; HostName = $hostForPingInInvoke; UserName = $UsernameForAuthHeader; Password = $PasswordForAuthHeader; SkipCertificateCheck = $SkipCertificateCheck.IsPresent }
+            if ($debugStreamActive) {
+                if (Disable-MSDebugStream @dbgArgs) { Write-Log -Level INFO -Message "[MSDEBUG] $hostForPingInInvoke debug stream disabled (teardown)" }
+                else { Write-Log -Level WARN -Message "[MSDEBUG] $hostForPingInInvoke debug stream NOT confirmed off - it may still be sending UDP to $debugListenerIP:7777; disable by hand: GET /dev/sps/log" }
+            }
+            if ($debugFlagChanged -and $null -ne $debugFlagOld) {
+                if (-not (Set-MSExtendedLogging @dbgArgs -Value $debugFlagOld)) { Write-Log -Level WARN -Message "[MSDEBUG] $hostForPingInInvoke extended-logging flag NOT restored to $debugFlagOld - it is PERSISTED on the MS; restore by hand: GET /dev/cfg/loglevel/$debugFlagOld" }
+            }
+        } catch { Write-Log -Level WARN -Message "[MSDEBUG] $hostForPingInInvoke capture teardown failed: $($_.Exception.Message) - the stream and/or the persisted loglevel may still be on" }
+    }
     $ProgressPreference = $oldProgressPreference
     if ($callbackChanged) {
         Write-Log -Message "Restoring original SSL/TLS certificate validation callback in Invoke-MSUpdate." -Level DEBUG

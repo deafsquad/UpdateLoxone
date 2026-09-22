@@ -293,6 +293,7 @@ function Start-ParallelWorkflow {
             }
         }
 
+        $debugCapture = $null   # Miniserver debug-stream capture handle (stopped in finally)
         # Start component workers - each handles its complete workflow
         if ($WorkflowDefinition.ConfigUpdate) {
             Write-Log "Starting Config worker..." -Level "INFO"
@@ -308,6 +309,17 @@ function Start-ParallelWorkflow {
         
         # Start miniserver worker if needed
         if ($WorkflowDefinition.MiniserverUpdates -and $WorkflowDefinition.MiniserverUpdates.Count -gt 0) {
+            # One UDP :7777 listener for ALL Miniservers of this run; every line is tagged with the sender IP.
+            # Each MS worker enables its own stream toward it (Invoke-MSUpdate -CaptureDebugStream).
+            try {
+                $logDir = if ($Global:LogFile) { Split-Path -Parent $Global:LogFile } else { Join-Path $PSScriptRoot '..\Logs' }
+                $runStamp = if ($Global:LogFile -and ([IO.Path]::GetFileNameWithoutExtension($Global:LogFile) -match '(\d{8}_\d{6})$')) { $matches[1] } else { Get-Date -Format 'yyyyMMdd_HHmmss' }
+                $debugCapture = Start-MSDebugCapture -OutputPath (Join-Path $logDir "msdebug_$runStamp.log")
+                $pipeline.CaptureDebugStream = [bool]$debugCapture
+            } catch {
+                Write-Log "[MSDEBUG] Could not start capture listener: $($_.Exception.Message) - continuing without capture" -Level "WARN"
+                $pipeline.CaptureDebugStream = $false
+            }
             Write-Log "Starting miniserver worker..." -Level "INFO"
             $msJob = Start-MiniserverWorker -WorkflowDefinition $WorkflowDefinition -Pipeline $pipeline -MaxConcurrency $MaxMSConcurrency -MSPreCheckJobs $MSPreCheckJobs -MSPreCheckJobsActive $MSPreCheckJobsActive
             $allJobs += $msJob
@@ -340,6 +352,8 @@ function Start-ParallelWorkflow {
         Write-Log "Error in parallel workflow: $_" -Level "ERROR"
         throw
     } finally {
+        # Stop the Miniserver debug capture listener (workers have already disabled their streams)
+        if ($debugCapture) { Stop-MSDebugCapture -Handle $debugCapture }
         # Cleanup - clear ALL parallel env vars to prevent leaks between runs in same session
         Remove-Item env:LOXONE_PARALLEL_MODE -ErrorAction SilentlyContinue
         Remove-Item env:LOXONE_PARALLEL_WORKER -ErrorAction SilentlyContinue
@@ -1311,7 +1325,8 @@ function Start-ComponentWorker {
                                         $shell = New-Object -ComObject WScript.Shell
                                         $shortcut = $shell.CreateShortcut($startMenuShortcut)
                                         $shortcut.TargetPath = $exePath
-                                        $shortcut.Arguments = "--disable-gpu --disable-software-rasterizer"
+                                        # cleared: --disable-gpu forced the app to software-render
+                                        $shortcut.Arguments = ""
                                         $shortcut.IconLocation = "$exePath,0"
                                         $shortcut.Save()
                                         [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
@@ -1324,7 +1339,8 @@ function Start-ComponentWorker {
                                         $shell = New-Object -ComObject WScript.Shell
                                         $shortcut = $shell.CreateShortcut($desktopShortcut)
                                         $shortcut.TargetPath = $exePath
-                                        $shortcut.Arguments = "--disable-gpu --disable-software-rasterizer"
+                                        # cleared: --disable-gpu forced the app to software-render
+                                        $shortcut.Arguments = ""
                                         $shortcut.IconLocation = "$exePath,0"
                                         $shortcut.Save()
                                         [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) | Out-Null
@@ -1831,7 +1847,8 @@ function Start-InstallWorker {
                                                         
                                                         # Update shortcut properties
                                                         $shortcut.TargetPath = $exePath
-                                                        $shortcut.Arguments = "--disable-gpu --disable-software-rasterizer"
+                                                        # cleared: --disable-gpu forced the app to software-render
+                                                        $shortcut.Arguments = ""
                                                         $shortcut.WorkingDirectory = Split-Path $exePath -Parent
                                                         $shortcut.IconLocation = "$exePath,0"
                                                         $shortcut.Description = "Loxone Smart Home App"
@@ -1865,7 +1882,8 @@ function Start-InstallWorker {
                                                     $desktop = $shell2.CreateShortcut($desktopShortcut)
                                                     
                                                     $desktop.TargetPath = $exePath
-                                                    $desktop.Arguments = "--disable-gpu --disable-software-rasterizer"
+                                                    # cleared: --disable-gpu forced the app to software-render
+                                                    $desktop.Arguments = ""
                                                     $desktop.WorkingDirectory = Split-Path $exePath -Parent
                                                     $desktop.IconLocation = "$exePath,0"
                                                     $desktop.Description = "Loxone Smart Home App"
@@ -2676,9 +2694,9 @@ function Start-MiniserverWorker {
                                 $fwSizeGen2 = if ($ms.FirmwareSizeGen2) { [long]$ms.FirmwareSizeGen2 } else { 0L }
 
                                 if (-not $EnforceSSL) {
-                                    $updateResult = Invoke-MSUpdate -MSUri $updateUri -NormalizedDesiredVersion $targetVersion -UsernameForAuthHeader $usernameForAuth -PasswordForAuthHeader $passwordForAuth -SkipCertificateCheck -ProgressQueue $progressQueueForUpdate -ExpectedUpdSizeGen1 $fwSizeGen1 -ExpectedUpdSizeGen2 $fwSizeGen2
+                                    $updateResult = Invoke-MSUpdate -MSUri $updateUri -NormalizedDesiredVersion $targetVersion -UsernameForAuthHeader $usernameForAuth -PasswordForAuthHeader $passwordForAuth -SkipCertificateCheck -ProgressQueue $progressQueueForUpdate -ExpectedUpdSizeGen1 $fwSizeGen1 -ExpectedUpdSizeGen2 $fwSizeGen2 -CaptureDebugStream:([bool]$Pipeline.CaptureDebugStream)
                                 } else {
-                                    $updateResult = Invoke-MSUpdate -MSUri $updateUri -NormalizedDesiredVersion $targetVersion -UsernameForAuthHeader $usernameForAuth -PasswordForAuthHeader $passwordForAuth -ProgressQueue $progressQueueForUpdate -ExpectedUpdSizeGen1 $fwSizeGen1 -ExpectedUpdSizeGen2 $fwSizeGen2
+                                    $updateResult = Invoke-MSUpdate -MSUri $updateUri -NormalizedDesiredVersion $targetVersion -UsernameForAuthHeader $usernameForAuth -PasswordForAuthHeader $passwordForAuth -ProgressQueue $progressQueueForUpdate -ExpectedUpdSizeGen1 $fwSizeGen1 -ExpectedUpdSizeGen2 $fwSizeGen2 -CaptureDebugStream:([bool]$Pipeline.CaptureDebugStream)
                                 }
 
                                 # Debug logging for StatusUpdates
@@ -2827,6 +2845,7 @@ function Start-MiniserverWorker {
                                     Success = $true
                                     OldVersion = $currentVersion
                                     NewVersion = $newVersion
+                                    DebugCapture = $updateResult.DebugCapture   # surfaced in the final run summary
                                 })
                             } else {
                                 # Update failed or timed out
@@ -2859,6 +2878,7 @@ function Start-MiniserverWorker {
                                     OldVersion = $currentVersion
                                     NewVersion = if ($updateResult.ReportedVersion) { $updateResult.ReportedVersion } else { $currentVersion }
                                     ReportedVersion = $updateResult.ReportedVersion
+                                    DebugCapture = $updateResult.DebugCapture   # surfaced in the final run summary
                                 })
                             }
                     
